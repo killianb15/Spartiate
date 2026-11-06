@@ -32,6 +32,14 @@ Options :
 - **Fedora** : `sudo dnf install python3`
 - **Arch** : `sudo pacman -S python`
 
+## Touches
+
+Bouton **Configurer les touches** dans le menu (ou **Touches** dans le menu pause) :
+clique sur une case puis appuie sur la touche voulue. Chaque action a deux touches
+possibles par joueur ; `Suppr` vide une case, `Échap` annule. Les réglages sont
+gardés dans le navigateur. En solo et en ligne, les touches des deux joueurs
+contrôlent ton personnage.
+
 ## Jouer en ligne (réseau local)
 
 1. Celui qui crée la partie lance le jeu ; le terminal affiche une adresse du type
