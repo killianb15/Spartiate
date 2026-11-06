@@ -949,12 +949,24 @@ class FighterView {
     this.seenReset = -1; this.seenAnim = '';
     this.px = this.py = this.pz = 0;       // position à l'image de simulation précédente (interpolation)
     this.rx = this.ry = this.rz = 0;       // position affichée
+    this.vx = this.vy = this.vz = 0;       // déplacement par image de simulation (pour estimer où on aurait dû être)
+    this.ox = this.oy = this.oz = 0;       // écart de correction (rollback) qui s'efface en douceur à l'affichage
     this.snapPos = true;
   }
   dispose() { scene.remove(this.root, this.ring); }
 
   // à appeler avant chaque image de simulation
-  capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
+  capture(sf) {
+    this.vx = sf.x - this.px; this.vy = sf.y - this.py; this.vz = sf.z - this.pz;
+    this.px = sf.x; this.py = sf.y; this.pz = sf.z;
+  }
+  // Un rollback a déplacé ce combattant : plutôt que de le téléporter, on garde l'ancienne position
+  // affichée et on la résorbe en ~0,1 s. (sf : état corrigé ; la position attendue = ancienne + vitesse.)
+  absorb(sf) {
+    const dx = this.px + this.vx - sf.x, dy = this.py + this.vy - sf.y, dz = this.pz + this.vz - sf.z;
+    if (Math.hypot(dx, dy, dz) > 4) return;      // vraie téléportation du jeu (nouvelle manche, resynchronisation) : pas de lissage
+    this.ox += dx; this.oy += dy; this.oz += dz;
+  }
 
   applyReset(sf) {
     this.model.rotation.set(0, sf.yaw, 0);
@@ -997,17 +1009,19 @@ class FighterView {
   }
 
   // sf : état de simulation de ce combattant ; dt : durée « de jeu » écoulée (ralenti/arrêt sur image inclus)
-  render(sf, dt, T, alpha) {
+  render(sf, dt, T, alpha, rdt = dt) {
     if (sf.resetN !== this.seenReset) { this.seenReset = sf.resetN; this.applyReset(sf); this.seenAnim = ''; }
     const key = sf.animN + '|' + sf.anim + '|' + sf.animTs;
     if (key !== this.seenAnim) {
       this.seenAnim = key;
       this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: sf.animFade });
     }
-    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.snapPos = false; }
-    this.rx = this.px + (sf.x - this.px) * alpha;
-    this.ry = this.py + (sf.y - this.py) * alpha;
-    this.rz = this.pz + (sf.z - this.pz) * alpha;
+    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.ox = this.oy = this.oz = 0; this.snapPos = false; }
+    const k = Math.exp(-rdt * 14);               // l'écart de correction fond (≈ 70 ms)
+    this.ox *= k; this.oy *= k; this.oz *= k;
+    this.rx = this.px + (sf.x - this.px) * alpha + this.ox;
+    this.ry = this.py + (sf.y - this.py) * alpha + this.oy;
+    this.rz = this.pz + (sf.z - this.pz) * alpha + this.oz;
     this.stars.visible = sf.state === 'stun';
     if (sf.state === 'brk' && sf.stateT < BRK.start) {
       this.flashCol.setRGB(1, 0.42, 0.05);
@@ -1320,7 +1334,9 @@ function togglePause() {
 function simTick() {
   for (let i = 0; i < 2; i++) F[i]?.capture(sim.f[i]);
   if (rb) {
+    const rollbacks = rb.stats.rollbacks;
     if (!rb.tick(localInput(net.me))) return false;
+    if (rb.stats.rollbacks !== rollbacks) F.forEach((f, i) => f.absorb(sim.f[i]));
     playEvents(rb.takeEvents());
     return true;
   }
@@ -1456,7 +1472,7 @@ function step(rdt) {
   }
   const g = sim.g, alpha = Math.min(1, acc / DT);
   const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
-  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha));
+  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha, rdt));
   for (const u of updaters) u(rdt, clockT);
   updateParticles(rdt);
   updateRings(rdt);
