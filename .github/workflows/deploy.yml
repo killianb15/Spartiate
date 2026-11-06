@@ -50,7 +50,7 @@ jobs:
       - name: Vérifier que le jeu répond
         run: |
           ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
-            for i in $(seq 1 10); do
+            for i in $(seq 1 90); do
               curl -fsS -o /dev/null http://127.0.0.1:'"${APP_PORT}"'/ && echo "OK" && exit 0
               sleep 1
             done

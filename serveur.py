@@ -21,6 +21,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
 
+MAX_MSG = 64 * 1024     # taille max d'un message WebSocket (les messages du jeu font < 2 Ko)
+MAX_ROOMS = 200         # parties simultanées
+MAX_CONNS = 500         # connexions WebSocket simultanées
+conns = 0
+
 rooms = {}          # code -> {'host': Conn, 'guest': Conn | None}
 lock = threading.Lock()
 
@@ -85,6 +90,8 @@ class Conn:
                 n = struct.unpack('!H', self.rfile.read(2))[0]
             elif n == 127:
                 n = struct.unpack('!Q', self.rfile.read(8))[0]
+            if n > MAX_MSG or len(buf) + n > MAX_MSG:
+                return None        # message trop gros : on coupe la connexion
             mask = self.rfile.read(4) if head[1] & 0x80 else None
             data = self.rfile.read(n)
             if len(data) < n:
@@ -133,6 +140,9 @@ def leave(c):
 def create(c):
     leave(c)
     with lock:
+        if len(rooms) >= MAX_ROOMS:
+            c.send_json(t='error', msg='Le serveur est complet, réessaie plus tard.')
+            return
         code = ''.join(random.choice(LETTERS) for _ in range(4))
         while code in rooms:
             code = ''.join(random.choice(LETTERS) for _ in range(4))
@@ -147,7 +157,7 @@ def join(c, code):
     with lock:
         r = rooms.get(code)
         if not r:
-            err = 'Aucune partie avec le code « %s ».' % code
+            err = 'Aucune partie avec ce code.'
         elif r['guest']:
             err = 'Cette partie est déjà complète.'
         else:
@@ -188,6 +198,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
                           f'Sec-WebSocket-Accept: {accept}\r\n\r\n').encode())
         self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        global conns
+        with lock:
+            if conns >= MAX_CONNS:
+                return
+            conns += 1
         c = Conn(self)
         try:
             while True:
@@ -209,6 +224,8 @@ class Handler(SimpleHTTPRequestHandler):
         except OSError:
             pass
         finally:
+            with lock:
+                conns -= 1
             leave(c)
             self.close_connection = True
 
