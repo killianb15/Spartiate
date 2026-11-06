@@ -10,6 +10,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,9 @@ LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
 MAX_MSG = 64 * 1024     # taille max d'un message WebSocket (les messages du jeu font < 2 Ko)
 MAX_ROOMS = 200         # parties simultanées
 MAX_CONNS = 500         # connexions WebSocket simultanées
+RATE_LIMIT = 240        # messages/s par connexion en moyenne (le jeu : ~60 inputs/s + signalisation WebRTC)
+RATE_BURST = 480        # rafale maximale tolérée (capacité du seau)
+RATE_ABUSE = 20         # au-delà de RATE_ABUSE x RATE_LIMIT messages ignorés en 1 s : connexion fermée
 conns = 0
 
 rooms = {}          # code -> {'host': Conn, 'guest': Conn | None}
@@ -58,6 +62,24 @@ class Conn:
         self.wlock = threading.Lock()
         self.room = None
         self.is_host = False
+        self.tokens = float(RATE_BURST)
+        self.last = time.monotonic()
+        self.drop_start = self.last
+        self.drops = 0
+
+    def allow(self):
+        """Token bucket. Renvoie True si le message est accepté, False s'il doit être ignoré,
+        None en cas d'abus massif (la connexion doit être fermée)."""
+        now = time.monotonic()
+        self.tokens = min(RATE_BURST, self.tokens + (now - self.last) * RATE_LIMIT)
+        self.last = now
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        if now - self.drop_start > 1:
+            self.drop_start, self.drops = now, 0
+        self.drops += 1
+        return None if self.drops > RATE_ABUSE * RATE_LIMIT else False
 
     def send(self, data, op=0x81):
         if isinstance(data, str):
@@ -209,6 +231,11 @@ class Handler(SimpleHTTPRequestHandler):
                 msg = c.recv()
                 if msg is None:
                     break
+                ok = c.allow()
+                if ok is None:
+                    break              # abus massif : on coupe
+                if not ok:
+                    continue           # débit dépassé : message ignoré
                 other = peer_of(c)
                 if other:
                     other.send(msg)       # partie en cours : on relaie tel quel

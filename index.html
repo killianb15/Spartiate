@@ -26,6 +26,7 @@
     font-family: 'Barlow Condensed', system-ui, sans-serif; user-select: none; }
   canvas { display: block; position: fixed; inset: 0; }
   .hidden { display: none !important; }
+  #netStat { position: fixed; left: 12px; bottom: 8px; z-index: 5; font-size: 14px; letter-spacing: .04em; color: var(--muted); opacity: .6; pointer-events: none; }
   button { font: inherit; color: inherit; cursor: pointer; }
 
   /* ---------- Loading ---------- */
@@ -302,6 +303,7 @@
   </div>
 </div>
 
+<div id="netStat"></div>
 <script type="module" src="game.js"></script>
 </body>
 </html>
