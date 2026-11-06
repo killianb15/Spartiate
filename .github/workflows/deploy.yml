@@ -14,7 +14,20 @@ env:
   APP_PORT: "8123"
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests de la simulation et du rollback
+        run: node --test tests/*.test.js
+      - name: Tests du serveur
+        run: python3 -m unittest discover -s tests -v
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +47,7 @@ jobs:
           rsync -az --delete \
             --exclude '.git' --exclude '.github' --exclude 'deploy' \
             --exclude '*.zip' --exclude '*.bat' \
+            --exclude 'tests' --exclude 'package.json' --exclude '__pycache__' --exclude 'node_modules' \
             ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${APP_DIR}/"
 
       - name: Installer le service et redémarrer

@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { Sim, DT, PRESS, NEUTRAL, quant, BRK, ROLL, STA } from './sim.js';
+import { AI } from './ai.js';
+import { Rollback } from './rollback.js';
+import { Link } from './net.js';
 
 // =====================================================================
 //  Utilitaires
@@ -13,17 +17,14 @@ const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const lerpAng = (a, b, t) => a + wrap(b - a) * t;
 const TAU = Math.PI * 2;
 const S = 1.5;            // échelle des décors (1 tuile Kenney = 1.5 unités)
-const FIGHT_R = 7;        // rayon de la zone de combat
 const CAM_R = 9.2;        // la caméra reste à l'intérieur des murs
-const ROUND_TIME = 60;
 const v1 = new THREE.Vector3();
 const q1 = new THREE.Quaternion();
 const q2 = new THREE.Quaternion();
 
-// En ligne : l'hôte simule tout, et enregistre les effets (sons, particules, animations…)
-// pour que l'invité les rejoue à l'identique.
-const net = { ws: null, role: null, me: 0, live: false, mute: false, ev: [], code: '', urls: [], peer: false, peerKind: null, presses: [] };
-function rec(k, a) { if (net.live && net.role === 'host' && !net.mute) net.ev.push([k, a]); }
+// En ligne : les deux navigateurs font tourner la même simulation (sim.js) et s'échangent
+// leurs touches ; rollback.js corrige les prédictions. Voir net.js pour le transport.
+const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null };
 
 // =====================================================================
 //  Modèles
@@ -133,7 +134,6 @@ const sfx = {
   thunder: (d) => { noise(3, { freq: 160, type: 'lowpass', vol: 0.9, attack: 0.05, delay: d }); noise(0.5, { freq: 900, type: 'lowpass', vol: 0.4, delay: d }); },
   coin: () => { tone(1320, 0.12, { type: 'square', vol: 0.05 }); tone(1760, 0.2, { type: 'square', vol: 0.05, delay: 0.07 }); },
 };
-for (const k of Object.keys(sfx)) { const f = sfx[k]; sfx[k] = (...a) => { rec('sfx', [k, ...a]); f(...a); }; }
 
 // =====================================================================
 //  Particules, anneaux, textes
@@ -149,7 +149,6 @@ const dummy = new THREE.Object3D();
 
 // o.dir : direction privilégiée {x, z}
 function emit(x, y, z, n, o = {}) {
-  rec('emit', [x, y, z, n, o]);
   const colors = Array.isArray(o.color) ? o.color : [o.color ?? 0xffffff];
   for (let i = 0; i < n; i++) {
     if (parts.length >= PMAX) parts.shift();
@@ -194,7 +193,6 @@ const ringGeo = new THREE.RingGeometry(0.82, 1, 48);
 const rings = [];
 // anneau d'onde de choc ; face à la caméra sauf s'il est posé au sol
 function ring(x, y, z, color, maxS = 1.6, life = 0.35, flat = false, opacity = 1) {
-  rec('ring', [x, y, z, color, maxS, life, flat, opacity]);
   const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
   m.position.set(x, y, z);
   if (flat) m.rotation.x = -Math.PI / 2;
@@ -214,7 +212,6 @@ function updateRings(dt) {
 }
 
 function pop(text, x, y, z, cls = '') {
-  rec('pop', [text, x, y, z, cls]);
   const d = document.createElement('div');
   d.className = 'pop ' + cls;
   d.textContent = text;
@@ -226,7 +223,6 @@ function pop(text, x, y, z, cls = '') {
 }
 let annT = 0;
 function announce(text, cls = '', dur = 1.2) {
-  rec('announce', [text, cls, dur]);
   const a = $('announce');
   a.textContent = text;
   a.className = '';
@@ -890,19 +886,14 @@ function buildArena(id) {
 // =====================================================================
 //  Combattants
 // =====================================================================
-const ATK = { start: 0.13, end: 0.26, chain: 0.27, dur: 0.42, track: 0.09 };
-const BRK = { start: 0.34, end: 0.47, dur: 0.8 };
-const PAR = { win: 0.2, dur: 0.42 };
-const ROLL = { dur: 0.48, inv0: 0.03, inv1: 0.36, speed: 7.5 };
-// endurance : chaque action en consomme, elle remonte quand on souffle un peu
-const STA = { regen: 30, delay: 0.7, atk: 9, brk: 22, roll: 28, jump: 12, par: 10, tired: 15 };
-const HIT_W = 0.72;   // demi-largeur de la zone touchée : un pas de côté suffit pour esquiver
 const qBlock = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.1, -1.2, -0.35));
 const ringFoot = new THREE.RingGeometry(0.42, 0.56, 36).rotateX(-Math.PI / 2);
 const starGeo = new THREE.OctahedronGeometry(0.075);
 const starMat = new THREE.MeshBasicMaterial({ color: 0xffe14a, toneMapped: false });
 
-class Fighter {
+// Vue d'un combattant : modèle 3D, animations et effets visuels. Tout ce qui touche au
+// gameplay est dans sim.js ; ici on ne fait que LIRE l'état de la simulation (sf).
+class FighterView {
   constructor(idx, kind) {
     this.idx = idx;
     this.kind = kind;
@@ -942,31 +933,34 @@ class Fighter {
       this.stars.add(s);
     }
     this.stars.position.y = 1.6;
+    this.stars.visible = false;
     this.root.add(this.stars);
     this.flashCol = new THREE.Color(1, 1, 1);
     this.cur = null;
-    this.reset(idx ? 2.6 : -2.6, 0, idx ? -Math.PI / 2 : Math.PI / 2);
+    this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0;
+    this.seenReset = -1; this.seenAnim = '';
+    this.px = this.py = this.pz = 0;       // position à l'image de simulation précédente (interpolation)
+    this.rx = this.ry = this.rz = 0;       // position affichée
+    this.snapPos = true;
   }
   dispose() { scene.remove(this.root, this.ring); }
-  get fx() { return Math.sin(this.yaw); }
-  get fz() { return Math.cos(this.yaw); }
 
-  reset(x, z, yaw) {
-    rec('reset', [this.idx, x, z, yaw]);
-    Object.assign(this, {
-      x, z, y: 0, vx: 0, vz: 0, vy: 0, yaw, vyaw: yaw, hp: 100, guard: 100, state: 'idle', stateT: 0, dur: 0,
-      sta: 100, staT: 9, staFail: 0, hitDone: false, airAtk: false, airAtkT: 0, flash: 0, shieldGlow: 0, bw: 0, flinch: 0, guardT: 9, dustT: 0, combo: 0, brkSfx: false,
-    });
-    this.stars.visible = false;
-    this.model.rotation.set(0, yaw, 0);
+  // à appeler avant chaque image de simulation
+  capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
+
+  applyReset(sf) {
+    this.model.rotation.set(0, sf.yaw, 0);
     this.pivot.quaternion.identity();
     this.mixer.stopAllAction();
     this.cur = null;
+    this.flash = this.flinch = this.shieldGlow = 0;
+    this.vyaw = sf.yaw;
+    this.stars.visible = false;
+    this.snapPos = true;
     this.play('idle', { fade: 0 });
     this.mixer.update(rand(0, 1));
   }
   play(name, o = {}) {
-    rec('play', [this.idx, name, o]);
     const a = this.actions[name];
     if (!a) return;
     const ts = o.ts ?? 1;
@@ -982,211 +976,55 @@ class Fighter {
     else if (prev && prev !== a) prev.stop();
     this.cur = a;
   }
-  setState(s, dur = 0) { this.state = s; this.stateT = 0; this.dur = dur; }
-  toIdle() { this.setState('idle'); this.play('idle', { fade: 0.15 }); }
-  startAttack(chain = false) {
-    this.combo = chain ? this.combo + 1 : 1;
-    this.setState('attack');
-    this.hitDone = false;
-    this.play(this.combo === 2 ? 'attack-melee-left' : 'attack-melee-right', { loop: false, restart: true, fade: 0.05 });
-    sfx.swing();
-  }
-  startBreak() {
-    this.setState('brk');
-    this.hitDone = false;
-    this.brkSfx = false;
-    this.play('attack-kick-right', { loop: false, restart: true, ts: 0.62, fade: 0.08 });
-  }
-  startParry() {
-    this.setState('parry');
-    this.shieldGlow = 1;
-    this.play('idle', { fade: 0.05 });
-  }
-  doJump(mx, mz) {
-    this.setState('air');
-    this.vy = 8.2;
-    this.vx = mx * 3.3; this.vz = mz * 3.3;
-    this.airAtk = false;
-    this.play('jump', { loop: false, fade: 0.06 });
-    sfx.jump();
-    emit(this.x, 0.05, this.z, 6, { color: [0xc8a070, 0xa88050], speed: 1.4, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
-  }
-  canRoll() { return this.sta >= STA.roll; }
-  spend(cost) {
-    if (this.sta < cost) {
-      if (this.staFail <= 0) pop('ÉPUISÉ', this.x, this.y + 1.8, this.z, 'miss');
-      this.staFail = 0.5;
-      return false;
+  // effets visuels déclenchés par la simulation (événements 'fx')
+  fx(kind) {
+    switch (kind) {
+      case 'hit': this.flashCol.setRGB(1, 1, 1); this.flash = 1; this.flinch = 1; break;
+      case 'gbreak': this.flashCol.setRGB(1, 0.55, 0.1); this.flash = 1; break;
+      case 'blocked': this.flinch = 0.35; this.shieldGlow = 0.6; break;
+      case 'parried': this.shieldGlow = 1.5; break;
+      case 'parryUp': this.shieldGlow = 1; break;
+      case 'noFlinch': this.flinch = 0; break;
     }
-    this.sta -= cost; this.staT = 0;
-    return true;
   }
-  startRoll(mx, mz) {
-    let dx = mx, dz = mz;
-    if (Math.hypot(dx, dz) < 0.1) { dx = -this.fx; dz = -this.fz; }   // sans direction : roulade en arrière
-    const n = Math.hypot(dx, dz);
-    this.rollDir = { x: dx / n, z: dz / n };
-    this.setState('roll');
-    this.flinch = 0; this.airAtk = false;
-    this.play('crouch', { fade: 0.05 });
-    sfx.roll();
-    emit(this.x, 0.05, this.z, 7, { color: [0xc8a070, 0xa88050], speed: 1.6, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
-  }
-  stun(d) {
-    this.setState('stun', d);
-    this.airAtk = false;
-    this.stars.visible = true;
-    this.play('emote-no', { ts: 0.55, fade: 0.08 });
-  }
-  die() {
-    this.setState('dead');
-    this.airAtk = false;
-    this.stars.visible = false;
-    this.play('die', { loop: false, fade: 0.06 });
-  }
-  win() { this.setState('win'); this.play('emote-yes', { fade: 0.2 }); }
 
-  update(dt, inp, opp, canAct) {
-    this.stateT += dt;
-    const st = this.state;
-    const mx = canAct ? inp.mx : 0, mz = canAct ? inp.mz : 0;
-    const moving = Math.hypot(mx, mz) > 0.1;
-    const grounded = this.y <= 0;
-    const toOpp = Math.atan2(opp.x - this.x, opp.z - this.z);
-    const dOpp = Math.hypot(opp.x - this.x, opp.z - this.z);
-    // verrouillage : on fait toujours face à l'adversaire, sauf pendant un coup déjà lancé
-    const track = (st === 'idle' || st === 'walk' || st === 'block' || st === 'air' || st === 'parry' || (st === 'attack' && this.stateT < ATK.track));
-    if (track && dOpp > 0.05) this.yaw = lerpAng(this.yaw, toOpp, Math.min(1, dt * 20));
-    let visYaw = this.yaw;
-
-    switch (st) {
-      case 'idle': case 'walk': case 'block': {
-        if (!canAct) { this.vx = this.vz = 0; if (st !== 'idle') this.toIdle(); break; }
-        if (inp.take('roll') && this.spend(STA.roll)) { this.startRoll(mx, mz); break; }
-        if (inp.take('brk') && this.spend(STA.brk)) { this.startBreak(); break; }
-        if (inp.take('atk') && this.spend(STA.atk)) { this.startAttack(); break; }
-        if (inp.take('par') && this.spend(STA.par)) { this.startParry(); break; }
-        if (inp.take('jump') && this.spend(STA.jump)) { this.doJump(mx, mz); break; }
-        if (inp.blk) {
-          if (st !== 'block') { this.setState('block'); this.play('idle', { ts: 0.5 }); }
-          this.vx = mx * 1.1; this.vz = mz * 1.1;
-          break;
-        }
-        const spd = this.sta < STA.tired ? 2.5 : 3.4;
-        this.vx = mx * spd; this.vz = mz * spd;
-        if (moving) {
-          if (st !== 'walk') this.setState('walk');
-          const fwd = mx * this.fx + mz * this.fz;
-          const back = fwd < -0.35;
-          this.play('walk', { ts: back ? -1.05 : 1.25 });
-          // le corps s'oriente un peu dans le sens du pas de côté
-          const k = back ? -0.35 : 0.35;
-          visYaw = Math.atan2(this.fx + mx * k, this.fz + mz * k);
-          this.dustT -= dt;
-          if (this.dustT < 0) { this.dustT = 0.22; emit(this.x, 0.05, this.z, 1, { color: 0xc8a070, speed: 0.6, up: 0.6, size: 0.07, life: 0.45, grav: 2 }); }
-        } else if (st !== 'idle') this.toIdle();
-        break;
-      }
-      case 'attack': {
-        const t = this.stateT;
-        if (t > 0.06 && t < 0.2) { this.vx = this.fx * 2.6; this.vz = this.fz * 2.6; }
-        else { const k = Math.exp(-dt * 12); this.vx *= k; this.vz *= k; }
-        if (canAct && t > ATK.chain && this.combo < 3 && inp.take('atk') && this.spend(STA.atk)) { this.yaw = toOpp; this.startAttack(true); break; }
-        if (canAct && t > ATK.end && inp.take('roll') && this.spend(STA.roll)) { this.startRoll(mx, mz); break; }
-        if (t >= ATK.dur) { this.combo = 0; this.toIdle(); }
-        break;
-      }
-      case 'brk': {
-        const t = this.stateT;
-        if (t > 0.26 && t < 0.42) { this.vx = this.fx * 3.2; this.vz = this.fz * 3.2; }
-        else { const k = Math.exp(-dt * 12); this.vx *= k; this.vz *= k; }
-        if (t < BRK.start) { this.flashCol.setRGB(1, 0.42, 0.05); this.flash = Math.max(this.flash, 0.35 + 0.3 * Math.sin(t * 45)); }
-        if (!this.brkSfx && t > 0.26) { this.brkSfx = true; sfx.heavy(); }
-        if (t >= BRK.dur) this.toIdle();
-        break;
-      }
-      case 'parry': {
-        const k = Math.exp(-dt * 12); this.vx *= k; this.vz *= k;
-        if (this.stateT >= PAR.dur) this.toIdle();
-        break;
-      }
-      case 'hit': {
-        const k = Math.exp(-dt * 7); this.vx *= k; this.vz *= k;
-        // on peut se sortir d'un enchaînement par une roulade
-        if (canAct && grounded && this.stateT > 0.1 && inp.take('roll') && this.spend(STA.roll)) { this.startRoll(mx, mz); break; }
-        if (this.stateT >= this.dur && grounded) this.toIdle();
-        break;
-      }
-      case 'roll': {
-        const t = this.stateT, sp = ROLL.speed * (1 - 0.75 * t / ROLL.dur);
-        this.vx = this.rollDir.x * sp; this.vz = this.rollDir.z * sp;
-        this.dustT -= dt;
-        if (this.dustT < 0) { this.dustT = 0.06; emit(this.x, 0.05, this.z, 1, { color: 0xc8a070, speed: 0.5, up: 0.5, size: 0.08, life: 0.4, grav: 2 }); }
-        if (t >= ROLL.dur) this.toIdle();
-        break;
-      }
-      case 'stun': {
-        const k = Math.exp(-dt * 7); this.vx *= k; this.vz *= k;
-        if (this.stateT >= this.dur && grounded) { this.stars.visible = false; this.toIdle(); }
-        break;
-      }
-      case 'air':
-        if (canAct) {
-          const k = Math.min(1, dt * 3);
-          this.vx += (mx * 3.3 - this.vx) * k;
-          this.vz += (mz * 3.3 - this.vz) * k;
-          if (!this.airAtk && inp.take('atk') && this.spend(STA.atk)) {
-            this.airAtk = true; this.airAtkT = 0; this.hitDone = false;
-            this.play('attack-melee-right', { loop: false, restart: true, fade: 0.04 });
-            sfx.swing();
-          }
-        }
-        if (this.airAtk) this.airAtkT += dt;
-        else if (this.vy < 0 && this.cur !== this.actions.fall) this.play('fall', { fade: 0.15 });
-        break;
-      case 'dead': {
-        const k = Math.exp(-dt * 5); this.vx *= k; this.vz *= k;
-        break;
-      }
+  // sf : état de simulation de ce combattant ; dt : durée « de jeu » écoulée (ralenti/arrêt sur image inclus)
+  render(sf, dt, T, alpha) {
+    if (sf.resetN !== this.seenReset) { this.seenReset = sf.resetN; this.applyReset(sf); this.seenAnim = ''; }
+    const key = sf.animN + '|' + sf.anim + '|' + sf.animTs;
+    if (key !== this.seenAnim) {
+      this.seenAnim = key;
+      this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: sf.animFade });
     }
-    this.visTarget = visYaw;
-
-    if (this.state === 'air' || this.y > 0) {
-      this.vy -= 24 * dt;
-      this.y += this.vy * dt;
-      if (this.y <= 0) {
-        this.y = 0; this.vy = 0;
-        emit(this.x, 0.05, this.z, 8, { color: [0xc8a070, 0xa88050], speed: 1.8, up: 0.7, size: 0.08, life: 0.5, grav: 3 });
-        if (this.state === 'air') { this.airAtk = false; sfx.land(); this.toIdle(); }
-      }
+    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.snapPos = false; }
+    this.rx = this.px + (sf.x - this.px) * alpha;
+    this.ry = this.py + (sf.y - this.py) * alpha;
+    this.rz = this.pz + (sf.z - this.pz) * alpha;
+    this.stars.visible = sf.state === 'stun';
+    if (sf.state === 'brk' && sf.stateT < BRK.start) {
+      this.flashCol.setRGB(1, 0.42, 0.05);
+      this.flash = Math.max(this.flash, 0.35 + 0.3 * Math.sin(sf.stateT * 45));
     }
-    this.x += this.vx * dt;
-    this.z += this.vz * dt;
-    const r = Math.hypot(this.x, this.z);
-    if (r > FIGHT_R) { this.x *= FIGHT_R / r; this.z *= FIGHT_R / r; }
-
-    this.guardT += dt;
-    if (this.state !== 'block' && this.guardT > 0.9) this.guard = Math.min(100, this.guard + 24 * dt);
-    this.staT += dt;
-    this.staFail = Math.max(0, this.staFail - dt);
-    if (this.staT > STA.delay && this.state !== 'roll') this.sta = Math.min(100, this.sta + STA.regen * dt * (this.state === 'block' ? 0.5 : 1));
+    this.mixer.update(dt);
+    this.pose(sf, dt, T);
   }
 
-  pose(dt, T) {
-    const wantB = (this.state === 'block' || this.state === 'parry') ? 1 : 0;
-    this.bw += (wantB - this.bw) * Math.min(1, dt * (this.state === 'parry' ? 32 : 16));
+  pose(sf, dt, T) {
+    const st = sf.state;
+    const wantB = (st === 'block' || st === 'parry') ? 1 : 0;
+    this.bw += (wantB - this.bw) * Math.min(1, dt * (st === 'parry' ? 32 : 16));
     if (this.bw > 0.01) this.armL.quaternion.slerp(qBlock, this.bw);
     if (this.flinch > 0) { this.torso.rotateX(-0.55 * this.flinch); this.flinch = Math.max(0, this.flinch - dt * 4); }
 
-    this.vyaw = lerpAng(this.vyaw, this.visTarget ?? this.yaw, Math.min(1, dt * 14));
+    this.vyaw = lerpAng(this.vyaw, sf.visTarget, Math.min(1, dt * 14));
     this.model.rotation.y = this.vyaw;
-    this.model.rotation.z = this.state === 'stun' ? Math.sin(T * 7) * 0.1 : 0;
-    if (this.state === 'roll') {
-      const k = Math.min(1, this.stateT / (ROLL.dur * 0.85));
-      v1.set(this.rollDir.z, 0, -this.rollDir.x);
+    this.model.rotation.z = st === 'stun' ? Math.sin(T * 7) * 0.1 : 0;
+    if (st === 'roll') {
+      const k = Math.min(1, sf.stateT / (ROLL.dur * 0.85));
+      v1.set(sf.rdz, 0, -sf.rdx);
       this.pivot.quaternion.setFromAxisAngle(v1, (1 - (1 - k) * (1 - k)) * TAU);
     } else this.pivot.quaternion.identity();
-    this.root.position.set(this.x, this.y, this.z);
+    this.root.position.set(this.rx, this.ry, this.rz);
     this.root.updateMatrixWorld(true);
     this.armL.getWorldQuaternion(q1);
     this.model.getWorldQuaternion(q2);
@@ -1195,26 +1033,21 @@ class Fighter {
     this.flash = Math.max(0, this.flash - dt * 4);
     for (const m of this.mats) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
     this.shieldGlow = Math.max(0, this.shieldGlow - dt * 3);
-    const bg = this.state === 'block' ? 0.12 : 0;
+    const bg = st === 'block' ? 0.12 : 0;
     for (const m of this.shieldMats) m.emissive.setRGB(0.5 * this.shieldGlow + bg * 0.4, 0.8 * this.shieldGlow + bg * 0.7, this.shieldGlow + bg);
 
     this.stars.rotation.y = T * 5;
-    this.ring.position.set(this.x, 0.03, this.z);
-    this.ring.material.opacity = this.state === 'dead' ? 0 : 0.75 - Math.min(0.5, this.y * 0.25);
+    this.ring.position.set(this.rx, 0.03, this.rz);
+    this.ring.material.opacity = st === 'dead' ? 0 : 0.75 - Math.min(0.5, this.ry * 0.25);
   }
 }
 
 // =====================================================================
 //  Entrées
 // =====================================================================
-class Input {
-  constructor() { this.buf = { atk: 0, par: 0, brk: 0, jump: 0, roll: 0 }; this.clear(); }
-  peek(a) { return this.buf[a] > 0; }
-  press(a) { this.buf[a] = 0.18; }
-  take(a) { if (this.buf[a] > 0) { this.buf[a] = 0; return true; } return false; }
-  tick(dt) { for (const k in this.buf) this.buf[k] = Math.max(0, this.buf[k] - dt); }
-  clear() { for (const k in this.buf) this.buf[k] = 0; this.l = this.r = this.u = this.d = this.blk = false; this.mx = this.mz = 0; }
-}
+// Touches maintenues et touches pressées depuis la dernière image de simulation
+const held = [{}, {}];
+const pending = [0, 0];   // bits PRESS
 
 // Chaque action a 2 emplacements de touche (null = vide). En solo et en ligne,
 // les deux jeux de touches contrôlent le même personnage.
@@ -1261,7 +1094,6 @@ function setupBindings(mode, me = 0) {
   });
 }
 const down = new Set();
-const inputs = [new Input(), new Input()];
 
 // étiquettes des touches selon la disposition réelle du clavier (AZERTY par défaut)
 let layout = null;
@@ -1309,222 +1141,48 @@ addEventListener('keydown', (e) => {
   if (e.repeat) return;
   down.add(e.code);
   const b = bindings.get(e.code);
-  if (b && !game.paused) for (const [pl, act] of b) if (act in inputs[pl].buf) {
-    inputs[pl].press(act);
-    if (net.live && net.role === 'guest') net.presses.push(act);
-  }
+  if (b && !game.paused) for (const [pl, act] of b) if (act in PRESS) pending[pl] |= PRESS[act];
 });
 addEventListener('keyup', (e) => down.delete(e.code));
 addEventListener('blur', () => down.clear());
 
 // déplacements relatifs à la caméra : ← → le long de l'écran, ↑ ↓ en profondeur (pas de côté)
-function readHeld() {
-  const human = (pl) => net.live ? pl === net.me : !(pl === 1 && ai) && !(pl === 0 && ai0);
-  inputs.forEach((inp, pl) => { if (human(pl)) for (const k of HELD) inp[k] = false; });
+// Entrée d'un joueur pour la prochaine image de simulation (déplacement quantifié, identique chez les deux joueurs)
+function localInput(pl) {
+  const h = held[pl];
+  for (const k of HELD) h[k] = false;
   if (!game.paused) for (const code of down) {
     const b = bindings.get(code);
     if (!b) continue;
-    for (const [pl, act] of b) if (human(pl) && HELD.includes(act)) inputs[pl][act] = true;
+    for (const [p, act] of b) if (p === pl && HELD.includes(act)) h[act] = true;
   }
   const rx = Math.cos(camAng), rz = -Math.sin(camAng);   // droite de l'écran
   const fx = -Math.sin(camAng), fz = -Math.cos(camAng);  // vers le fond de l'écran
-  inputs.forEach((inp, pl) => {
-    if (!human(pl)) return;
-    const h = (inp.r ? 1 : 0) - (inp.l ? 1 : 0), v = (inp.u ? 1 : 0) - (inp.d ? 1 : 0);
-    let mx = rx * h + fx * v, mz = rz * h + fz * v;
-    const n = Math.hypot(mx, mz);
-    if (n > 1) { mx /= n; mz /= n; }
-    inp.mx = mx; inp.mz = mz;
-  });
-}
-
-// =====================================================================
-//  IA
-// =====================================================================
-const AIL = [
-  { react: 0.42, block: 0.28, parry: 0.05, dodge: 0.1, aggr: 0.3, brk: 0.3, roll: 0.12 },
-  { react: 0.26, block: 0.42, parry: 0.16, dodge: 0.18, aggr: 0.45, brk: 0.5, roll: 0.3 },
-  { react: 0.15, block: 0.48, parry: 0.3, dodge: 0.2, aggr: 0.6, brk: 0.72, roll: 0.45 },
-];
-class AI {
-  constructor(me, opp, lv) { this.me = me; this.opp = opp; this.L = AIL[lv]; this.think = 0.4; this.blkT = 0; this.move = null; this.moveT = 0; this.sd = 1; }
-  roll(inp, ux, uz) {
-    this.sd = Math.random() < 0.5 ? 1 : -1;
-    const side = Math.random() < 0.6;
-    this.go(side ? 'side' : 'out', 0.2);
-    inp.mx = side ? -uz * this.sd : -ux; inp.mz = side ? ux * this.sd : -uz;
-    inp.press('roll');
-  }
-  go(kind, t) { this.move = kind; this.moveT = t; if (kind === 'side' && Math.random() < 0.5) this.sd = -this.sd; }
-  update(dt, inp) {
-    const me = this.me, o = this.opp, L = this.L;
-    this.think -= dt; this.blkT -= dt; this.moveT -= dt;
-    if (this.moveT <= 0) this.move = null;
-    const dx = o.x - me.x, dz = o.z - me.z, dist = Math.hypot(dx, dz) || 0.001;
-    const ux = dx / dist, uz = dz / dist;
-    let mx = 0, mz = 0;
-    if (this.move === 'in') { mx = ux; mz = uz; }
-    else if (this.move === 'out') { mx = -ux; mz = -uz; }
-    else if (this.move === 'side') { mx = -uz * this.sd; mz = ux * this.sd; }
-    // près du bord : on tourne au lieu de reculer dans le mur
-    const r = Math.hypot(me.x, me.z);
-    if (r > FIGHT_R - 0.8 && (mx * me.x + mz * me.z) > 0) { mx = -uz * this.sd; mz = ux * this.sd; }
-    inp.mx = mx; inp.mz = mz;
-    inp.blk = this.blkT > 0;
-    if (this.think > 0) return;
-    this.think = L.react * rand(0.7, 1.3);
-    const p = Math.random();
-    // prise dans un enchaînement : roulade sur le côté ou en arrière
-    if (me.state === 'hit' && me.canRoll() && p < L.roll) { this.roll(inp, ux, uz); return; }
-    if (!['idle', 'walk', 'block', 'air', 'attack'].includes(me.state)) return;
-    if (me.state === 'air') { if (dist < 1.6 && p < 0.6) inp.press('atk'); return; }
-    const threat = (o.state === 'attack' && o.stateT < 0.17) || (o.state === 'air' && o.airAtk && o.airAtkT < 0.15);
-    if (threat && dist < 2.0) {
-      if (p < L.parry) inp.press('par');
-      else if (p < L.parry + L.block) this.blkT = 0.45;
-      else if (p < L.parry + L.block + L.dodge) this.go('side', 0.35);
-      else if (p < L.parry + L.block + L.dodge + 0.1) this.go('out', 0.3);
-      return;
-    }
-    if (o.state === 'brk' && o.stateT < BRK.start && dist < 2.0) {
-      if (p < L.roll * 0.5 && me.canRoll()) this.roll(inp, ux, uz);
-      else if (p < L.block * 0.6) inp.press('jump');
-      else if (p < L.block) this.go('side', 0.45);
-      else if (p < L.block + 0.25 && dist < 1.4) inp.press('atk');
-      else this.blkT = 0.4;
-      return;
-    }
-    if ((o.state === 'stun' || o.state === 'hit') && dist < 1.8) { if (dist > 1.3) this.go('in', 0.15); inp.press('atk'); return; }
-    if (o.state === 'block' && dist < 1.5 && p < L.brk) { inp.press('brk'); return; }
-    if (dist > 1.45) {
-      this.go(Math.random() < 0.25 ? 'side' : 'in', rand(0.2, 0.5));
-      if (p < 0.05) inp.press('jump');
-      return;
-    }
-    if (dist < 0.85 && p < 0.2) { this.go('out', rand(0.15, 0.3)); return; }
-    if (p < L.aggr) { inp.press(Math.random() < 0.78 ? 'atk' : 'brk'); return; }
-    if (p < L.aggr + 0.15) { this.blkT = rand(0.3, 0.7); return; }
-    if (p < L.aggr + 0.3) this.go('side', rand(0.3, 0.6));
-    else if (p < L.aggr + 0.38) this.go('out', rand(0.2, 0.4));
-  }
-}
-
-// =====================================================================
-//  Résolution des coups
-// =====================================================================
-function crowdCheer(a) { rec('cheer', [a]); if (crowd) crowd.cheer(a); }
-
-function resolve(att, def) {
-  if (def.state === 'dead' || att.hitDone) return;
-  if (def.state === 'roll' && def.stateT > ROLL.inv0 && def.stateT < ROLL.inv1) return;  // invincible pendant la roulade
-  let kind = null;
-  const t = att.stateT;
-  if (att.state === 'attack' && t >= ATK.start && t <= ATK.end) kind = 'light';
-  else if (att.state === 'brk' && t >= BRK.start && t <= BRK.end) kind = 'brk';
-  else if (att.state === 'air' && att.airAtk && att.airAtkT >= 0.08 && att.airAtkT <= 0.32) kind = 'air';
-  if (!kind) return;
-  const fx = att.fx, fz = att.fz;
-  const dx = def.x - att.x, dz = def.z - att.z, dy = def.y - att.y;
-  const along = dx * fx + dz * fz, lateral = Math.abs(dx * fz - dz * fx);
-  if (along < -0.25 || along > (kind === 'brk' ? 1.3 : 1.45)) return;
-  if (kind === 'air' ? (dy > 0.6 || dy < -1.7) : Math.abs(dy) > 0.9) return;
-  const reach = Math.min(Math.max(along, 0.3), 0.75);
-  const cx = att.x + fx * reach, cy = Math.max(att.y, def.y) + 0.85, cz = att.z + fz * reach;
-  if (lateral > HIT_W) {
-    // le coup passe à côté : esquive par un pas de côté (seulement si on était à portée)
-    if (along > 0.2 && lateral < HIT_W + 0.8) { att.hitDone = true; pop('ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); sfx.dodge(); }
-    return;
-  }
-  att.hitDone = true;
-  const facingOk = def.fx * fx + def.fz * fz < -0.2;
-
-  if (kind === 'brk') {
-    if (def.y > 0.35) { pop('ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); sfx.dodge(); return; }
-    if (def.state === 'block' || def.state === 'parry') { guardBreak(att, def, cx, cy, cz, 6); return; }
-    damage(att, def, 14, 5.5, 0.45, cx, cy, cz);
-    return;
-  }
-  if (def.state === 'parry' && def.stateT <= PAR.win && facingOk) { parried(att, def, cx, cy, cz); return; }
-  if (def.state === 'block' && facingOk) { blocked(att, def, kind === 'air' ? 34 : 22, cx, cy, cz); return; }
-  damage(att, def, kind === 'air' ? 11 : 9, 3.2, 0.3, cx, cy, cz);
-}
-
-function push(f, dirF, speed) { f.vx = dirF.fx * speed; f.vz = dirF.fz * speed; }
-
-function damage(att, def, dmg, knock, dur, cx, cy, cz) {
-  if (def.state === 'stun') dmg = Math.round(dmg * 1.25);
-  def.hp = Math.max(0, def.hp - dmg);
-  def.flashCol.setRGB(1, 1, 1); def.flash = 1; def.flinch = 1;
-  push(def, att, knock);
-  def.airAtk = false;
-  emit(cx, cy, cz, 16, { color: [0xffffff, 0xffe27a, 0xff6a4a], speed: 4, up: 3, size: 0.09, life: 0.45, dir: { x: att.fx, z: att.fz }, grav: 9 });
-  ring(cx, cy, cz, 0xffffff, 0.9, 0.18);
-  pop(`-${dmg}`, def.x, def.y + 1.75, def.z, 'dmg');
-  sfx.hit();
-  game.shake = Math.max(game.shake, 0.12);
-  crowdCheer(0.35 + dmg / 30);
-  if (def.hp <= 0) {
-    def.die();
-    push(def, att, 5);
-    game.hitstop = 0.22;
-    endRound(att.idx, 'K.O. !');
-    return;
-  }
-  game.hitstop = 0.07;
-  if (def.state === 'stun') def.dur = Math.max(def.dur, def.stateT + 0.35);
-  else { def.setState('hit', dur); def.play('idle', { fade: 0.05 }); }
-}
-
-function blocked(att, def, cost, cx, cy, cz) {
-  def.guard -= cost; def.guardT = 0;
-  push(def, att, 2.4); push(att, att, -1.4);
-  def.flinch = 0.35; def.shieldGlow = 0.6;
-  emit(cx, cy, cz, 12, { color: [0xffe27a, 0xffffff, 0xffb02e], speed: 5, up: 2.5, size: 0.06, life: 0.35, dir: { x: -att.fx, z: -att.fz }, grav: 12 });
-  sfx.clang();
-  game.hitstop = 0.05;
-  game.shake = Math.max(game.shake, 0.06);
-  if (def.guard <= 0) guardBreak(att, def, cx, cy, cz, 0);
-  else crowdCheer(0.15);
-}
-
-function guardBreak(att, def, cx, cy, cz, dmg) {
-  def.guard = 0; def.guardT = 0;
-  def.hp = Math.max(0, def.hp - dmg);
-  push(def, att, 4);
-  def.flashCol.setRGB(1, 0.55, 0.1); def.flash = 1;
-  emit(cx, cy, cz, 22, { color: [0x6fc3ff, 0xffffff, 0xffb04a], speed: 5, up: 3.5, size: 0.1, life: 0.7, dir: { x: att.fx, z: att.fz }, grav: 10 });
-  ring(cx, cy, cz, 0xffb04a, 2, 0.4);
-  pop('GARDE BRISÉE !', def.x, def.y + 2.0, def.z, 'brk');
-  sfx.brk();
-  game.hitstop = 0.13;
-  game.shake = Math.max(game.shake, 0.25);
-  crowdCheer(0.8);
-  if (def.hp <= 0) { def.die(); endRound(att.idx, 'K.O. !'); return; }
-  def.stun(1.15);
-}
-
-function parried(att, def, cx, cy, cz) {
-  att.stun(0.95);
-  push(att, att, -2.6);
-  def.toIdle();
-  def.guard = Math.min(100, def.guard + 20);
-  def.shieldGlow = 1.5;
-  emit(cx, cy, cz, 20, { color: [0x8fd8ff, 0xffffff], speed: 4.5, up: 2.5, size: 0.08, life: 0.5, grav: 4 });
-  ring(cx, cy, cz, 0x8fd8ff, 2.4, 0.45);
-  ring(cx, cy, cz, 0xffffff, 1.2, 0.25);
-  pop('PARADE !', def.x, def.y + 2.0, def.z, 'parry');
-  sfx.parry();
-  game.hitstop = 0.14;
-  game.slow = 0.4; game.slowT = 0.35;
-  game.shake = Math.max(game.shake, 0.1);
-  crowdCheer(0.7);
+  const hh = (h.r ? 1 : 0) - (h.l ? 1 : 0), v = (h.u ? 1 : 0) - (h.d ? 1 : 0);
+  let mx = rx * hh + fx * v, mz = rz * hh + fz * v;
+  const n = Math.hypot(mx, mz);
+  if (n > 1) { mx /= n; mz /= n; }
+  const press = pending[pl];
+  pending[pl] = 0;
+  return { mx: quant(mx), mz: quant(mz), blk: !!h.blk, press };
 }
 
 // =====================================================================
 //  Déroulement du match
 // =====================================================================
-const game = { phase: 'loading', round: 1, wins: [0, 0], timer: ROUND_TIME, t: 0, slow: 1, slowT: 0, hitstop: 0, shake: 0, paused: false, roundWinner: -1, flags: {} };
-let F = [];
+let sim = new Sim(1);          // simulation du combat (remplacée à chaque match)
+let rb = null;                 // rollback réseau (en ligne uniquement)
+// État de la partie côté interface ; le reste est lu dans la simulation (sim.g)
+const game = {
+  loading: true, paused: false, shake: 0,
+  get phase() { return this.loading ? 'loading' : sim.g.phase; },
+  get round() { return sim.g.round; },
+  get wins() { return sim.wins; },
+  get timer() { return sim.g.timer; },
+  get t() { return sim.g.t; },
+  get roundWinner() { return sim.g.roundWinner; },
+};
+let F = [];                    // vues des combattants
 let ai = null;
 let ai0 = null;
 const DEMO = new URLSearchParams(location.search).has('demo');
@@ -1539,7 +1197,7 @@ let match = null;           // réglages du combat en cours (en ligne : choisis 
 
 function makeFighters(p1 = cfg.p1, p2 = cfg.p2) {
   F.forEach((f) => f.dispose());
-  F = [new Fighter(0, p1), new Fighter(1, p2)];
+  F = [new FighterView(0, p1), new FighterView(1, p2)];
 }
 // aperçu du menu : en ligne, on montre le personnage choisi par l'adversaire
 function menuFighters() {
@@ -1550,15 +1208,37 @@ function menuFighters() {
   placeStart(1.4);
 }
 function placeStart(gap) {
-  F[0].reset(-gap, 0, Math.PI / 2);
-  F[1].reset(gap, 0, -Math.PI / 2);
+  sim.placeStart(gap);
   camAng = 0;
+}
+
+// Ce que la simulation veut faire voir/entendre (elle-même ne touche ni au son ni à l'affichage)
+function playEvents(evs) {
+  for (const e of evs) {
+    switch (e[0]) {
+      case 'sfx': sfx[e[1]]?.(...e.slice(2)); break;
+      case 'emit': emit(e[1], e[2], e[3], e[4], e[5]); break;
+      case 'ring': ring(e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8]); break;
+      case 'pop': pop(e[1], e[2], e[3], e[4], e[5]); break;
+      case 'announce': announce(e[1], e[2], e[3]); break;
+      case 'cheer': crowd?.cheer(e[1]); break;
+      case 'fx': F[e[1]]?.fx(e[2]); break;
+      case 'shake': game.shake = Math.max(game.shake, e[1]); break;
+      case 'ko': arenaHooks.ko?.(); break;
+      case 'round':
+        ai?.reset(); ai0?.reset();
+        camAng = 0;
+        if (e[1] > 1) snapCamera();
+        $('roundLbl').textContent = `ROUND ${e[1]} / 3`;
+        break;
+      case 'end': endMatch(); break;
+    }
+  }
 }
 
 function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.arena }) {
   match = m;
   net.live = m.mode === 'online';
-  net.ev = []; net.presses = [];
   ac();
   game.paused = false;
   ['menu', 'result', 'pause'].forEach((id) => $(id).classList.add('hidden'));
@@ -1567,57 +1247,29 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   $('help').innerHTML = controlsHTML(m.mode, true);
   setupBindings(m.mode, net.live ? net.me : 0);
   if (curArena !== m.arena) buildArena(m.arena);
+  const seed = (m.seed ?? Math.random() * 4294967296) >>> 0;
+  sim = new Sim(seed);
   makeFighters(m.p1, m.p2);
-  ai = m.mode === 'solo' ? new AI(F[1], F[0], +cfg.diff) : null;
-  ai0 = DEMO && !net.live ? new AI(F[0], F[1], 2) : null;
+  ai = m.mode === 'solo' ? new AI(sim, 1, +cfg.diff, seed ^ 0x9e3779b9) : null;
+  ai0 = DEMO && !net.live ? new AI(sim, 0, 2, seed ^ 0x85ebca6b) : null;
   const tags = { solo: [' (Toi)', ' (IA)'], duo: [' (J1)', ' (J2)'], online: net.me ? [' (Hôte)', ' (Toi)'] : [' (Toi)', ' (Invité)'] }[m.mode];
   $('n1').textContent = CHARS[m.p1] + tags[0];
   $('n2').textContent = CHARS[m.p2] + tags[1];
-  game.wins = [0, 0];
-  game.round = 1;
-  if (net.live && net.role === 'guest') {
-    // l'invité ne simule rien : il affiche l'état envoyé par l'hôte
-    Object.assign(game, { phase: 'intro', t: 0, flags: {}, timer: ROUND_TIME, slow: 1, slowT: 0, hitstop: 0 });
-    inputs.forEach((i) => i.clear());
-    placeStart(2.6);
-    $('fade').classList.remove('on');
-    $('roundLbl').textContent = 'ROUND 1 / 3';
-  } else startRound();
+  $('fade').classList.remove('on');
+  pending[0] = pending[1] = 0;
+  sim.startMatch();
+  playEvents(sim.ev);
+  sim.ev.length = 0;
+  rb = net.live ? new Rollback(sim, {
+    me: net.me,
+    send: (msg, reliable) => (net.link ? net.link.send(msg, reliable) : netSend(msg)),
+    onDesync: (d) => console.warn('Désynchronisation détectée à l\'image', d.frame, d.me === 0 ? '(resynchronisation envoyée)' : ''),
+  }) : null;
+  acc = 0;
   snapCamera();
 }
 
-function startRound() {
-  placeStart(2.6);
-  game.phase = 'intro';
-  game.t = 0;
-  game.flags = {};
-  game.timer = ROUND_TIME;
-  game.slow = 1; game.slowT = 0; game.hitstop = 0;
-  inputs.forEach((i) => i.clear());
-  if (ai) { ai.blkT = 0; ai.move = null; ai.think = 0.4; }
-  if (ai0) { ai0.blkT = 0; ai0.move = null; ai0.think = 0.4; }
-  if (game.round > 1) snapCamera();
-  $('fade').classList.remove('on');
-  $('roundLbl').textContent = `ROUND ${game.round} / 3`;
-  announce(game.round === 3 ? 'ROUND FINAL' : `ROUND ${game.round}`, '', 1.25);
-  sfx.gong();
-}
-
-function endRound(winner, text) {
-  if (game.phase !== 'fight') return;
-  game.phase = 'ko';
-  game.t = 0;
-  game.flags = {};
-  game.roundWinner = winner;
-  if (winner >= 0) game.wins[winner]++;
-  announce(text, 'ko', 1.8);
-  if (text === 'K.O. !') { sfx.ko(); game.slow = 0.25; game.slowT = 1.1; arenaHooks.ko?.(); }
-  sfx.cheer(1.2);
-  crowdCheer(1.4);
-}
-
 function endMatch() {
-  game.phase = 'end';
   const [a, b] = game.wins;
   const n1 = CHARS[match.p1], n2 = CHARS[match.p2];
   const me = net.live ? net.me : 0;
@@ -1637,7 +1289,8 @@ function endMatch() {
 function toMenu(remote = false) {
   if (net.live && !remote) netSend({ t: 'menu' });
   net.live = false;
-  game.phase = 'menu';
+  rb = null;
+  sim.g.phase = 'menu';
   game.paused = false;
   ['hud', 'help', 'result', 'pause'].forEach((id) => $(id).classList.add('hidden'));
   $('fade').classList.remove('on');
@@ -1655,60 +1308,25 @@ function togglePause() {
   if (game.paused) down.clear();
 }
 
-function updateGame(dt, rdt) {
-  if (!F.length) return;
-  if (net.live && net.role === 'guest') { guestUpdate(dt); return; }
-  const ph = game.phase;
-  game.t += rdt;
-  if (game.slowT > 0) { game.slowT -= rdt; if (game.slowT <= 0) game.slow = 1; }
-
+// Une image de simulation (1/60 s). Retourne false si on doit attendre l'adversaire (en ligne).
+function simTick() {
+  for (let i = 0; i < 2; i++) F[i]?.capture(sim.f[i]);
+  if (rb) {
+    if (!rb.tick(localInput(net.me))) return false;
+    playEvents(rb.takeEvents());
+    return true;
+  }
+  const ph = sim.g.phase;
+  let i0 = NEUTRAL, i1 = NEUTRAL;
   if (ph === 'fight' || ph === 'intro') {
-    readHeld();
-    if (ai) ai.update(dt, inputs[1]);
-    if (ai0) ai0.update(dt, inputs[0]);
-  }
-  inputs.forEach((i) => i.tick(dt));
-  const canAct = ph === 'fight';
-  F[0].update(dt, inputs[0], F[1], canAct);
-  F[1].update(dt, inputs[1], F[0], canAct);
-
-  // les combattants ne se traversent pas au sol
-  if (F[0].state !== 'dead' && F[1].state !== 'dead' && Math.abs(F[0].y - F[1].y) < 1.0) {
-    const dx = F[1].x - F[0].x, dz = F[1].z - F[0].z, d = Math.hypot(dx, dz), ov = 0.9 - d;
-    if (ov > 0) {
-      const nx = d > 0.001 ? dx / d : F[0].fx, nz = d > 0.001 ? dz / d : F[0].fz;
-      F[0].x -= nx * ov / 2; F[0].z -= nz * ov / 2;
-      F[1].x += nx * ov / 2; F[1].z += nz * ov / 2;
-    }
-  }
-
-  if (ph === 'fight') {
-    resolve(F[0], F[1]);
-    resolve(F[1], F[0]);
-    game.timer -= dt;
-    if (game.phase === 'fight' && game.timer <= 0) {
-      game.timer = 0;
-      const [h0, h1] = [F[0].hp, F[1].hp];
-      endRound(h0 === h1 ? -1 : (h0 > h1 ? 0 : 1), h0 === h1 ? 'ÉGALITÉ' : 'TEMPS !');
-    }
-  } else if (ph === 'intro') {
-    if (game.t > 1.25 && !game.flags.go) { game.flags.go = true; announce('COMBATTEZ !', '', 0.9); crowdCheer(0.9); sfx.cheer(0.8); }
-    if (game.t > 1.55) game.phase = 'fight';
-  } else if (ph === 'ko') {
-    if (game.t > 1.4 && !game.flags.pose) {
-      game.flags.pose = true;
-      const w = game.roundWinner;
-      if (w >= 0 && F[w].state !== 'dead') F[w].win();
-      if (w < 0) F.forEach((f) => { if (f.state !== 'dead') f.toIdle(); });
-    }
-    if (game.t > 3.4 && !game.flags.fade) { game.flags.fade = true; $('fade').classList.add('on'); }
-    if (game.t > 3.75) {
-      if (game.wins[0] >= 2 || game.wins[1] >= 2 || game.round >= 3) { $('fade').classList.remove('on'); endMatch(); }
-      else { game.round++; startRound(); }
-    }
-  }
-
-  for (const f of F) { f.mixer.update(dt); f.pose(dt, clockT); }
+    const dt = sim.effectiveDt();
+    i0 = ai0 ? ai0.update(dt) : localInput(0);
+    i1 = ai ? ai.update(dt) : (match?.mode === 'duo' ? localInput(1) : NEUTRAL);
+  } else if (ph !== 'menu') { pending[0] = pending[1] = 0; }
+  sim.step(i0, i1);
+  playEvents(sim.ev);
+  sim.ev.length = 0;
+  return true;
 }
 
 // =====================================================================
@@ -1716,7 +1334,7 @@ function updateGame(dt, rdt) {
 // =====================================================================
 function updateHud() {
   if (game.phase === 'menu' || !F.length) return;
-  F.forEach((f, i) => {
+  sim.f.forEach((f, i) => {
     const n = i + 1;
     const hp = Math.max(0, f.hp);
     $('h' + n).style.width = hp + '%';
@@ -1748,20 +1366,20 @@ function camGoal(dt) {
     camTgt.set(0, 1.0, 0);
     return;
   }
-  const mx = (F[0].x + F[1].x) / 2, mz = (F[0].z + F[1].z) / 2;
-  const ux = F[1].x - F[0].x, uz = F[1].z - F[0].z, sep = Math.hypot(ux, uz);
+  const mx = (F[0].rx + F[1].rx) / 2, mz = (F[0].rz + F[1].rz) / 2;
+  const ux = F[1].rx - F[0].rx, uz = F[1].rz - F[0].rz, sep = Math.hypot(ux, uz);
   if (sep > 0.3) {
     // perpendiculaire à l'axe des combattants, du même côté que la caméra actuelle
     let nx = -uz / sep, nz = ux / sep;
     if (nx * Math.sin(camAng) + nz * Math.cos(camAng) < 0) { nx = -nx; nz = -nz; }
     camAng = lerpAng(camAng, Math.atan2(nx, nz), Math.min(1, dt * 3.5));
   }
-  const maxY = Math.max(F[0].y, F[1].y);
+  const maxY = Math.max(F[0].ry, F[1].ry);
   let dist = 5.6 + Math.max(0, sep - 2.4) * 0.65;
   let tx = mx, tz = mz;
   if (game.phase === 'ko' && game.roundWinner >= 0 && game.t < 3.3) {
     const l = F[1 - game.roundWinner];
-    dist = 4.4; tx = (l.x + mx) / 2; tz = (l.z + mz) / 2;
+    dist = 4.4; tx = (l.rx + mx) / 2; tz = (l.rz + mz) / 2;
   }
   if (game.phase === 'end') dist = 5.2;
   let px = tx + Math.sin(camAng) * dist, pz = tz + Math.cos(camAng) * dist;
@@ -1772,7 +1390,6 @@ function camGoal(dt) {
   camPos.set(px, 2.2 + maxY * 0.2 + lift, pz);
 }
 function snapCamera() {
-  rec('snap', []);
   camGoal(0);
   camera.position.copy(camPos);
   camLook.copy(camTgt);
@@ -1794,30 +1411,61 @@ function updateCamera(dt) {
 // =====================================================================
 //  Boucle
 // =====================================================================
-let last = performance.now(), clockT = 0;
+let last = performance.now(), clockT = 0, acc = 0;
 function frame(now) {
   requestAnimationFrame(frame);
-  const rdt = Math.min(0.05, (now - last) / 1000);
+  const raw = (now - last) / 1000;
+  const rdt = Math.min(0.05, raw);
   last = now;
   if (game.phase === 'loading') return;
+  adaptResolution(raw);
   if (!game.paused || net.live) step(rdt);
-  if (net.live && net.role === 'host') sendSnap();
   renderer.render(scene, camera);
 }
+
+// Résolution dynamique : si la machine peine, on baisse la définition du rendu (jamais celle du jeu) ;
+// si elle a de la marge pendant un moment, on la remonte.
+let pixelRatio = Math.min(devicePixelRatio, 2), resAvg = 16, resN = 0, resGood = 0;
+const maxPixelRatio = pixelRatio;
+function adaptResolution(raw) {
+  resAvg += (Math.min(raw, 0.1) * 1000 - resAvg) * 0.06;
+  if (++resN % 90) return;
+  let pr = pixelRatio;
+  if (resAvg > 26) { pr = Math.max(0.7, pr - 0.25); resGood = 0; }
+  else if (resAvg < 19 && ++resGood >= 4) { pr = Math.min(maxPixelRatio, pr + 0.25); resGood = 0; }
+  if (pr !== pixelRatio) { pixelRatio = pr; renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); }
+}
+
+// Boucle à pas fixe : la simulation avance par images de 1/60 s quel que soit l'écran (60, 144 Hz…),
+// l'affichage interpole entre deux images de simulation.
 function step(rdt) {
   clockT += rdt;
-  let dt = rdt * game.slow;
-  if (game.hitstop > 0) { game.hitstop -= rdt; dt = 0; }
-  updateGame(dt, rdt);
-  net.mute = true;     // le décor s'anime de son côté chez chacun
+  acc = Math.min(acc + rdt, 0.1);
+  let n = 0;
+  while (acc >= DT && n < 6) {
+    if (!simTick()) break;       // en ligne : on attend l'adversaire (le temps non simulé est conservé)
+    acc -= DT; n++;
+  }
+  const g = sim.g, alpha = Math.min(1, acc / DT);
+  const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
+  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha));
   for (const u of updaters) u(rdt, clockT);
-  net.mute = false;
   updateParticles(rdt);
   updateRings(rdt);
   flashV = Math.max(0, flashV - rdt * 3);
   $('flash').style.opacity = flashV;
   updateCamera(rdt);
   updateHud();
+  syncUi();
+}
+
+// éléments d'interface qui suivent l'état de la simulation (écrits seulement quand ils changent)
+let uiFade = false, uiNet = '';
+function syncUi() {
+  const fade = game.phase === 'ko' && sim.g.flagFade;
+  if (fade !== uiFade) { uiFade = fade; $('fade').classList.toggle('on', fade); }
+  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}` : '';
+  if (txt !== uiNet) { uiNet = txt; $('netStat').textContent = txt; }
 }
 
 // =====================================================================
@@ -1947,15 +1595,27 @@ function setupMenu() {
 }
 
 // =====================================================================
-//  En ligne (réseau local) : serveur.py relaie les messages entre l'hôte
-//  (joueur 1, qui fait tourner le combat) et l'invité (joueur 2).
+//  En ligne : serveur.py met les deux joueurs en relation (code à 4 lettres) et relaie les
+//  messages ; ensuite les deux navigateurs font tourner la MÊME simulation et ne s'échangent
+//  que leurs touches (rollback.js), de préférence en direct (WebRTC, net.js).
 // =====================================================================
 function netInfo(html) { $('netInfo').innerHTML = html; }
 function netSend(m) { if (net.ws?.readyState === 1) net.ws.send(JSON.stringify(m)); }
 function netClose() {
   const ws = net.ws;
-  Object.assign(net, { ws: null, role: null, me: 0, peer: false, peerKind: null });
+  net.link?.close();
+  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null });
+  rb = null;
   if (ws) ws.close();
+}
+// liaison directe avec l'adversaire (créée dès que les deux joueurs sont dans la partie)
+function netLink() {
+  net.link?.close();
+  net.link = new Link({
+    initiator: net.role === 'host',
+    wsSend: netSend,
+    onMessage: (m) => netMsg(m),
+  });
 }
 function netConnect(first) {
   netClose();
@@ -1964,7 +1624,12 @@ function netConnect(first) {
   net.ws = ws;
   let opened = false;
   ws.onopen = () => { opened = true; ws.send(JSON.stringify(first)); };
-  ws.onmessage = (e) => { if (net.ws === ws) netMsg(JSON.parse(e.data)); };
+  ws.onmessage = (e) => {
+    if (net.ws !== ws) return;
+    let m;
+    try { m = JSON.parse(e.data); } catch (err) { return; }
+    if (m && typeof m === 'object') netMsg(m);
+  };
   ws.onclose = () => {
     if (net.ws !== ws) return;
     const wasLive = net.live;
@@ -1976,8 +1641,9 @@ function netConnect(first) {
   };
 }
 function hostInfo() {
-  const urls = net.urls.map((u) => `<b>${u}</b>`).join(' ou ');
-  return `Code de la partie : <span class="code">${net.code}</span><br>Ton ami (sur le même Wi-Fi) ouvre ${urls || 'l’adresse de ce PC'} dans son navigateur, choisit « En ligne » et entre ce code.`;
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const urls = (local ? net.urls : [location.origin]).map((u) => `<b>${esc(u)}</b>`).join(' ou ');
+  return `Code de la partie : <span class="code">${esc(net.code)}</span><br>Ton ami ouvre ${urls || 'l’adresse de ce PC'} dans son navigateur, choisit « En ligne » et entre ce code.`;
 }
 function refreshGo() {
   let txt = 'COMBATTRE', ok = true;
@@ -1990,86 +1656,28 @@ function refreshGo() {
 }
 function netStart() {
   if (net.role !== 'host' || !net.peer) return;
-  const m = { mode: 'online', p1: cfg.p1, p2: net.peerKind || 'soldier', arena: cfg.arena };
+  const m = { mode: 'online', p1: cfg.p1, p2: net.peerKind || 'soldier', arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
   netSend({ t: 'start', ...m });
   startMatch(m);
 }
-
-// hôte → invité : état du combat + effets survenus depuis le dernier envoi
-function sendSnap() {
-  const g = game;
-  netSend({
-    t: 's',
-    g: { phase: g.phase, round: g.round, wins: g.wins, timer: g.timer, t: g.t, slow: g.slow, hitstop: g.hitstop, shake: g.shake, roundWinner: g.roundWinner, flags: g.flags },
-    f: F.map((f) => ({
-      v: { x: f.x, y: f.y, z: f.z, yaw: f.yaw, visTarget: f.visTarget, state: f.state, stateT: f.stateT, dur: f.dur, hp: f.hp, guard: f.guard,
-        sta: f.sta, staFail: f.staFail, flash: f.flash, shieldGlow: f.shieldGlow, flinch: f.flinch, rollDir: f.rollDir },
-      st: f.stars.visible, fc: f.flashCol.toArray(),
-    })),
-    e: net.ev,
-  });
-  net.ev = [];
-}
-const EV = {
-  sfx: (k, ...a) => sfx[k]?.(...a),
-  emit, ring, pop, announce,
-  cheer: crowdCheer,
-  play: (i, name, o) => F[i]?.play(name, o),
-  reset: (i, x, z, yaw) => F[i]?.reset(x, z, yaw),
-};
-function applySnap(m) {
-  const prev = game.phase;
-  let snap = false;
-  for (const [k, a] of m.e) {
-    if (k === 'snap') snap = true;
-    else if (Object.hasOwn(EV, k)) EV[k](...a);
-  }
-  Object.assign(game, m.g);
-  m.f.forEach((s, i) => {
-    const f = F[i];
-    if (!f) return;
-    Object.assign(f, s.v);
-    f.stars.visible = s.st;
-    f.flashCol.fromArray(s.fc);
-  });
-  if (snap) snapCamera();
-  if (game.phase === 'end' && prev !== 'end') endMatch();
-  $('fade').classList.toggle('on', game.phase === 'ko' && !!game.flags.fade);
-  $('roundLbl').textContent = `ROUND ${game.round} / 3`;
-}
-// invité : on envoie ses commandes, on anime ce que l'hôte a calculé
-function guestUpdate(dt) {
-  readHeld();
-  const inp = inputs[1];
-  netSend({ t: 'in', mx: inp.mx, mz: inp.mz, blk: inp.blk, p: net.presses });
-  net.presses = [];
-  for (const f of F) { f.stateT += dt; f.mixer.update(dt); f.pose(dt, clockT); }
-}
-function remoteInput(m) {
-  const inp = inputs[1];
-  let mx = +m.mx || 0, mz = +m.mz || 0;
-  const n = Math.hypot(mx, mz);
-  if (n > 1) { mx /= n; mz /= n; }
-  inp.mx = mx; inp.mz = mz;
-  inp.blk = !!m.blk;
-  if (Array.isArray(m.p)) for (const a of m.p) if (Object.hasOwn(inp.buf, a)) inp.press(a);
-}
 function netMsg(m) {
-  if (m.t === 's') { if (net.live && net.role === 'guest') applySnap(m); return; }
-  if (m.t === 'in') { if (net.live && net.role === 'host') remoteInput(m); return; }
+  if (m.t === 'ri' || m.t === 'rs') { if (rb) rb.receive(m); return; }
+  if (m.t === 'rtc') { net.link?.signal(m); return; }
   switch (m.t) {
     case 'created':
-      Object.assign(net, { role: 'host', me: 0, code: m.code, urls: m.urls || [] });
+      Object.assign(net, { role: 'host', me: 0, code: String(m.code ?? ''), urls: Array.isArray(m.urls) ? m.urls.map(String) : [] });
       netInfo(hostInfo() + '<br>En attente d’un adversaire…');
       break;
     case 'joined':
-      Object.assign(net, { role: 'guest', me: 1, code: m.code, peer: true });
+      Object.assign(net, { role: 'guest', me: 1, code: String(m.code ?? ''), peer: true });
       netSend({ t: 'hello', kind: cfg.p1 });
+      netLink();
       netInfo(`Connecté à la partie <b>${esc(m.code)}</b> ! L’hôte choisit l’arène et lance le combat.`);
       break;
     case 'peer':
       net.peer = true;
       netSend({ t: 'hello', kind: cfg.p1 });
+      netLink();
       netInfo(`Un adversaire a rejoint la partie <b>${esc(net.code)}</b> ! Choisis l’arène puis clique sur COMBATTRE.`);
       break;
     case 'hello':
@@ -2078,7 +1686,7 @@ function netMsg(m) {
       break;
     case 'start':
       if (net.role === 'guest' && CHARS[m.p1] && CHARS[m.p2] && ARENAS[m.arena])
-        startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena });
+        startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
       break;
     case 'menu':
       if (!net.live) break;
@@ -2087,6 +1695,7 @@ function netMsg(m) {
       break;
     case 'bye':
       if (net.live) toMenu(true);
+      net.link?.close(); net.link = null;
       if (net.role === 'host') {
         Object.assign(net, { peer: false, peerKind: null });
         if (game.phase === 'menu') menuFighters();
@@ -2129,11 +1738,17 @@ async function boot() {
   }
   setupMenu();
   buildArena(cfg.arena);
+  game.loading = false;
   $('loading').classList.add('hidden');
   toMenu();
   if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
-  const sim = +new URLSearchParams(location.search).get('sim');
-  for (let i = 0; i < sim * 60; i++) step(1 / 60);
+  const warm = +new URLSearchParams(location.search).get('sim');
+  for (let i = 0; i < warm * 60; i++) step(DT);
 }
 requestAnimationFrame(frame);
 boot();
+
+// Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
+if (new URLSearchParams(location.search).has('debug')) {
+  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
+}
