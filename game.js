@@ -1958,12 +1958,12 @@ function netMsg(m) {
     case 'joined':
       Object.assign(net, { role: 'guest', me: 1, code: m.code, peer: true });
       netSend({ t: 'hello', kind: cfg.p1 });
-      netInfo(`Connecté à la partie <b>${m.code}</b> ! L’hôte choisit l’arène et lance le combat.`);
+      netInfo(`Connecté à la partie <b>${esc(m.code)}</b> ! L’hôte choisit l’arène et lance le combat.`);
       break;
     case 'peer':
       net.peer = true;
       netSend({ t: 'hello', kind: cfg.p1 });
-      netInfo(`Un adversaire a rejoint la partie <b>${net.code}</b> ! Choisis l’arène puis clique sur COMBATTRE.`);
+      netInfo(`Un adversaire a rejoint la partie <b>${esc(net.code)}</b> ! Choisis l’arène puis clique sur COMBATTRE.`);
       break;
     case 'hello':
       net.peerKind = CHARS[m.kind] ? m.kind : 'soldier';
@@ -1992,7 +1992,7 @@ function netMsg(m) {
       break;
     case 'error':
       netClose();
-      netInfo(m.msg);
+      netInfo(esc(m.msg));
       break;
   }
   refreshMenu();
