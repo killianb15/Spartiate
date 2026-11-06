@@ -1,0 +1,59 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  APP_DIR: /home/ubuntu/spartiate
+  APP_PORT: "8123"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier la syntaxe Python
+        run: python3 -m py_compile serveur.py
+
+      - name: Configurer SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Synchroniser les fichiers
+        run: |
+          rsync -az --delete \
+            --exclude '.git' --exclude '.github' --exclude 'deploy' \
+            --exclude '*.zip' --exclude '*.bat' \
+            ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${APP_DIR}/"
+
+      - name: Installer le service et redémarrer
+        run: |
+          scp deploy/spartiate.service "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/spartiate.service"
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            set -e
+            sudo install -m 644 /tmp/spartiate.service /etc/systemd/system/spartiate.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable spartiate
+            sudo systemctl restart spartiate
+          '
+
+      - name: Vérifier que le jeu répond
+        run: |
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
+            for i in $(seq 1 10); do
+              curl -fsS -o /dev/null http://127.0.0.1:'"${APP_PORT}"'/ && echo "OK" && exit 0
+              sleep 1
+            done
+            sudo journalctl -u spartiate -n 30 --no-pager
+            exit 1
+          '
