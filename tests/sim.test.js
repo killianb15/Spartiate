@@ -196,3 +196,10 @@ test('IA contre IA : des matchs complets se terminent', () => {
   assert.ok(s.g.round >= 1);
   assert.ok(s.g.w0 + s.g.w1 >= 1, 'au moins une manche jouée');
 });
+
+test('empreinte de matchs complets IA contre IA : reproductible (la même empreinte doit sortir dans Firefox)', async () => {
+  const { fingerprint } = await import('./fingerprint.js');
+  const a = fingerprint([1, 2, 3]), b = fingerprint([1, 2, 3]);
+  assert.deepEqual(a, b);
+  for (const m of a) assert.ok(Math.max(...m.wins) === 2, `match ${m.seed} non terminé`);
+});

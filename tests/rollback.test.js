@@ -38,21 +38,26 @@ function script(seed) {
   };
 }
 
-function makePair(netOpts, { delay = 2, maxPred = 10, seed = 1, skewEvery = 0 } = {}) {
+// sync : chaque pair avance à la vitesse rb.rate() (comme la boucle de game.js) ; head : avance de départ du pair 0
+function makePair(netOpts, { delay = 2, maxPred = 10, seed = 1, skewEvery = 0, sync = false, head = 0, adaptDelay = true } = {}) {
   const net = new Net(netOpts, seed);
   const sims = [new Sim(seed), new Sim(seed)];
   const peers = [];
-  const opts = (me) => ({ me, delay, maxPred, keep: 1e9, send: (m, rel) => net.push(1 - me, m, rel) });
+  const clock = () => net.now * 1000 / 60;
+  const opts = (me) => ({ me, delay, maxPred, keep: 1e9, clock, adaptDelay, send: (m, rel) => net.push(1 - me, m, rel) });
   peers[0] = new Rollback(sims[0], opts(0));
   peers[1] = new Rollback(sims[1], opts(1));
   sims.forEach((s) => s.startMatch());
   const scr = [script(seed * 7 + 1), script(seed * 7 + 2)];
   const evCount = [{}, {}];
+  const acc = [head, 0];
   const tickAll = (drive = true) => {
     net.now++;
     net.deliver(peers);
     peers.forEach((p, i) => {
-      const n = (skewEvery && i === 1 && net.now % skewEvery === 0) ? 2 : 1;   // l'horloge de l'invité avance un peu plus vite
+      let n = (skewEvery && i === 1 && net.now % skewEvery === 0) ? 2 : 1;   // l'horloge de l'invité avance un peu plus vite
+      if (sync) { acc[i] += (n - 1) + p.rate(); n = Math.floor(acc[i]); acc[i] -= n; }
+      else if (acc[i] >= 1) { n += Math.floor(acc[i]); acc[i] = 0; }
       for (let k = 0; k < n; k++) p.tick(drive ? scr[i]() : NEUTRAL);
       for (const e of p.takeEvents()) { const s = e[0] + (e[0] === 'sfx' ? ':' + e[1] : ''); evCount[i][s] = (evCount[i][s] || 0) + 1; }
     });
@@ -204,4 +209,102 @@ test('messages malformés ou hostiles ignorés sans planter', () => {
     rb.receive(bad);
   for (let i = 0; i < 200; i++) t.tickAll();
   assert.ok(rb.frame > 100);
+});
+
+// ---------------- synchronisation des horloges, ping, délai adaptatif ----------------
+
+test('synchronisation : un pair parti 8 images en avance est rattrapé, et la charge est partagée', () => {
+  const run = (sync) => {
+    const t = makePair({ latency: 4, jitter: 1 }, { seed: 21, head: 8, sync });
+    for (let i = 0; i < 1800; i++) t.tickAll();
+    return t;
+  };
+  const synced = run(true), raw = run(false);
+  const gap = (t) => Math.abs(t.peers[0].skew);
+  assert.ok(gap(synced) < 1.5, `avance restante ${gap(synced).toFixed(2)} images`);
+  assert.ok(gap(raw) > 3, 'sans synchronisation, l\'écart devrait rester');
+  // ce qui se voit, c'est la profondeur des corrections (de combien d'images on revient en arrière)
+  const depth = (t) => Math.max(...t.peers.map((p) => p.stats.maxDepth));
+  assert.ok(depth(synced) < depth(raw), `profondeur avec sync ${depth(synced)} ≥ sans ${depth(raw)}`);
+  const avg = (p) => p.stats.resimFrames / Math.max(1, p.stats.rollbacks);
+  const [a, b] = synced.peers.map(avg);
+  assert.ok(Math.abs(a - b) < 1.5, `corrections déséquilibrées : ${a.toFixed(1)} / ${b.toFixed(1)} images en moyenne`);
+});
+
+test('synchronisation : horloge qui dérive, les pairs restent alignés et identiques à la référence', () => {
+  const t = converge({ latency: 3, jitter: 2 }, { seed: 22, sync: true, skewEvery: 50 }, 3000);
+  assert.ok(Math.abs(t.peers[0].skew) < 2, `avance ${t.peers[0].skew}`);
+});
+
+test('ping mesuré : environ deux fois la latence', () => {
+  const t = makePair({ latency: 5 }, { seed: 23 });
+  for (let i = 0; i < 600; i++) t.tickAll();
+  for (const p of t.peers) {
+    const frames = p.rtt / (1000 / 60);
+    assert.ok(frames > 9 && frames < 13, `ping ${frames.toFixed(1)} images pour 10 attendues`);
+  }
+});
+
+test('délai adaptatif : 2 images en réseau local, 3 quand le trajet dépasse ~2 images', () => {
+  const lan = makePair({ latency: 0 }, { seed: 24 });
+  for (let i = 0; i < 600; i++) lan.tickAll();
+  assert.deepEqual(lan.peers.map((p) => p.delay), [2, 2]);
+  const far = makePair({ latency: 5, jitter: 1 }, { seed: 24 });
+  for (let i = 0; i < 600; i++) far.tickAll();
+  assert.deepEqual(far.peers.map((p) => p.delay), [3, 3]);
+});
+
+test('délai qui change en cours de combat : aucune image d\'entrée manquante, identique à la référence', () => {
+  // la latence augmente puis redescend : le délai monte puis redescend
+  const t = makePair({ latency: 0 }, { seed: 25, sync: true });
+  for (let i = 0; i < 700; i++) t.tickAll();
+  t.net.latency = 6;
+  for (let i = 0; i < 900; i++) t.tickAll();
+  t.net.latency = 0;
+  for (let i = 0; i < 900; i++) t.tickAll();
+  for (let i = 0; i < 120; i++) t.tickAll(false);
+  assert.ok(t.peers[0].stats.delayChanges >= 2, `changements de délai : ${t.peers[0].stats.delayChanges}`);
+  const K = lastCommonCheck(t.peers);
+  const hRef = reference(25, t.peers, K).hash();
+  for (const p of t.peers) assert.equal(p.checks.get(K), hRef);
+});
+
+test('touche pressée pendant une attente réseau : jamais perdue', () => {
+  const sim = new Sim(1);
+  const rb = new Rollback(sim, { me: 0, delay: 2, maxPred: 4, send: () => {} });
+  sim.startMatch();
+  for (let i = 0; i < 30; i++) rb.tick(NEUTRAL);           // bloqué : l'adversaire ne répond pas
+  assert.ok(rb.stats.stalls > 0);
+  const last = rb.localScheduled;
+  rb.tick({ mx: 0, mz: 0, blk: false, press: 1 });          // attaque pressée pendant l'attente
+  rb.tick(NEUTRAL);
+  assert.equal(rb.localScheduled, last, 'aucune image ne doit être programmée pendant l\'attente');
+  // l'adversaire se manifeste : l'attaque part dans la prochaine image programmée
+  rb.receive({ t: 'ri', f: 2, i: Array(20).fill([0, 0, 0]), a: last });
+  rb.tick(NEUTRAL);
+  assert.equal(rb.inputs[0].get(last + 1).press, 1, 'la touche pressée pendant l\'attente a été perdue');
+});
+
+test('ping : le temps passé chez l\'adversaire avant de répondre est déduit', () => {
+  let t = 0, out = null;
+  const sim = new Sim(1);
+  const rb = new Rollback(sim, { me: 0, clock: () => t, send: (m) => { out = m; } });
+  sim.startMatch();
+  t = 1000; rb.receive({ t: 'ri', f: 2, i: [], a: 1, c: 1, ts: 5000 });   // horodatage de l'adversaire
+  t = 1030; rb.tick(NEUTRAL);                                             // on répond 30 ms plus tard
+  assert.equal(out.te, 5000);
+  assert.equal(out.th, 30);
+  // l'adversaire renvoie notre horodatage après l'avoir gardé 20 ms : 100 ms au total => ping 80 ms
+  t = 1130; rb.receive({ t: 'ri', f: 2, i: [], a: 1, c: 2, ts: 5100, te: out.ts, th: 20 });
+  assert.equal(Math.round(rb.rtt), 80);
+});
+
+test('délai augmenté : il prend effet tout de suite (images intermédiaires remplies)', () => {
+  const t = makePair({ latency: 6 }, { seed: 26 });
+  for (let i = 0; i < 600; i++) t.tickAll();
+  for (const p of t.peers) {
+    assert.equal(p.delay, 3);
+    // tick() programme l'image c + delay puis simule c : l'image courante est alors c + 1
+    assert.equal(p.localScheduled - p.sim.g.frame, p.delay - 1, 'avance des entrées programmées ≠ délai');
+  }
 });

@@ -960,12 +960,24 @@ class FighterView {
     this.vx = sf.x - this.px; this.vy = sf.y - this.py; this.vz = sf.z - this.pz;
     this.px = sf.x; this.py = sf.y; this.pz = sf.z;
   }
-  // Un rollback a déplacé ce combattant : plutôt que de le téléporter, on garde l'ancienne position
-  // affichée et on la résorbe en ~0,1 s. (sf : état corrigé ; la position attendue = ancienne + vitesse.)
+  // Un rollback a déplacé ce combattant (sf : état corrigé). Sans correction, il serait en
+  // (p + v) et l'affichage irait de p vers p + v. On fait en sorte d'afficher exactement cela
+  // (interpolation depuis sf - v, plus un écart o = p + v - sf), puis l'écart fond en ~70 ms.
   absorb(sf) {
     const dx = this.px + this.vx - sf.x, dy = this.py + this.vy - sf.y, dz = this.pz + this.vz - sf.z;
+    this.needSeek = true;
     if (Math.hypot(dx, dy, dz) > 4) return;      // vraie téléportation du jeu (nouvelle manche, resynchronisation) : pas de lissage
     this.ox += dx; this.oy += dy; this.oz += dz;
+    this.px = sf.x - this.vx; this.py = sf.y - this.vy; this.pz = sf.z - this.vz;
+  }
+  // Recale l'animation en cours sur le temps de la simulation (coups, sauts : ce qu'on voit
+  // doit correspondre aux images où le coup touche, même si on l'a appris en retard).
+  seek(sf) {
+    const a = this.cur;
+    if (!a || sf.animLoop) return;
+    const d = a.getClip().duration;
+    const t = Math.max(0, Math.min(d, sf.animT * sf.animTs + (sf.animTs < 0 ? d : 0)));
+    if (Math.abs(a.time - t) > 0.04) a.time = t;
   }
 
   applyReset(sf) {
@@ -1014,8 +1026,11 @@ class FighterView {
     const key = sf.animN + '|' + sf.anim + '|' + sf.animTs;
     if (key !== this.seenAnim) {
       this.seenAnim = key;
-      this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: sf.animFade });
+      // animation commencée il y a animT (découverte après une correction) : on saute le fondu déjà écoulé
+      this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: Math.max(0, sf.animFade - sf.animT) });
+      if (sf.animT > 0) this.seek(sf);
     }
+    if (this.needSeek) { this.needSeek = false; this.seek(sf); }
     if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.ox = this.oy = this.oz = 0; this.snapPos = false; }
     const k = Math.exp(-rdt * 14);               // l'écart de correction fond (≈ 70 ms)
     this.ox *= k; this.oy *= k; this.oz *= k;
@@ -1335,9 +1350,10 @@ function simTick() {
   for (let i = 0; i < 2; i++) F[i]?.capture(sim.f[i]);
   if (rb) {
     const rollbacks = rb.stats.rollbacks;
-    if (!rb.tick(localInput(net.me))) return false;
-    if (rb.stats.rollbacks !== rollbacks) F.forEach((f, i) => f.absorb(sim.f[i]));
+    const ran = rb.tick(localInput(net.me));
+    if (rb.stats.rollbacks !== rollbacks) F.forEach((f, i) => f.absorb(sim.f[i]));   // même si on attend ensuite
     playEvents(rb.takeEvents());
+    if (!ran) return false;
     return true;
   }
   const ph = sim.g.phase;
@@ -1464,7 +1480,8 @@ function adaptResolution(raw) {
 // l'affichage interpole entre deux images de simulation.
 function step(rdt) {
   clockT += rdt;
-  acc = Math.min(acc + rdt, 0.1);
+  // en ligne : rate() ralentit/accélère de quelques % pour rester à la même image que l'adversaire
+  acc = Math.min(acc + rdt * (rb ? rb.rate() : 1), 0.1);
   let n = 0;
   while (acc >= DT && n < 6) {
     if (!simTick()) break;       // en ligne : on attend l'adversaire (le temps non simulé est conservé)
@@ -1488,7 +1505,7 @@ let uiFade = false, uiNet = '';
 function syncUi() {
   const fade = game.phase === 'ko' && sim.g.flagFade;
   if (fade !== uiFade) { uiFade = fade; $('fade').classList.toggle('on', fade); }
-  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}` : '';
+  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'}${rb.rtt === null ? '' : ` · ${Math.round(rb.rtt)} ms`} · délai ${rb.delay} · ↺ ${rb.stats.rollbacks}` : '';
   if (txt !== uiNet) { uiNet = txt; $('netStat').textContent = txt; }
 }
 

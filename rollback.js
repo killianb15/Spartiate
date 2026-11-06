@@ -12,6 +12,15 @@
 //  canal fiable (WebSocket) que non fiable/désordonné (WebRTC DataChannel) : chaque
 //  paquet répète les dernières entrées pas encore acquittées.
 //
+//  Synchronisation des horloges : chaque paquet indique l'image de l'expéditeur. Chacun
+//  mesure son avance sur l'autre (latence comprise) et la lui transmet ; la moitié de la
+//  différence des deux mesures est l'avance réelle, latence éliminée. Celui qui est en
+//  avance ralentit très légèrement (rate()), l'autre accélère : les deux joueurs voient
+//  ainsi autant de corrections l'un que l'autre, et le moins possible.
+//
+//  Délai d'entrée adaptatif : il suit le ping mesuré (2 images jusqu'à ~70 ms de ping, 3
+//  au-delà), ce qui fait arriver les touches avant qu'il faille les prédire.
+//
 //  Désynchronisation : toutes les CHECK_EVERY images, on compare une empreinte de l'état
 //  (devenu définitif). En cas de différence, l'hôte renvoie sa sauvegarde et l'invité la
 //  charge, puis re-simule : la partie continue sans coupure.
@@ -21,6 +30,9 @@ import { NEUTRAL, hashState } from './sim.js';
 export const CHECK_EVERY = 30;
 const MAX_PACKET = 24;       // entrées envoyées par paquet (redondance contre la perte)
 const KEEP = 180;            // images d'historique conservées pour les entrées
+const FRAME_MS = 1000 / 60;
+const ADV_WINDOW = 40;       // nombre de mesures d'avance moyennées
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 const same = (a, b) => a.mx === b.mx && a.mz === b.mz && a.blk === b.blk && a.press === b.press;
 const enc = (i) => [i.mx, i.mz, (i.blk ? 1 : 0) | (i.press << 1)];
@@ -35,10 +47,20 @@ function sig(e) {
 }
 
 export class Rollback {
-  // opts : me (0|1), send(msg, reliable), delay (images), maxPred (images), onDesync(info)
-  constructor(sim, { me, send, delay = 2, maxPred = 10, onDesync = null, keep = KEEP }) {
+  // opts : me (0|1), send(msg, reliable), delay (images, au départ : identique des deux côtés),
+  // maxPred (images), onDesync(info), clock() en ms, adaptDelay / minDelay / maxDelay
+  constructor(sim, { me, send, delay = 2, maxPred = 10, onDesync = null, keep = KEEP, clock = now,
+    adaptDelay = true, minDelay = 2, maxDelay = 3 }) {
     this.sim = sim; this.me = me; this.rem = 1 - me; this.send = send;
     this.keep = keep; this.delay = delay; this.maxPred = maxPred; this.onDesync = onDesync;
+    this.clock = clock; this.adaptDelay = adaptDelay; this.minDelay = minDelay; this.maxDelay = maxDelay;
+    this.carry = 0;                         // touches pressées pas encore placées dans une image (attente)
+    this.advs = [];                         // mesures de notre avance (images, latence comprise)
+    this.peerAdv = 0;                       // la même mesure, faite par l'adversaire
+    this.rtt = null;                        // aller-retour moyen (ms)
+    this.peerTs = null; this.peerTsAt = 0;  // dernier horodatage reçu (renvoyé pour mesurer le ping)
+    this.delayCheckAt = 0;
+    this.peerC = -1; this.lastTe = -Infinity;   // pour ignorer les paquets en retard/en double dans les mesures
     this.inputs = [new Map(), new Map()];   // images -> entrée connue (définitive)
     this.used = new Map();                  // images -> entrée adverse PRÉDITE utilisée
     this.snaps = new Map();                 // images -> état au début de l'image
@@ -54,7 +76,7 @@ export class Rollback {
     this.rbFrame = null;
     this.nextCheck = CHECK_EVERY;
     this.localScheduled = -1;
-    this.stats = { rollbacks: 0, maxDepth: 0, resimFrames: 0, stalls: 0, desyncs: 0, resyncs: 0, sent: 0, received: 0 };
+    this.stats = { rollbacks: 0, maxDepth: 0, resimFrames: 0, stalls: 0, desyncs: 0, resyncs: 0, sent: 0, received: 0, delayChanges: 0 };
     // les `delay` premières images sont forcément neutres pour tout le monde
     for (let f = 0; f < delay; f++) { this.inputs[me].set(f, NEUTRAL); this.inputs[this.rem].set(f, NEUTRAL); }
     this.localScheduled = delay - 1;
@@ -100,10 +122,17 @@ export class Rollback {
     const sim = this.sim;
     let c = sim.g.frame;
 
-    // 1. envoyer d'abord (même à l'arrêt, pour que l'adversaire reçoive nos entrées)
-    if (this.localScheduled < c + this.delay && c - this.confirmedRem <= this.maxPred) {
-      this.localScheduled++;
-      this.inputs[this.me].set(this.localScheduled, clean(local));
+    // 1. programmer notre entrée puis envoyer (même à l'arrêt, pour que l'adversaire reçoive nos entrées).
+    //    Une touche pressée pendant une attente n'est jamais perdue : elle part dans l'image suivante.
+    this.updateDelay(c);
+    let press = (local.press | this.carry) & 31;
+    this.carry = press;
+    if (c - this.confirmedRem <= this.maxPred) {
+      while (this.localScheduled < c + this.delay) {   // plusieurs d'un coup si le délai vient d'augmenter
+        this.localScheduled++;
+        this.inputs[this.me].set(this.localScheduled, clean({ ...local, press }));
+        press = 0; this.carry = 0;
+      }
     }
     this.sendPacket();
 
@@ -129,13 +158,40 @@ export class Rollback {
     return 1;
   }
 
+  // ---------------- horloges et délai ----------------
+  // Notre avance réelle sur l'adversaire, en images (> 0 : on est devant), latence éliminée.
+  get skew() {
+    if (!this.advs.length) return 0;
+    const mine = this.advs.reduce((a, b) => a + b, 0) / this.advs.length;
+    return (mine - this.peerAdv) / 2;
+  }
+  // Vitesse à laquelle faire tourner la simulation (1 = temps réel). Le joueur en avance
+  // ralentit de quelques %, celui en retard accélère, jusqu'à être à la même image.
+  rate() {
+    const x = this.skew;
+    if (Math.abs(x) < 0.75) return 1;
+    return Math.max(0.8, Math.min(1.5, 1 - x * 0.02));
+  }
+  updateDelay(c) {
+    if (!this.adaptDelay || this.rtt === null || c < this.delayCheckAt) return;
+    this.delayCheckAt = c + 60;
+    const oneWay = this.rtt / 2 / FRAME_MS;
+    // une image de délai coûte 17 ms de réactivité : on ne l'ajoute que si les corrections
+    // deviendraient profondes (trajet > 2 images, soit un ping > ~70 ms)
+    const want = Math.max(this.minDelay, Math.min(this.maxDelay, Math.ceil(oneWay - 0.25)));
+    if (want !== this.delay) { this.delay += want > this.delay ? 1 : -1; this.stats.delayChanges++; }
+  }
+
   // ---------------- réseau ----------------
   sendPacket() {
     const from = this.peerAck + 1, to = this.localScheduled;
     const lo = Math.max(from, to - MAX_PACKET + 1);
     const list = [];
     for (let f = lo; f <= to; f++) list.push(enc(this.inputs[this.me].get(f) ?? NEUTRAL));
-    const msg = { t: 'ri', f: lo, i: list, a: this.confirmedRem };
+    const t = this.clock();
+    const msg = { t: 'ri', f: lo, i: list, a: this.confirmedRem, c: this.sim.g.frame, ts: Math.round(t) };
+    if (this.advs.length) msg.v = Math.round(this.advs.reduce((a, b) => a + b, 0) / this.advs.length * 10) / 10;
+    if (this.peerTs !== null) { msg.te = this.peerTs; msg.th = Math.round(t - this.peerTsAt); }
     const ck = this.latestCheck();
     if (ck) { msg.k = ck[0]; msg.h = ck[1]; }
     this.send(msg, false);
@@ -158,7 +214,20 @@ export class Rollback {
   receiveInputs(m) {
     if (!Array.isArray(m.i) || !Number.isInteger(m.f)) return;
     if (Number.isInteger(m.a)) this.peerAck = Math.max(this.peerAck, m.a);
-    const c = this.sim.g.frame;
+    const c = this.sim.g.frame, t = this.clock();
+    const fresh = Number.isInteger(m.c) && m.c > this.peerC && Math.abs(c - m.c) < 600;
+    if (fresh) {
+      this.peerC = m.c;
+      this.advs.push(c - m.c);
+      if (this.advs.length > ADV_WINDOW) this.advs.shift();
+      if (Number.isFinite(m.v) && Math.abs(m.v) < 600) this.peerAdv = m.v;
+      if (Number.isFinite(m.ts)) { this.peerTs = m.ts; this.peerTsAt = t; }
+    }
+    if (Number.isFinite(m.te) && Number.isFinite(m.th) && m.te > this.lastTe) {
+      this.lastTe = m.te;
+      const sample = t - m.te - m.th;
+      if (sample >= 0 && sample < 5000) this.rtt = this.rtt === null ? sample : this.rtt + (sample - this.rtt) * 0.1;
+    }
     m.i.slice(0, MAX_PACKET).forEach((raw, n) => {
       const f = m.f + n;
       if (!Array.isArray(raw) || f <= this.confirmedRem) return;   // déjà connue (ou paquet en double)
