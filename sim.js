@@ -40,6 +40,7 @@ function newFighter(idx) {
     hitDone: false, airAtk: false, airAtkT: 0, combo: 0, brkSfx: false, guardT: 9, dustT: 0, rdx: 0, rdz: 0,
     // description de l'animation demandée (la vue la lit quand animN change)
     anim: 'idle', animTs: 1, animLoop: true, animRestart: false, animFade: 0, animN: 0,
+    animT: 0,    // temps d'animation écoulé depuis play() (la vue s'y recale après une correction réseau)
     resetN: 0,   // +1 à chaque remise à zéro (la vue réinitialise alors son squelette)
   };
 }
@@ -177,6 +178,7 @@ export class Sim {
 
   // ---------------- combattants ----------------
   play(f, name, o = {}) {
+    if (name !== f.anim || o.restart) f.animT = 0;   // même règle que la vue : sinon l'animation continue
     f.animN++; f.anim = name; f.animTs = o.ts ?? 1; f.animLoop = o.loop !== false;
     f.animRestart = !!o.restart; f.animFade = o.fade ?? 0.12;
   }
@@ -243,6 +245,7 @@ export class Sim {
   updateFighter(i, canAct) {
     const f = this.f[i], opp = this.f[1 - i], inp = this.inp[i], dt = this.dt;
     f.stateT += dt;
+    f.animT += dt;
     const st = f.state;
     const mx = canAct ? inp.mx : 0, mz = canAct ? inp.mz : 0;
     const moving = hypot(mx, mz) > 0.1;

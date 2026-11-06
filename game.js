@@ -57,8 +57,8 @@ const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc' };
 // =====================================================================
 //  Rendu
 // =====================================================================
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -371,10 +371,11 @@ function torch(x, y, z, ry, lightI = 8) {
 
 // ---------- Foule ----------
 class Crowd {
-  constructor() { this.list = []; this.ambT = 0; }
+  constructor() { this.list = []; this.ambT = 0; this.tick = 0; this.owed = [0, 0]; }
   add(x, y, z, kinds, base = 'idle', s = 1.25, ry = 0) {
     const k = pick(kinds);
     const o = P(k, x, y, z, ry + rand(-0.25, 0.25), s);
+    o.traverse((m) => { if (m.isMesh) m.castShadow = false; });   // la foule est loin : ses ombres ne se voient pas et coûtent un dessin de plus par spectateur
     const mx = new THREE.AnimationMixer(o);
     const acts = {};
     for (const n of ['idle', 'emote-yes', 'sit']) acts[n] = mx.clipAction(THREE.AnimationClip.findByName(G[k].animations, n));
@@ -394,8 +395,15 @@ class Crowd {
   update(dt, t) {
     this.ambT -= dt;
     if (this.ambT < 0 && this.list.length) { this.ambT = rand(0.1, 0.4); pick(this.list).ex += 0.6; }
-    for (const s of this.list) {
-      s.ex = Math.max(0, s.ex - dt * 0.45);
+    // squelettes : une moitié des spectateurs par image, donc 30 Hz chacun (invisible de loin, deux fois moins de calcul)
+    this.tick ^= 1;
+    this.owed[0] += dt; this.owed[1] += dt;
+    const step = this.owed[this.tick];      // temps écoulé depuis la dernière mise à jour de cette moitié
+    this.owed[this.tick] = 0;
+    for (let i = 0; i < this.list.length; i++) {
+      const s = this.list[i];
+      if ((i & 1) !== this.tick) { s.o.position.y = s.baseY + this.jumpOf(s, t); continue; }
+      s.ex = Math.max(0, s.ex - step * 0.45);
       const want = s.ex > 0.4 ? 'emote-yes' : s.base;
       if (want !== s.cur) {
         const a = s.acts[want];
@@ -403,11 +411,11 @@ class Crowd {
         s.acts[s.cur].crossFadeTo(a, 0.2, false);
         s.cur = want;
       }
-      s.mx.update(dt * (1 + s.ex * 0.4));
-      const jump = s.sit && s.ex < 0.4 ? 0 : Math.abs(Math.sin(t * 8 + s.ph)) * 0.24 * Math.min(1, Math.max(0, s.ex - 0.3) * 1.6);
-      s.o.position.y = s.baseY + jump;
+      s.mx.update(step * (1 + s.ex * 0.4));
+      s.o.position.y = s.baseY + this.jumpOf(s, t);
     }
   }
+  jumpOf(s, t) { return s.sit && s.ex < 0.4 ? 0 : Math.abs(Math.sin(t * 8 + s.ph)) * 0.24 * Math.min(1, Math.max(0, s.ex - 0.3) * 1.6); }
   confetti(colors) {
     for (let i = 0; i < 40; i++) {
       const s = pick(this.list);
@@ -941,12 +949,36 @@ class FighterView {
     this.seenReset = -1; this.seenAnim = '';
     this.px = this.py = this.pz = 0;       // position à l'image de simulation précédente (interpolation)
     this.rx = this.ry = this.rz = 0;       // position affichée
+    this.vx = this.vy = this.vz = 0;       // déplacement par image de simulation (pour estimer où on aurait dû être)
+    this.ox = this.oy = this.oz = 0;       // écart de correction (rollback) qui s'efface en douceur à l'affichage
     this.snapPos = true;
   }
   dispose() { scene.remove(this.root, this.ring); }
 
   // à appeler avant chaque image de simulation
-  capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
+  capture(sf) {
+    this.vx = sf.x - this.px; this.vy = sf.y - this.py; this.vz = sf.z - this.pz;
+    this.px = sf.x; this.py = sf.y; this.pz = sf.z;
+  }
+  // Un rollback a déplacé ce combattant (sf : état corrigé). Sans correction, il serait en
+  // (p + v) et l'affichage irait de p vers p + v. On fait en sorte d'afficher exactement cela
+  // (interpolation depuis sf - v, plus un écart o = p + v - sf), puis l'écart fond en ~70 ms.
+  absorb(sf) {
+    const dx = this.px + this.vx - sf.x, dy = this.py + this.vy - sf.y, dz = this.pz + this.vz - sf.z;
+    this.needSeek = true;
+    if (Math.hypot(dx, dy, dz) > 4) return;      // vraie téléportation du jeu (nouvelle manche, resynchronisation) : pas de lissage
+    this.ox += dx; this.oy += dy; this.oz += dz;
+    this.px = sf.x - this.vx; this.py = sf.y - this.vy; this.pz = sf.z - this.vz;
+  }
+  // Recale l'animation en cours sur le temps de la simulation (coups, sauts : ce qu'on voit
+  // doit correspondre aux images où le coup touche, même si on l'a appris en retard).
+  seek(sf) {
+    const a = this.cur;
+    if (!a || sf.animLoop) return;
+    const d = a.getClip().duration;
+    const t = Math.max(0, Math.min(d, sf.animT * sf.animTs + (sf.animTs < 0 ? d : 0)));
+    if (Math.abs(a.time - t) > 0.04) a.time = t;
+  }
 
   applyReset(sf) {
     this.model.rotation.set(0, sf.yaw, 0);
@@ -989,17 +1021,22 @@ class FighterView {
   }
 
   // sf : état de simulation de ce combattant ; dt : durée « de jeu » écoulée (ralenti/arrêt sur image inclus)
-  render(sf, dt, T, alpha) {
+  render(sf, dt, T, alpha, rdt = dt) {
     if (sf.resetN !== this.seenReset) { this.seenReset = sf.resetN; this.applyReset(sf); this.seenAnim = ''; }
     const key = sf.animN + '|' + sf.anim + '|' + sf.animTs;
     if (key !== this.seenAnim) {
       this.seenAnim = key;
-      this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: sf.animFade });
+      // animation commencée il y a animT (découverte après une correction) : on saute le fondu déjà écoulé
+      this.play(sf.anim, { ts: sf.animTs, loop: sf.animLoop, restart: sf.animRestart, fade: Math.max(0, sf.animFade - sf.animT) });
+      if (sf.animT > 0) this.seek(sf);
     }
-    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.snapPos = false; }
-    this.rx = this.px + (sf.x - this.px) * alpha;
-    this.ry = this.py + (sf.y - this.py) * alpha;
-    this.rz = this.pz + (sf.z - this.pz) * alpha;
+    if (this.needSeek) { this.needSeek = false; this.seek(sf); }
+    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.ox = this.oy = this.oz = 0; this.snapPos = false; }
+    const k = Math.exp(-rdt * 14);               // l'écart de correction fond (≈ 70 ms)
+    this.ox *= k; this.oy *= k; this.oz *= k;
+    this.rx = this.px + (sf.x - this.px) * alpha + this.ox;
+    this.ry = this.py + (sf.y - this.py) * alpha + this.oy;
+    this.rz = this.pz + (sf.z - this.pz) * alpha + this.oz;
     this.stars.visible = sf.state === 'stun';
     if (sf.state === 'brk' && sf.stateT < BRK.start) {
       this.flashCol.setRGB(1, 0.42, 0.05);
@@ -1312,8 +1349,11 @@ function togglePause() {
 function simTick() {
   for (let i = 0; i < 2; i++) F[i]?.capture(sim.f[i]);
   if (rb) {
-    if (!rb.tick(localInput(net.me))) return false;
+    const rollbacks = rb.stats.rollbacks;
+    const ran = rb.tick(localInput(net.me));
+    if (rb.stats.rollbacks !== rollbacks) F.forEach((f, i) => f.absorb(sim.f[i]));   // même si on attend ensuite
     playEvents(rb.takeEvents());
+    if (!ran) return false;
     return true;
   }
   const ph = sim.g.phase;
@@ -1425,14 +1465,14 @@ function frame(now) {
 
 // Résolution dynamique : si la machine peine, on baisse la définition du rendu (jamais celle du jeu) ;
 // si elle a de la marge pendant un moment, on la remonte.
-let pixelRatio = Math.min(devicePixelRatio, 2), resAvg = 16, resN = 0, resGood = 0;
+let pixelRatio = Math.min(devicePixelRatio, 1.5), resAvg = 16, resN = 0, resGood = 0;
 const maxPixelRatio = pixelRatio;
 function adaptResolution(raw) {
   resAvg += (Math.min(raw, 0.1) * 1000 - resAvg) * 0.06;
   if (++resN % 90) return;
   let pr = pixelRatio;
-  if (resAvg > 26) { pr = Math.max(0.7, pr - 0.25); resGood = 0; }
-  else if (resAvg < 19 && ++resGood >= 4) { pr = Math.min(maxPixelRatio, pr + 0.25); resGood = 0; }
+  if (resAvg > 20) { pr = Math.max(0.6, pr - 0.25); resGood = 0; }      // sous ~50 images/s : on baisse la définition
+  else if (resAvg < 17.5 && ++resGood >= 4) { pr = Math.min(maxPixelRatio, pr + 0.25); resGood = 0; }
   if (pr !== pixelRatio) { pixelRatio = pr; renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); }
 }
 
@@ -1440,7 +1480,8 @@ function adaptResolution(raw) {
 // l'affichage interpole entre deux images de simulation.
 function step(rdt) {
   clockT += rdt;
-  acc = Math.min(acc + rdt, 0.1);
+  // en ligne : rate() ralentit/accélère de quelques % pour rester à la même image que l'adversaire
+  acc = Math.min(acc + rdt * (rb ? rb.rate() : 1), 0.1);
   let n = 0;
   while (acc >= DT && n < 6) {
     if (!simTick()) break;       // en ligne : on attend l'adversaire (le temps non simulé est conservé)
@@ -1448,7 +1489,7 @@ function step(rdt) {
   }
   const g = sim.g, alpha = Math.min(1, acc / DT);
   const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
-  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha));
+  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha, rdt));
   for (const u of updaters) u(rdt, clockT);
   updateParticles(rdt);
   updateRings(rdt);
@@ -1464,7 +1505,7 @@ let uiFade = false, uiNet = '';
 function syncUi() {
   const fade = game.phase === 'ko' && sim.g.flagFade;
   if (fade !== uiFade) { uiFade = fade; $('fade').classList.toggle('on', fade); }
-  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}` : '';
+  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'}${rb.rtt === null ? '' : ` · ${Math.round(rb.rtt)} ms`} · délai ${rb.delay} · ↺ ${rb.stats.rollbacks}` : '';
   if (txt !== uiNet) { uiNet = txt; $('netStat').textContent = txt; }
 }
 
@@ -1750,5 +1791,5 @@ boot();
 
 // Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
+  window.__game = { renderer, scene, get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
 }
