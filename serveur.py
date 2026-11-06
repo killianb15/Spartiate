@@ -10,10 +10,13 @@ import socket
 import struct
 import sys
 import threading
+import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8123
+ARGS = [a for a in sys.argv[1:] if not a.startswith('-')]
+PORT = int(ARGS[0]) if ARGS else 8123
+OPEN_BROWSER = '--no-browser' not in sys.argv[1:]
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -212,9 +215,11 @@ class Handler(SimpleHTTPRequestHandler):
 
 class Server(ThreadingHTTPServer):
     """Écoute en IPv4 et en IPv6 (« localhost » pointe souvent vers ::1), et refuse
-    de partager le port : sous Windows, un ancien serveur pourrait sinon répondre à sa place."""
+    de partager le port : sous Windows, un ancien serveur pourrait sinon répondre à sa place.
+    Sous Linux/macOS, SO_REUSEADDR n'autorise pas deux serveurs sur le même port mais évite
+    l'erreur « port déjà utilisé » pendant ~1 min après avoir fermé le jeu."""
     address_family = socket.AF_INET6
-    allow_reuse_address = False
+    allow_reuse_address = os.name != 'nt'
 
     def server_bind(self):
         if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
@@ -239,7 +244,8 @@ def main():
             httpd = Server4(('', PORT), handler)    # pas d'IPv6 sur ce PC
     except OSError:
         print(f'Le port {PORT} est déjà utilisé : le jeu tourne sans doute déjà dans une autre fenêtre.')
-        print('Ferme les autres fenêtres de jouer.bat puis relance.')
+        print('Ferme les autres fenêtres du jeu (jouer.bat / jouer.sh) puis relance,')
+        print(f'ou choisis un autre port, par exemple : python serveur.py {PORT + 1}')
         sys.exit(1)
     print('=' * 60)
     print('  SPARTIATE ARENES')
@@ -250,7 +256,10 @@ def main():
     if len(ips) > 1:
         print('  (autres adresses possibles : ' + ', '.join(ips[1:]) + ')')
     print('  Laisse cette fenêtre ouverte pendant que vous jouez.')
+    print('  (Ctrl+C pour arrêter)')
     print('=' * 60, flush=True)
+    if OPEN_BROWSER:
+        threading.Timer(0.5, webbrowser.open, (f'http://localhost:{PORT}/',)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

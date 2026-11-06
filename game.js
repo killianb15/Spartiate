@@ -1864,7 +1864,7 @@ function netConnect(first) {
     netClose();
     if (wasLive) toMenu(true);
     netInfo(opened ? 'Connexion perdue avec le serveur.'
-      : 'Impossible de joindre le serveur de jeu. Lance le jeu avec <b>jouer.bat</b> sur le PC qui crée la partie.');
+      : 'Impossible de joindre le serveur de jeu. Lance le jeu avec <b>jouer.bat</b> (Windows) ou <b>jouer.sh</b> (Linux) sur le PC qui crée la partie.');
     refreshMenu();
   };
 }
@@ -2015,7 +2015,7 @@ async function boot() {
     const e = $('lerr');
     e.classList.remove('hidden');
     e.innerHTML = location.protocol === 'file:'
-      ? 'Le jeu doit être lancé via un petit serveur local.<br>Double-clique sur <b>jouer.bat</b> dans le dossier du jeu.'
+      ? 'Le jeu doit être lancé via un petit serveur local.<br>Double-clique sur <b>jouer.bat</b> (Windows) ou lance <b>./jouer.sh</b> (Linux) dans le dossier du jeu.'
       : 'Impossible de charger les modèles : ' + (err?.message || err);
     console.error(err);
     return;
