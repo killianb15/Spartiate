@@ -57,8 +57,8 @@ const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc' };
 // =====================================================================
 //  Rendu
 // =====================================================================
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -371,10 +371,11 @@ function torch(x, y, z, ry, lightI = 8) {
 
 // ---------- Foule ----------
 class Crowd {
-  constructor() { this.list = []; this.ambT = 0; }
+  constructor() { this.list = []; this.ambT = 0; this.tick = 0; this.owed = [0, 0]; }
   add(x, y, z, kinds, base = 'idle', s = 1.25, ry = 0) {
     const k = pick(kinds);
     const o = P(k, x, y, z, ry + rand(-0.25, 0.25), s);
+    o.traverse((m) => { if (m.isMesh) m.castShadow = false; });   // la foule est loin : ses ombres ne se voient pas et coûtent un dessin de plus par spectateur
     const mx = new THREE.AnimationMixer(o);
     const acts = {};
     for (const n of ['idle', 'emote-yes', 'sit']) acts[n] = mx.clipAction(THREE.AnimationClip.findByName(G[k].animations, n));
@@ -394,8 +395,15 @@ class Crowd {
   update(dt, t) {
     this.ambT -= dt;
     if (this.ambT < 0 && this.list.length) { this.ambT = rand(0.1, 0.4); pick(this.list).ex += 0.6; }
-    for (const s of this.list) {
-      s.ex = Math.max(0, s.ex - dt * 0.45);
+    // squelettes : une moitié des spectateurs par image, donc 30 Hz chacun (invisible de loin, deux fois moins de calcul)
+    this.tick ^= 1;
+    this.owed[0] += dt; this.owed[1] += dt;
+    const step = this.owed[this.tick];      // temps écoulé depuis la dernière mise à jour de cette moitié
+    this.owed[this.tick] = 0;
+    for (let i = 0; i < this.list.length; i++) {
+      const s = this.list[i];
+      if ((i & 1) !== this.tick) { s.o.position.y = s.baseY + this.jumpOf(s, t); continue; }
+      s.ex = Math.max(0, s.ex - step * 0.45);
       const want = s.ex > 0.4 ? 'emote-yes' : s.base;
       if (want !== s.cur) {
         const a = s.acts[want];
@@ -403,11 +411,11 @@ class Crowd {
         s.acts[s.cur].crossFadeTo(a, 0.2, false);
         s.cur = want;
       }
-      s.mx.update(dt * (1 + s.ex * 0.4));
-      const jump = s.sit && s.ex < 0.4 ? 0 : Math.abs(Math.sin(t * 8 + s.ph)) * 0.24 * Math.min(1, Math.max(0, s.ex - 0.3) * 1.6);
-      s.o.position.y = s.baseY + jump;
+      s.mx.update(step * (1 + s.ex * 0.4));
+      s.o.position.y = s.baseY + this.jumpOf(s, t);
     }
   }
+  jumpOf(s, t) { return s.sit && s.ex < 0.4 ? 0 : Math.abs(Math.sin(t * 8 + s.ph)) * 0.24 * Math.min(1, Math.max(0, s.ex - 0.3) * 1.6); }
   confetti(colors) {
     for (let i = 0; i < 40; i++) {
       const s = pick(this.list);
@@ -1425,14 +1433,14 @@ function frame(now) {
 
 // Résolution dynamique : si la machine peine, on baisse la définition du rendu (jamais celle du jeu) ;
 // si elle a de la marge pendant un moment, on la remonte.
-let pixelRatio = Math.min(devicePixelRatio, 2), resAvg = 16, resN = 0, resGood = 0;
+let pixelRatio = Math.min(devicePixelRatio, 1.5), resAvg = 16, resN = 0, resGood = 0;
 const maxPixelRatio = pixelRatio;
 function adaptResolution(raw) {
   resAvg += (Math.min(raw, 0.1) * 1000 - resAvg) * 0.06;
   if (++resN % 90) return;
   let pr = pixelRatio;
-  if (resAvg > 26) { pr = Math.max(0.7, pr - 0.25); resGood = 0; }
-  else if (resAvg < 19 && ++resGood >= 4) { pr = Math.min(maxPixelRatio, pr + 0.25); resGood = 0; }
+  if (resAvg > 20) { pr = Math.max(0.6, pr - 0.25); resGood = 0; }      // sous ~50 images/s : on baisse la définition
+  else if (resAvg < 17.5 && ++resGood >= 4) { pr = Math.min(maxPixelRatio, pr + 0.25); resGood = 0; }
   if (pr !== pixelRatio) { pixelRatio = pr; renderer.setPixelRatio(pr); renderer.setSize(innerWidth, innerHeight); }
 }
 
@@ -1750,5 +1758,5 @@ boot();
 
 // Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
+  window.__game = { renderer, scene, get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
 }
