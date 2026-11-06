@@ -150,6 +150,27 @@
     font-family: Cinzel, serif; font-weight: 800; font-size: 20px; letter-spacing: .06em; }
   .overlay .btns button.main { border-color: #f1c66d; background: linear-gradient(180deg, #e3b04f, #9b6418); color: #1b0f05; }
 
+  /* ---------- Configuration des touches ---------- */
+  #keysOv { z-index: 30; }
+  .kpanel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px;
+    max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); overflow: auto; }
+  .kpanel h3 { font-family: Cinzel, serif; font-weight: 900; font-size: 30px; letter-spacing: .1em; color: var(--bronze); margin: 0 0 6px; }
+  #kHint { font-size: 17px; color: var(--muted); margin: 0 0 4px; min-height: 26px; }
+  #kHint b { color: var(--ink); }
+  #kNote { font-size: 15px; color: var(--muted); margin: 0 0 10px; font-style: italic; }
+  #kTable { border-collapse: collapse; margin: 0 auto 14px; font-size: 17px; }
+  #kTable th { font-family: Cinzel, serif; font-size: 14px; letter-spacing: .12em; padding: 4px 6px; }
+  #kTable th.kp1 { color: #ffb3a8; } #kTable th.kp2 { color: #a8d4ff; }
+  #kTable td { padding: 2px 3px; }
+  #kTable td.kact { text-align: right; padding-right: 12px; color: var(--ink); white-space: nowrap; }
+  .kslot { min-width: 92px; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); background: rgba(255,255,255,.05);
+    font-weight: 700; font-size: 16px; }
+  .kslot:hover { background: rgba(217,164,65,.15); }
+  .kslot.empty { color: var(--muted); font-weight: 500; }
+  .kslot.wait { border-color: #f1c66d; background: rgba(217,164,65,.3); animation: blink .4s infinite alternate; }
+  .kpanel .btns { display: flex; gap: 12px; justify-content: center; }
+  .kpanel .btns button { padding: 10px 22px; font-size: 18px; }
+
   @media (max-width: 720px) {
     #menu { padding: 18px 16px; background: rgba(14,9,5,.9); }
     #menu h1 { font-size: 36px; }
@@ -218,6 +239,7 @@
   <button id="go">COMBATTRE</button>
 
   <div class="keys" id="keysMenu"></div>
+  <button class="small-btn" id="keysBtn">Configurer les touches</button>
   <button class="small-btn" id="soundBtn">Son : activé</button>
 </div>
 
@@ -253,6 +275,7 @@
   <p id="pauseTxt">Échap pour reprendre</p>
   <div class="btns">
     <button class="main" id="resumeBtn">Reprendre</button>
+    <button id="pauseKeysBtn">Touches</button>
     <button id="quitBtn">Menu principal</button>
   </div>
 </div>
@@ -263,6 +286,19 @@
   <div class="btns">
     <button class="main" id="againBtn">Revanche</button>
     <button id="menuBtn">Menu principal</button>
+  </div>
+</div>
+
+<div id="keysOv" class="overlay hidden">
+  <div class="kpanel">
+    <h3>TOUCHES</h3>
+    <div id="kHint"></div>
+    <div id="kNote"></div>
+    <table id="kTable"></table>
+    <div class="btns">
+      <button id="kReset">Par défaut</button>
+      <button class="main" id="kDone">Terminé</button>
+    </div>
   </div>
 </div>
 

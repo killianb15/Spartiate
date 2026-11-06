@@ -1216,10 +1216,36 @@ class Input {
   clear() { for (const k in this.buf) this.buf[k] = 0; this.l = this.r = this.u = this.d = this.blk = false; this.mx = this.mz = 0; }
 }
 
-const KEYSETS = [
-  { l: ['KeyA'], r: ['KeyD'], u: ['KeyW'], d: ['KeyS'], jump: ['Space'], atk: ['KeyF'], blk: ['KeyG'], par: ['KeyH'], brk: ['KeyR'], roll: ['KeyE', 'ShiftLeft'] },
-  { l: ['ArrowLeft'], r: ['ArrowRight'], u: ['ArrowUp'], d: ['ArrowDown'], jump: ['KeyO', 'Numpad0'], atk: ['KeyK', 'Numpad1'], blk: ['KeyL', 'Numpad2'], par: ['Semicolon', 'Numpad3'], brk: ['KeyI', 'Numpad4'], roll: ['KeyJ', 'Numpad5'] },
+// Chaque action a 2 emplacements de touche (null = vide). En solo et en ligne,
+// les deux jeux de touches contrôlent le même personnage.
+const DEFAULT_KEYSETS = [
+  { l: ['KeyA', null], r: ['KeyD', null], u: ['KeyW', null], d: ['KeyS', null], jump: ['Space', null], atk: ['KeyF', null], blk: ['KeyG', null], par: ['KeyH', null], brk: ['KeyR', null], roll: ['KeyE', 'ShiftLeft'] },
+  { l: ['ArrowLeft', null], r: ['ArrowRight', null], u: ['ArrowUp', null], d: ['ArrowDown', null], jump: ['KeyO', 'Numpad0'], atk: ['KeyK', 'Numpad1'], blk: ['KeyL', 'Numpad2'], par: ['Semicolon', 'Numpad3'], brk: ['KeyI', 'Numpad4'], roll: ['KeyJ', 'Numpad5'] },
 ];
+const ACTIONS = [
+  ['u', 'Haut (pas vers le fond)'], ['d', 'Bas (pas vers l\'avant)'], ['l', 'Gauche'], ['r', 'Droite'],
+  ['jump', 'Sauter'], ['atk', 'Attaquer'], ['blk', 'Bloquer (maintenir)'], ['par', 'Parer'],
+  ['brk', 'Briser la garde'], ['roll', 'Roulade'],
+];
+const KEYS_STORE = 'spartiate-touches';
+const RESERVED = ['Escape'];   // Échap = pause, non configurable
+const cloneKeys = (sets) => sets.map((set) => Object.fromEntries(Object.entries(set).map(([a, c]) => [a, [...c]])));
+function loadKeys() {
+  const sets = cloneKeys(DEFAULT_KEYSETS);
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEYS_STORE) || 'null');
+    if (Array.isArray(saved)) sets.forEach((set, i) => {
+      for (const act in set) {
+        const c = saved[i]?.[act];
+        if (Array.isArray(c)) set[act] = [0, 1].map((k) => (typeof c[k] === 'string' && !RESERVED.includes(c[k]) ? c[k] : null));
+      }
+    });
+  } catch (e) { /* stockage indisponible ou corrompu : touches par défaut */ }
+  return sets;
+}
+function saveKeys() { try { localStorage.setItem(KEYS_STORE, JSON.stringify(KEYSETS)); } catch (e) { /* ignoré */ } }
+let KEYSETS = loadKeys();
+const key1 = (set, act) => set[act].find(Boolean);   // première touche définie
 const HELD = ['l', 'r', 'u', 'd', 'blk'];
 let bindings = new Map();   // code -> [[joueur, action], ...]
 function setupBindings(mode, me = 0) {
@@ -1228,6 +1254,7 @@ function setupBindings(mode, me = 0) {
     const player = mode === 'duo' ? i : me;
     for (const [act, codes] of Object.entries(set))
       for (const c of codes) {
+        if (!c) continue;
         if (!bindings.has(c)) bindings.set(c, []);
         bindings.get(c).push([player, act]);
       }
@@ -1239,29 +1266,43 @@ const inputs = [new Input(), new Input()];
 // étiquettes des touches selon la disposition réelle du clavier (AZERTY par défaut)
 let layout = null;
 const AZERTY = { KeyA: 'Q', KeyW: 'Z', KeyQ: 'A', KeyZ: 'W', Semicolon: 'M' };
-const SPECIAL = { Space: 'Espace', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓', Numpad0: 'Pavé 0', Numpad1: 'Pavé 1', Numpad2: 'Pavé 2', Numpad3: 'Pavé 3', Numpad4: 'Pavé 4', Numpad5: 'Pavé 5', ShiftLeft: 'Maj' };
+const SPECIAL = {
+  Space: 'Espace', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
+  ShiftLeft: 'Maj', ShiftRight: 'Maj droite', ControlLeft: 'Ctrl', ControlRight: 'Ctrl droite',
+  AltLeft: 'Alt', AltRight: 'Alt Gr', MetaLeft: 'Win', MetaRight: 'Win droite', ContextMenu: 'Menu',
+  Enter: 'Entrée', NumpadEnter: 'Pavé Entrée', Tab: 'Tab', Backspace: 'Retour', CapsLock: 'Verr. Maj',
+  Insert: 'Inser', Delete: 'Suppr', Home: 'Début', End: 'Fin', PageUp: 'Page ↑', PageDown: 'Page ↓',
+  NumpadAdd: 'Pavé +', NumpadSubtract: 'Pavé −', NumpadMultiply: 'Pavé ×', NumpadDivide: 'Pavé /', NumpadDecimal: 'Pavé .',
+};
+const esc = (t) => String(t).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
 function lab(code) {
+  if (!code) return '—';
   if (SPECIAL[code]) return SPECIAL[code];
+  if (/^Numpad\d$/.test(code)) return 'Pavé ' + code.slice(6);
   const k = layout?.get(code);
   if (k) return k.toUpperCase();
-  return AZERTY[code] ?? code.replace('Key', '');
+  return AZERTY[code] ?? code.replace(/^(Key|Digit)/, '');
 }
-const kb = (code) => `<kbd>${lab(code)}</kbd>`;
+const kb = (code) => `<kbd>${esc(lab(code))}</kbd>`;
 function controlsHTML(mode, compact) {
   const a = KEYSETS[0], b = KEYSETS[1];
   if (mode !== 'duo') {
+    // une action : touche du jeu 2 (main droite), sinon du jeu 1
+    const one = (act) => kb(key1(b, act) ?? key1(a, act));
+    const move = (s) => ['u', 'l', 'd', 'r'].map((act) => kb(key1(s, act))).join('');
     const rows = [
-      `<b>Se déplacer</b> ${kb(a.u[0])}${kb(a.l[0])}${kb(a.d[0])}${kb(a.r[0])} ou flèches · <b>Sauter</b> ${kb('Space')} · <b>Roulade</b> ${kb(b.roll[0])} ou ${kb('ShiftLeft')}`,
-      `<b>Attaquer</b> ${kb(b.atk[0])} · <b>Bloquer</b> ${kb(b.blk[0])} (maintenir) · <b>Parer</b> ${kb(b.par[0])} · <b>Briser la garde</b> ${kb(b.brk[0])}`,
+      `<b>Se déplacer</b> ${move(a)} ou ${move(b)} · <b>Sauter</b> ${kb(key1(a, 'jump') ?? key1(b, 'jump'))} · <b>Roulade</b> ${one('roll')}`,
+      `<b>Attaquer</b> ${one('atk')} · <b>Bloquer</b> ${one('blk')} (maintenir) · <b>Parer</b> ${one('par')} · <b>Briser la garde</b> ${one('brk')}`,
     ];
-    if (!compact) rows.push(`<span>(ou ${kb(a.atk[0])} ${kb(a.blk[0])} ${kb(a.par[0])} ${kb(a.brk[0])} ${kb(a.roll[0])} de la main gauche)</span>`);
+    if (!compact) rows.push(`<span>(ou ${['atk', 'blk', 'par', 'brk', 'roll'].map((act) => kb(key1(a, act))).join(' ')} de la main gauche)</span>`);
     return rows.map((r) => `<div class="row">${r}</div>`).join('');
   }
-  const p = (s, n) => `<b style="color:${n ? '#a8d4ff' : '#ffb3a8'}">J${n + 1}</b> ${kb(s.u[0])}${kb(s.l[0])}${kb(s.d[0])}${kb(s.r[0])} saut ${kb(s.jump[0])} · att. ${kb(s.atk[0])} · bloc ${kb(s.blk[0])} · parer ${kb(s.par[0])} · briser ${kb(s.brk[0])} · roulade ${kb(s.roll[0])}`;
+  const p = (s, n) => `<b style="color:${n ? '#a8d4ff' : '#ffb3a8'}">J${n + 1}</b> ${['u', 'l', 'd', 'r'].map((act) => kb(key1(s, act))).join('')} saut ${kb(key1(s, 'jump'))} · att. ${kb(key1(s, 'atk'))} · bloc ${kb(key1(s, 'blk'))} · parer ${kb(key1(s, 'par'))} · briser ${kb(key1(s, 'brk'))} · roulade ${kb(key1(s, 'roll'))}`;
   return `<div class="row">${p(a, 0)}</div><div class="row">${p(b, 1)}</div>`;
 }
 
 addEventListener('keydown', (e) => {
+  if (keysEditorKey(e)) return;
   if (e.target instanceof HTMLInputElement) return;
   if (bindings.has(e.code) || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (e.code === 'Escape') { togglePause(); return; }
@@ -1797,8 +1838,70 @@ function refreshMenu() {
   refreshGo();
   $('p2Lbl').textContent = cfg.mode === 'solo' ? 'Adversaire (IA)' : 'Joueur 2';
   $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
-    `<div class="row" style="margin-top:8px"><b>Astuces :</b> l'arène est en 3D : bouge dans toutes les directions, la caméra tourne autour du combat · un <b>pas de côté</b> (${lab('KeyW')} / ${lab('KeyS')}) fait rater les coups lents · le blocage use ta garde · la <b>parade</b> au bon moment étourdit l'attaquant · <b>briser la garde</b> traverse blocage et parade, mais on l'esquive en <b>sautant</b>, en se décalant ou en frappant en premier · pris dans un enchaînement ? fais une <b>roulade</b> (invincible pendant la rotation) · la <b>barre verte</b> est ton endurance : attaques, roulades, sauts et parades en consomment, laisse-la remonter · Échap = pause</div>`;
+    `<div class="row" style="margin-top:8px"><b>Astuces :</b> l'arène est en 3D : bouge dans toutes les directions, la caméra tourne autour du combat · un <b>pas de côté</b> (${esc(lab(key1(KEYSETS[0], 'u')))} / ${esc(lab(key1(KEYSETS[0], 'd')))}) fait rater les coups lents · le blocage use ta garde · la <b>parade</b> au bon moment étourdit l'attaquant · <b>briser la garde</b> traverse blocage et parade, mais on l'esquive en <b>sautant</b>, en se décalant ou en frappant en premier · pris dans un enchaînement ? fais une <b>roulade</b> (invincible pendant la rotation) · la <b>barre verte</b> est ton endurance : attaques, roulades, sauts et parades en consomment, laisse-la remonter · Échap = pause</div>`;
 }
+// ---------- Configuration des touches ----------
+const KEYS_HINT = 'Clique sur une case puis appuie sur la touche voulue. <kbd>Suppr</kbd> vide la case, <kbd>Échap</kbd> annule.';
+let keyCapture = null;   // { set, act, slot } pendant qu'on attend une touche
+function keysTable() {
+  const head = ['Joueur 1', 'Joueur 2'].map((n, i) => `<th colspan="2" class="kp${i + 1}">${n}</th>`).join('');
+  const rows = ACTIONS.map(([act, name]) => `<tr><td class="kact">${name}</td>${[0, 1].map((set) => [0, 1].map((slot) => {
+    const waiting = keyCapture && keyCapture.set === set && keyCapture.act === act && keyCapture.slot === slot;
+    const code = KEYSETS[set][act][slot];
+    return `<td><button class="kslot${waiting ? ' wait' : ''}${code ? '' : ' empty'}" data-set="${set}" data-act="${act}" data-slot="${slot}">${waiting ? '…' : esc(lab(code))}</button></td>`;
+  }).join('')).join('')}</tr>`).join('');
+  $('kTable').innerHTML = `<thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody>`;
+  $('kTable').querySelectorAll('.kslot').forEach((b) => {
+    b.onclick = () => {
+      keyCapture = { set: +b.dataset.set, act: b.dataset.act, slot: +b.dataset.slot };
+      $('kHint').innerHTML = `Appuie sur la touche pour <b>${ACTIONS.find(([a]) => a === keyCapture.act)[1]}</b> (joueur ${keyCapture.set + 1})…`;
+      keysTable();
+    };
+  });
+}
+function openKeysEditor() {
+  keyCapture = null;
+  $('kHint').innerHTML = KEYS_HINT;
+  $('kNote').textContent = cfg.mode === 'duo' ? '' : 'En solo et en ligne, les touches des deux joueurs contrôlent ton personnage.';
+  keysTable();
+  $('keysOv').classList.remove('hidden');
+}
+function closeKeysEditor() {
+  keyCapture = null;
+  $('keysOv').classList.add('hidden');
+}
+function keysChanged(msg) {
+  saveKeys();
+  if (match) {
+    setupBindings(match.mode, net.live ? net.me : 0);
+    $('help').innerHTML = controlsHTML(match.mode, true);
+  }
+  refreshMenu();
+  keyCapture = null;
+  $('kHint').innerHTML = msg || KEYS_HINT;
+  keysTable();
+}
+// Appelée en premier par le gestionnaire clavier : true si l'éditeur a pris la touche.
+function keysEditorKey(e) {
+  if ($('keysOv').classList.contains('hidden')) return false;
+  e.preventDefault();
+  if (e.repeat) return true;
+  if (!keyCapture) { if (e.code === 'Escape') closeKeysEditor(); return true; }
+  const { set, act, slot } = keyCapture;
+  if (e.code === 'Escape') { keyCapture = null; $('kHint').innerHTML = KEYS_HINT; keysTable(); return true; }
+  if (e.code === 'Delete' || e.code === 'Backspace') { KEYSETS[set][act][slot] = null; keysChanged(); return true; }
+  // une touche ne sert qu'à une seule action : on la retire d'ailleurs
+  let moved = '';
+  KEYSETS.forEach((s, i) => { for (const a in s) s[a] = s[a].map((c, k) => {
+    if (c !== e.code || (i === set && a === act && k === slot)) return c;
+    moved = ` (retirée de « ${ACTIONS.find(([x]) => x === a)[1]} », joueur ${i + 1})`;
+    return null;
+  }); });
+  KEYSETS[set][act][slot] = e.code;
+  keysChanged(`${kb(e.code)} → ${ACTIONS.find(([x]) => x === act)[1]}, joueur ${set + 1}${moved}`);
+  return true;
+}
+
 function setupMenu() {
   const cards = $('arenaCards');
   for (const [id, a] of Object.entries(ARENAS)) {
@@ -1835,6 +1938,10 @@ function setupMenu() {
     netConnect({ t: 'join', code });
   };
   $('codeIn').onkeydown = (e) => { if (e.key === 'Enter') $('joinBtn').click(); };
+  $('keysBtn').onclick = openKeysEditor;
+  $('pauseKeysBtn').onclick = openKeysEditor;
+  $('kDone').onclick = closeKeysEditor;
+  $('kReset').onclick = () => { KEYSETS = cloneKeys(DEFAULT_KEYSETS); keysChanged('Touches par défaut rétablies.'); };
   $('soundBtn').onclick = () => { soundOn = !soundOn; $('soundBtn').textContent = 'Son : ' + (soundOn ? 'activé' : 'coupé'); };
   refreshMenu();
 }
