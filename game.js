@@ -1,10 +1,12 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { Sim, DT, PRESS, NEUTRAL, quant, BRK, ROLL, STA } from './sim.js';
+import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, defaultWeapon } from './sim.js';
+const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { Link } from './net.js';
+import { DungeonSim, BOONS, HEROES, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -31,8 +33,17 @@ const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', ur
 // =====================================================================
 const A = 'assets/arena/Models/GLB format/';
 const D = 'assets/dungeon/Models/GLB format/';
+const K = 'assets/characters/';   // personnages et arc du pack Kenney Mini Characters
 const FILES = {
+  knight: K + 'character-knight.glb', zombie: K + 'character-zombie.glb', robot: K + 'character-robot.glb',
+  bow: 'assets/weapons/weapon-bow.glb',   // l'arc de l'archère, généré par tools/blender/archer.py
+  spear: D + 'weapon-spear.glb', tower: D + 'shield-rectangle.glb',
+  axe: 'assets/weapons/weapon-axe.glb', hammer: 'assets/weapons/weapon-hammer.glb',   // générés par tools/blender/weapons.py
+  staff: 'assets/weapons/weapon-staff.glb', tome: 'assets/weapons/weapon-tome.glb',
+  dog: 'assets/summons/dog.glb',   // chien invoqué par le grimoire, généré par tools/blender/dog.py
+  merchant: 'assets/npc/merchant.glb', stall: 'assets/npc/stall.glb',   // marchand d'armes et son étal (tools/blender/merchant.py)
   soldier: A + 'character-soldier.glb', human: D + 'character-human.glb', orc: D + 'character-orc.glb',
+  archer: AR + 'archer.glb', arrow: AR + 'arrow.glb',   // générés par tools/archer-asset.html
   sword: D + 'weapon-sword.glb', shield: D + 'shield-round.glb',
   a_floor: A + 'floor.glb', a_floorD: A + 'floor-detail.glb', a_wall: A + 'wall.glb', a_wallGate: A + 'wall-gate.glb',
   a_column: A + 'column.glb', a_columnD: A + 'column-damaged.glb', a_banner: A + 'banner.glb', a_block: A + 'block.glb',
@@ -41,8 +52,13 @@ const FILES = {
   d_floor: D + 'floor.glb', d_floorD: D + 'floor-detail.glb', d_wall: D + 'wall.glb', d_wallOpen: D + 'wall-opening.glb',
   d_gate: D + 'gate.glb', d_barrel: D + 'barrel.glb', d_chest: D + 'chest.glb', d_coin: D + 'coin.glb', d_trap: D + 'trap.glb',
   d_column: D + 'column.glb', d_wood: D + 'wood-structure.glb', d_support: D + 'wood-support.glb', d_rocks: D + 'rocks.glb',
-  d_stones: D + 'stones.glb', d_banner: D + 'banner.glb', d_pot: D + 'pot.glb',
+  d_stones: D + 'stones.glb', d_banner: D + 'banner.glb', d_pot: D + 'pot.glb', d_wallHalf: D + 'wall-half.glb', d_stairs: D + 'stairs.glb',
 };
+// décors des biomes du donjon, générés par tools/blender/biomes.py (clé : 'b_' + nom du fichier)
+for (const n of ['mine-wall', 'mine-wall-ore', 'mine-low', 'mine-portal', 'mine-floor', 'mine-floor-stones', 'minecart', 'crystals',
+  'mine-pillar', 'lantern', 'ruin-wall', 'ruin-wall-broken', 'ruin-low', 'ruin-portal', 'grass-floor', 'grass-floor-flowers', 'bush',
+  'basalt-wall', 'basalt-low', 'basalt-portal', 'basalt-floor', 'basalt-floor-cracks', 'lava', 'anvil', 'obsidian', 'lava-rocks'])
+  FILES['b_' + n] = 'assets/biomes/' + n + '.glb';
 const G = {};
 
 function inst(key, s = S) {
@@ -52,7 +68,7 @@ function inst(key, s = S) {
   return o;
 }
 
-const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc' };
+const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc', archer: 'Archer', knight: 'Chevalier', zombie: 'Zombie', robot: 'Automate' };
 
 // =====================================================================
 //  Rendu
@@ -132,6 +148,14 @@ const sfx = {
   gong: () => { tone(196, 2.2, { vol: 0.25 }); tone(294, 1.8, { vol: 0.1 }); tone(392, 1.2, { vol: 0.05 }); noise(0.3, { freq: 2500, vol: 0.05 }); },
   cheer: (v = 1) => { noise(1.7, { freq: 1100, q: 0.6, vol: 0.13 * v, attack: 0.3 }); noise(1.5, { freq: 2300, q: 0.8, vol: 0.06 * v, attack: 0.25 }); },
   thunder: (d) => { noise(3, { freq: 160, type: 'lowpass', vol: 0.9, attack: 0.05, delay: d }); noise(0.5, { freq: 900, type: 'lowpass', vol: 0.4, delay: d }); },
+  bow: () => { noise(0.12, { freq: 2400, to: 900, q: 2, vol: 0.18 }); tone(180, 0.12, { type: 'triangle', vol: 0.12, to: 110 }); },
+  thunk: () => { noise(0.08, { freq: 500, type: 'lowpass', vol: 0.35 }); tone(240, 0.08, { type: 'square', vol: 0.05, to: 120 }); },
+  fireball: () => { noise(0.45, { freq: 260, to: 900, q: 0.8, vol: 0.32 }); tone(110, 0.3, { type: 'sawtooth', vol: 0.06, to: 220 }); },
+  boom: () => { noise(0.7, { freq: 240, type: 'lowpass', vol: 0.9 }); tone(70, 0.5, { type: 'sawtooth', vol: 0.2, to: 30 }); noise(0.25, { freq: 1800, vol: 0.15 }); },
+  spell: () => { tone(330, 0.6, { type: 'triangle', vol: 0.08, to: 660 }); tone(495, 0.5, { type: 'sine', vol: 0.06, to: 990, delay: 0.05 }); noise(0.5, { freq: 3000, q: 2, vol: 0.05, attack: 0.2 }); },
+  bark: () => { noise(0.07, { freq: 900, q: 3, vol: 0.4 }); tone(420, 0.08, { type: 'square', vol: 0.08, to: 300 }); noise(0.07, { freq: 950, q: 3, vol: 0.35, delay: 0.14 }); tone(430, 0.08, { type: 'square', vol: 0.07, to: 310, delay: 0.14 }); },
+  whine: () => tone(900, 0.4, { type: 'triangle', vol: 0.08, to: 420 }),
+  tick: () => tone(880, 0.05, { type: 'triangle', vol: 0.06 }),
   coin: () => { tone(1320, 0.12, { type: 'square', vol: 0.05 }); tone(1760, 0.2, { type: 'square', vol: 0.05, delay: 0.07 }); },
 };
 
@@ -876,6 +900,7 @@ const ARENAS = {
 function buildArena(id) {
   world.clear();
   updaters = [];
+  for (const id of ['talk', 'shop']) $(id).classList.add('hidden');   // marchand (salle d'armes)
   crowd = null;
   arenaHooks = {};
   scene.fog = null;
@@ -887,16 +912,119 @@ function buildArena(id) {
 //  Combattants
 // =====================================================================
 const qBlock = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.1, -1.2, -0.35));
+
+// ---------- Orientation de l'arme pendant les coups ----------
+// Les animations Kenney font tourner le bras sur lui-même pendant la frappe : une arme fixée à la
+// main pointerait vers l'arrière au moment de l'impact. Pendant un coup, l'arme est donc orientée
+// ici le long d'un arc propre (repère du personnage : +z devant, +y haut, -x côté main droite),
+// le tranchant (axe +x de l'arme) en premier ; elle reste tenue par la main.
+const smooth = (a, b, t) => { const k = clamp((t - a) / (b - a), 0, 1); return k * k * (3 - 2 * k); };
+const mUp = new THREE.Vector3(), mFwd = new THREE.Vector3(), mEdge = new THREE.Vector3(), mSide = new THREE.Vector3();
+const mBasis = new THREE.Matrix4(), qSwing = new THREE.Quaternion(), qArmW = new THREE.Quaternion(), qModelW = new THREE.Quaternion();
+// direction de la pointe (dir) et du tranchant (edge) pour l'arc : angle a mesuré depuis la verticale vers l'avant
+function chop(a, out, edge) {
+  out.set(-0.22, Math.cos(a), Math.sin(a)).normalize();
+  edge.set(0, -Math.sin(a), Math.cos(a));           // sens du mouvement
+}
+// balayage horizontal de droite à gauche : angle b depuis l'avant vers la droite
+function sweep(b, out, edge) {
+  out.set(-Math.sin(b), 0.18, Math.cos(b)).normalize();
+  edge.set(Math.cos(b), 0, Math.sin(b));
+}
+// renvoie [poids, tenue] du coup en cours (poids 0 : la tenue de repos suffit)
+function swingPose(sf, wpn) {
+  let t, kind;
+  if (sf.state === 'shoot' && wpn === 'staff') {
+    // incantation : le sceptre se lève, puis pointe vers la cible quand la boule de feu part
+    const t = sf.stateT;
+    chop(-0.25 + smooth(0.12, FIRE.rel + 0.02, t) * 1.55, mFwd, mEdge);
+    return smooth(0, 0.08, t) * (1 - smooth(0.45, FIRE.dur, t));
+  }
+  let left = false;      // 2e coup : animation du bras gauche, le bras droit recule ensuite derrière le corps
+  if (sf.state === 'attack') { t = sf.stateT; left = sf.combo === 2; kind = wpn === 'spear' ? 'thrust' : left ? 'sweep' : 'chop'; }
+  else if (sf.state === 'air' && sf.airAtk && sf.airAtkT < 1) { t = sf.airAtkT + 0.05; kind = wpn === 'spear' ? 'thrust' : 'chop'; }
+  else return 0;
+  // armé (0 → 0.1 s), coup (0.1 → 0.24 s, fenêtre de touche 0.13 → 0.26 s), retour (0.3 → 0.42 s) ;
+  // au 2e coup, tout se joue plus tôt (le bras droit repart en arrière après 0.2 s)
+  const w = smooth(0, 0.07, t) * (1 - (left ? smooth(0.2, 0.3, t) : smooth(0.3, 0.42, t)));
+  const k = left ? smooth(0.06, 0.2, t) : smooth(0.08, 0.24, t);
+  if (kind === 'chop') chop(-0.55 + k * 2.45, mFwd, mEdge);          // de derrière la tête jusqu'à l'avant, vers le bas
+  else if (kind === 'sweep') sweep(1.5 - k * 1.85, mFwd, mEdge);     // de la droite jusqu'un peu à gauche de l'avant
+  else { mFwd.set(-0.08, -0.12 + 0.3 * (1 - k), 1).normalize(); mEdge.set(0, 1, 0); }   // estoc droit devant
+  return w;
+}
 const ringFoot = new THREE.RingGeometry(0.42, 0.56, 36).rotateX(-Math.PI / 2);
 const starGeo = new THREE.OctahedronGeometry(0.075);
 const starMat = new THREE.MeshBasicMaterial({ color: 0xffe14a, toneMapped: false });
 
 // Vue d'un combattant : modèle 3D, animations et effets visuels. Tout ce qui touche au
 // gameplay est dans sim.js ; ici on ne fait que LIRE l'état de la simulation (sf).
+// Armes tenues en main : épée (ou lance) dans la main droite, bouclier (ou arc) dans la gauche.
+// L'arc joue le rôle du bouclier : il reste droit et brille à la parade.
+const SWORD_DIR = new THREE.Vector3(0.65, 0, 0.76).normalize();
+const HAND = new THREE.Vector3(-0.25, 0, 0.02);    // main droite, dans le repère du bras
+// back : la main tient l'arme à cette distance de son origine (le long du manche)
+function heldWeapon(key, s, back = 0) {
+  const o = inst(key, s);
+  o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), SWORD_DIR);
+  o.position.copy(HAND).addScaledVector(SWORD_DIR, -back);
+  o.userData.back = back;
+  return o;
+}
+// l'arc de l'archère, pour les autres personnages : poignée à l'origine, branches vers +z,
+// flèche encochée 'nocked' incluse
+const bowGroup = () => inst('bow', 1);
+// orbe du sceptre : matière lumineuse (sa couleur varie avec l'incantation)
+const orbColor = new THREE.Color(1, 0.5, 0.15);
+function glowOrb(staff) {
+  const orb = staff.getObjectByName('orb');
+  if (orb) orb.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshBasicMaterial({ color: orbColor.clone(), toneMapped: false }); });
+  return orb;
+}
+// rune du grimoire / pierre du collier des chiens : matière lumineuse violette
+const runeColor = new THREE.Color(0.75, 0.45, 1);
+function glowNode(obj, name, color) {
+  const n = obj.getObjectByName(name);
+  if (n) n.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshBasicMaterial({ color: color.clone(), toneMapped: false }); });
+  return n;
+}
+function equipModel(v, kind, wpn) {
+  const builtIn = v.model.getObjectByName('bow');    // l'archère a son arc dans le modèle
+  if (builtIn) builtIn.visible = wpn === 'bow';
+  v.sword = null;
+  if (wpn === 'tome') {
+    // grimoire dans la main gauche, tenu comme un bouclier (reste droit, brille à la parade)
+    v.shield = inst('tome', 1.0);
+    v.shield.position.set(0.24, 0, 0.07);
+    v.armL.add(v.shield);
+    v.rune = glowNode(v.shield, 'rune', runeColor);
+    return;
+  }
+  if (wpn === 'bow') {
+    v.shield = builtIn ?? bowGroup();
+    if (!builtIn) { v.shield.position.set(0.255, 0, 0.05); v.armL.add(v.shield); }
+    v.nocked = v.shield.getObjectByName('nocked');   // flèche encochée, visible pendant la visée
+    v.nocked.visible = false;
+    return;
+  }
+  v.sword = wpn === 'spear' ? heldWeapon('spear', 1.45, 0.3) : wpn === 'staff' ? heldWeapon('staff', 1.0, 0.08)
+    : wpn === 'axe' || wpn === 'hammer' ? heldWeapon(wpn, 0.9) : heldWeapon('sword', 0.9);
+  v.armR.add(v.sword);
+  v.swordQ = v.sword.quaternion.clone();     // tenue de repos (dans le repère du bras)
+  v.swordP = v.sword.position.clone();
+  if (wpn === 'hammer' || wpn === 'staff') { v.shield = new THREE.Group(); v.armL.add(v.shield); }   // pas de bouclier
+  if (wpn === 'staff') v.orb = glowOrb(v.sword);
+  if (wpn === 'hammer' || wpn === 'staff') return;
+  v.shield = inst(wpn === 'tower' ? 'tower' : 'shield', wpn === 'tower' ? 1.1 : 0.8);
+  v.shield.position.set(0.24, wpn === 'tower' ? -0.2 : 0, 0.07);
+  v.armL.add(v.shield);
+}
+
 class FighterView {
-  constructor(idx, kind) {
+  constructor(idx, kind, wpn = defaultWeapon(kind)) {
     this.idx = idx;
     this.kind = kind;
+    this.wpn = wpn;
     this.root = new THREE.Group();
     scene.add(this.root);
     this.pivot = new THREE.Group();
@@ -914,15 +1042,10 @@ class FighterView {
     this.armR = this.model.getObjectByName('arm-right');
     this.torso = this.model.getObjectByName('torso');
 
-    this.sword = inst('sword', 0.9);
-    this.sword.position.set(-0.25, 0, 0.02);
-    this.sword.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0.65, 0, 0.76));
-    this.armR.add(this.sword);
-    this.shield = inst('shield', 0.8);
+    equipModel(this, kind, wpn);
     this.shieldMats = [];
-    this.shield.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); this.shieldMats.push(o.material); } });
-    this.shield.position.set(0.24, 0, 0.07);
-    this.armL.add(this.shield);
+    // (les pièces lumineuses, comme la rune du grimoire, n'ont pas de couleur émissive : on les laisse)
+    this.shield.traverse((o) => { if (o.isMesh && o.material.emissive) { o.material = o.material.clone(); this.shieldMats.push(o.material); } });
 
     this.ring = new THREE.Mesh(ringFoot, new THREE.MeshBasicMaterial({ color: idx ? 0x4aa3ff : 0xff5a4a, transparent: true, opacity: 0.75, depthWrite: false, toneMapped: false }));
     scene.add(this.ring);
@@ -944,6 +1067,25 @@ class FighterView {
     this.snapPos = true;
   }
   dispose() { scene.remove(this.root, this.ring); }
+  setSize(k) { this.root.scale.setScalar(k); this.ring.scale.setScalar(k); }
+  // petite barre de vie au-dessus de la tête (ennemis du donjon)
+  addHpBar(color) {
+    const g = new THREE.Group();
+    g.position.y = 2.05;
+    const mk = (w, h, c, o, z) => {
+      const geo = new THREE.PlaneGeometry(w, h);
+      geo.translate(w / 2, 0, 0);
+      const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o, depthTest: false, toneMapped: false }));
+      m.position.set(-w / 2, 0, z);
+      m.renderOrder = 10;
+      g.add(m);
+      return m;
+    };
+    mk(0.82, 0.11, 0x000000, 0.65, 0);
+    this.hpFill = mk(0.76, 0.06, color, 1, 0.001);
+    this.hpBar = g;
+    this.root.add(g);
+  }
 
   // à appeler avant chaque image de simulation
   capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
@@ -1007,6 +1149,51 @@ class FighterView {
     }
     this.mixer.update(dt);
     this.pose(sf, dt, T);
+    if (this.nocked) this.nocked.visible = sf.state === 'shoot' && sf.stateT < SHOT.rel;
+    if (this.rune) {
+      const c = sf.state === 'shoot' ? 1.2 + 2.5 * Math.min(1, sf.stateT / CAST.rel) : 0.8 + 0.2 * Math.sin(T * 3);
+      this.rune.traverse((o) => { if (o.isMesh) o.material.color.copy(runeColor).multiplyScalar(c); });
+      if (sf.state === 'shoot' && sf.stateT < CAST.rel && Math.random() < 0.5) {
+        this.rune.getWorldPosition(v1);
+        emit(v1.x, v1.y, v1.z, 1, { color: [0xb98aff, 0xffffff], speed: 0.6, up: 1.2, size: 0.05, life: 0.5, grav: -1 });
+      }
+    }
+    if (this.orb) {
+      const c = sf.state === 'shoot' ? (sf.stateT < FIRE.rel ? 1 + 2.2 * sf.stateT / FIRE.rel : 1.2) : 0.85 + 0.15 * Math.sin(T * 4);
+      this.orb.traverse((o) => { if (o.isMesh) o.material.color.copy(orbColor).multiplyScalar(c); });
+      this.orb.scale.setScalar(sf.state === 'shoot' && sf.stateT < FIRE.rel ? 1 + 0.5 * sf.stateT / FIRE.rel : 1);
+    }
+    if (this.hpBar) {
+      this.hpBar.visible = sf.state !== 'dead';
+      this.hpBar.quaternion.copy(camera.quaternion);
+      this.hpFill.scale.x = Math.max(0.001, sf.hp / sf.maxHp);
+    }
+  }
+
+  // arme dans l'axe du coup (voir swingPose)
+  swing(sf) {
+    const w = swingPose(sf, this.wpn);
+    this.sword.quaternion.copy(this.swordQ);
+    this.sword.position.copy(this.swordP);
+    if (w <= 0.001) return;
+    // base de l'arme dans le repère du personnage : y = pointe, x = tranchant
+    mUp.copy(mFwd);
+    mEdge.addScaledVector(mUp, -mEdge.dot(mUp)).normalize();
+    mSide.crossVectors(mEdge, mUp);
+    mBasis.makeBasis(mEdge, mUp, mSide);
+    qSwing.setFromRotationMatrix(mBasis);
+    // repère du personnage -> repère du bras droit
+    this.model.getWorldQuaternion(qModelW);
+    this.armR.getWorldQuaternion(qArmW);
+    qSwing.premultiply(qModelW).premultiply(qArmW.invert());
+    this.sword.quaternion.slerp(qSwing, w);
+    // la main garde sa prise : l'origine de l'arme recule le long de la nouvelle direction ;
+    // pour la lance, poussée vers l'avant pendant l'estoc
+    mUp.applyQuaternion(qModelW).applyQuaternion(qArmW);
+    const back = this.sword.userData.back || 0;
+    const push = this.wpn === 'spear' ? 0.12 * Math.sin(Math.PI * clamp(((sf.state === 'air' ? sf.airAtkT : sf.stateT) - 0.08) / 0.22, 0, 1)) : 0;
+    v1.copy(HAND).addScaledVector(mUp, push - back);
+    this.sword.position.lerp(v1, w);
   }
 
   pose(sf, dt, T) {
@@ -1029,6 +1216,7 @@ class FighterView {
     this.armL.getWorldQuaternion(q1);
     this.model.getWorldQuaternion(q2);
     this.shield.quaternion.copy(q1.invert().multiply(q2));
+    if (this.sword) this.swing(sf);
 
     this.flash = Math.max(0, this.flash - dt * 4);
     for (const m of this.mats) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
@@ -1037,9 +1225,151 @@ class FighterView {
     for (const m of this.shieldMats) m.emissive.setRGB(0.5 * this.shieldGlow + bg * 0.4, 0.8 * this.shieldGlow + bg * 0.7, this.shieldGlow + bg);
 
     this.stars.rotation.y = T * 5;
-    this.ring.position.set(this.rx, 0.03, this.rz);
-    this.ring.material.opacity = st === 'dead' ? 0 : 0.75 - Math.min(0.5, this.ry * 0.25);
+    const gy = sim.groundY(sf);
+    this.ring.position.set(this.rx, gy + 0.03, this.rz);
+    this.ring.material.opacity = st === 'dead' ? 0 : 0.75 - Math.min(0.5, (this.ry - gy) * 0.25);
   }
+}
+
+// ---------- Chien invoqué : pièces articulées animées ici (pas de squelette) ----------
+// Même interface que FighterView (capture, render, fx, dispose, setSize, addHpBar).
+const DOG_S = 1.6;            // même échelle que les personnages
+class DogView {
+  constructor(idx) {
+    this.idx = idx;
+    this.kind = 'dog'; this.wpn = 'bite';
+    this.root = new THREE.Group();
+    scene.add(this.root);
+    this.model = inst('dog', DOG_S);
+    this.root.add(this.model);
+    const n = (k) => this.model.getObjectByName(k);
+    this.body = n('body'); this.head = n('head'); this.tail = n('tail');
+    this.legs = ['leg-fl', 'leg-br', 'leg-fr', 'leg-bl'].map(n);      // diagonales qui avancent ensemble
+    this.bodyY = this.body.position.y;
+    this.mats = [];
+    this.model.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); this.mats.push(o.material); } });
+    this.gem = glowNode(this.model, 'glow', runeColor);
+    this.ring = new THREE.Mesh(ringFoot, new THREE.MeshBasicMaterial({ color: 0xa070ff, transparent: true, opacity: 0.6, depthWrite: false, toneMapped: false }));
+    scene.add(this.ring);
+    this.flash = 0; this.flinch = 0; this.vyaw = 0; this.phase = 0; this.spawn = 0; this.deadT = 0;
+    this.flashCol = new THREE.Color(1, 1, 1);
+    this.px = this.py = this.pz = 0; this.rx = this.ry = this.rz = 0;
+    this.snapPos = true; this.seenReset = -1;
+  }
+  dispose() { scene.remove(this.root, this.ring); }
+  setSize(k) { this.root.scale.setScalar(k); this.ring.scale.setScalar(k); }
+  capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
+  fx(kind) {
+    if (kind === 'hit') { this.flashCol.setRGB(1, 1, 1); this.flash = 1; this.flinch = 1; }
+    else if (kind === 'gbreak') { this.flashCol.setRGB(1, 0.55, 0.1); this.flash = 1; }
+    else if (kind === 'blocked') this.flinch = 0.4;
+  }
+  render(sf, dt, T, alpha) {
+    if (sf.resetN !== this.seenReset) { this.seenReset = sf.resetN; this.vyaw = sf.yaw; this.snapPos = true; }
+    if (this.snapPos) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; this.snapPos = false; }
+    this.rx = this.px + (sf.x - this.px) * alpha;
+    this.ry = this.py + (sf.y - this.py) * alpha;
+    this.rz = this.pz + (sf.z - this.pz) * alpha;
+    this.vyaw = lerpAng(this.vyaw, sf.visTarget, Math.min(1, dt * 14));
+    const st = sf.state, t = sf.stateT;
+    // apparition : le chien grandit en tournoyant
+    this.spawn = Math.min(1, this.spawn + dt * 3.5);
+    const grow = this.spawn < 1 ? Math.sin(this.spawn * Math.PI * 0.5) * (1 + 0.25 * Math.sin(this.spawn * Math.PI)) : 1;
+    this.model.scale.setScalar(DOG_S * Math.max(0.01, grow));
+    // trot : vitesse au sol
+    const sp = Math.hypot(sf.vx, sf.vz);
+    const moving = (st === 'walk' || st === 'idle') && sp > 0.3;
+    this.phase += dt * (moving ? 6 + sp * 2.2 : 0);
+    const swing = moving ? Math.sin(this.phase) * Math.min(0.7, 0.25 + sp * 0.12) : 0;
+    this.legs.forEach((l, k) => { l.rotation.x = (k < 2 ? swing : -swing); });
+    let bob = moving ? Math.abs(Math.sin(this.phase)) * 0.02 : 0, pitch = 0, roll = 0, headX = 0, lunge = 0;
+    if (st === 'attack' || (st === 'air' && sf.airAtk)) {
+      // morsure : la tête plonge vers l'avant, le corps suit
+      const k = Math.sin(Math.PI * Math.min(1, (st === 'air' ? sf.airAtkT : t) / ATK.dur));
+      headX = 0.55 * k; lunge = 0.12 * k; pitch = 0.18 * k;
+    } else if (st === 'brk') {
+      // bond : arrière-train baissé puis saut en avant
+      const k = Math.min(1, t / BRK.dur);
+      pitch = k < 0.4 ? -0.35 * k / 0.4 : -0.35 + 0.6 * (k - 0.4) / 0.6;
+      bob = k > 0.35 && k < 0.6 ? 0.08 : 0;
+    } else if (st === 'block' || st === 'parry') { bob = -0.035; headX = -0.2; }
+    else if (st === 'air') { this.legs.forEach((l, k) => { l.rotation.x = k < 2 ? -0.6 : 0.6; }); }
+    else if (st === 'roll') roll = Math.min(1, t / (ROLL.dur * 0.85)) * TAU;
+    else if (st === 'stun') roll = Math.sin(T * 9) * 0.15;
+    if (this.flinch > 0) { pitch -= 0.3 * this.flinch; this.flinch = Math.max(0, this.flinch - dt * 4); }
+    // chute
+    if (st === 'dead') {
+      this.deadT += dt;
+      const k = Math.min(1, this.deadT * 3);
+      this.model.rotation.set(0, this.vyaw, k * Math.PI / 2);
+      this.model.position.y = -Math.max(0, this.deadT - 0.8) * 0.4;
+      this.root.visible = this.deadT < 2;
+    } else {
+      this.deadT = 0;
+      this.root.visible = true;
+      this.model.rotation.set(pitch, this.vyaw, roll, 'YXZ');
+      this.model.position.y = 0;
+    }
+    this.body.position.y = this.bodyY + bob;
+    this.body.position.z = lunge;
+    this.head.rotation.x = headX + (moving ? Math.sin(this.phase * 2) * 0.05 : Math.sin(T * 2) * 0.04);
+    this.tail.rotation.z = Math.sin(T * (st === 'idle' || st === 'walk' ? 14 : 5)) * 0.5;
+    this.root.position.set(this.rx, this.ry, this.rz);
+    this.flash = Math.max(0, this.flash - dt * 4);
+    for (const m of this.mats) if (m.emissive) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
+    if (this.gem) this.gem.traverse((o) => { if (o.isMesh) o.material.color.copy(runeColor).multiplyScalar(1 + 0.6 * Math.sin(T * 5)); });
+    if (this.hpBar) {
+      this.hpBar.visible = st !== 'dead';
+      this.hpBar.quaternion.copy(camera.quaternion);
+      this.hpFill.scale.x = Math.max(0.001, sf.hp / sf.maxHp);
+    }
+    const gy = sim.groundY(sf);
+    this.ring.position.set(this.rx, gy + 0.03, this.rz);
+    this.ring.material.opacity = st === 'dead' ? 0 : 0.6;
+  }
+}
+
+DogView.prototype.addHpBar = FighterView.prototype.addHpBar;   // petite barre de vie au-dessus de la tête
+
+// ---------- Flèches en vol (lues dans sim.pr) ----------
+const arrowViews = [];
+let arrowTrail = 0;
+const vA = new THREE.Vector3();
+// boule de feu : cœur clair et halo orange, en additif
+const fbCore = new THREE.IcosahedronGeometry(0.12, 0), fbHalo = new THREE.IcosahedronGeometry(0.22, 1);
+const fbCoreMat = new THREE.MeshBasicMaterial({ color: 0xfff0b0, toneMapped: false });
+const fbHaloMat = new THREE.MeshBasicMaterial({ color: 0xff6a1c, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+const fireViews = [];
+function fireballView() {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(fbCore, fbCoreMat), new THREE.Mesh(fbHalo, fbHaloMat));
+  scene.add(g);
+  return g;
+}
+function syncArrows(alpha) {
+  const all = game.phase === 'menu' ? [] : sim.pr;
+  const list = all.filter((a) => a.k !== 1), fire = all.filter((a) => a.k === 1);
+  while (fireViews.length < fire.length) fireViews.push(fireballView());
+  fireViews.forEach((o, i) => {
+    const a = fire[i];
+    o.visible = !!a;
+    if (!a) return;
+    o.position.set(a.x + a.vx * DT * (alpha - 1), a.y + a.vy * DT * (alpha - 1), a.z + a.vz * DT * (alpha - 1));
+    o.rotation.set(clockT * 7, clockT * 5, 0);
+    o.children[1].scale.setScalar(1 + 0.15 * Math.sin(clockT * 30 + i));
+    emit(o.position.x, o.position.y, o.position.z, 2, { color: [0xffe27a, 0xff9a2e, 0xff4a1c], speed: 0.4, up: 0.6, size: 0.07, life: 0.35, grav: -1.5 });
+  });
+  while (arrowViews.length < list.length) { const o = inst('arrow', 1.25); scene.add(o); arrowViews.push(o); }
+  arrowViews.forEach((o, i) => {
+    const a = list[i];
+    o.visible = !!a;
+    if (!a) return;
+    // position interpolée entre deux images de simulation, pointe dans le sens du vol
+    o.position.set(a.x + a.vx * DT * (alpha - 1), a.y + a.vy * DT * (alpha - 1), a.z + a.vz * DT * (alpha - 1));
+    o.lookAt(vA.set(o.position.x + a.vx, o.position.y + a.vy, o.position.z + a.vz));
+    // traînée légère derrière la flèche
+    if ((arrowTrail = (arrowTrail + 1) % 2) === 0) emit(o.position.x, o.position.y, o.position.z, 1, { color: [0xfff3d0, 0xffffff], speed: 0.1, up: 0.1, size: 0.035, life: 0.25, grav: 0 });
+  });
 }
 
 // =====================================================================
@@ -1048,6 +1378,7 @@ class FighterView {
 // Touches maintenues et touches pressées depuis la dernière image de simulation
 const held = [{}, {}];
 const pending = [0, 0];   // bits PRESS
+const tapped = [new Set(), new Set()];   // touches tenues enfoncées depuis la dernière image (une tape brève compte, même à faible fps)
 
 // Chaque action a 2 emplacements de touche (null = vide). En solo et en ligne,
 // les deux jeux de touches contrôlent le même personnage.
@@ -1136,12 +1467,20 @@ function controlsHTML(mode, compact) {
 addEventListener('keydown', (e) => {
   if (keysEditorKey(e)) return;
   if (e.target instanceof HTMLInputElement) return;
+  if (!$('reward').classList.contains('hidden')) {
+    const k = rewardKey(e.code);
+    if (k) { e.preventDefault(); pickBoon(k[0], k[1]); }
+    if (e.code !== 'Escape') return;
+  }
+  // chez le marchand : touches 1 à 8 = prendre directement cette arme
+  const dg = /^Digit([1-8])$/.exec(e.code), sh = localShopper();
+  if (dg && sh >= 0 && !game.paused) { e.preventDefault(); shopReq[sh] = +dg[1] - 1; return; }
   if (bindings.has(e.code) || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (e.code === 'Escape') { togglePause(); return; }
   if (e.repeat) return;
   down.add(e.code);
   const b = bindings.get(e.code);
-  if (b && !game.paused) for (const [pl, act] of b) if (act in PRESS) pending[pl] |= PRESS[act];
+  if (b && !game.paused) for (const [pl, act] of b) { if (act in PRESS) pending[pl] |= PRESS[act]; else tapped[pl].add(act); }
 });
 addEventListener('keyup', (e) => down.delete(e.code));
 addEventListener('blur', () => down.clear());
@@ -1149,6 +1488,8 @@ addEventListener('blur', () => down.clear());
 // déplacements relatifs à la caméra : ← → le long de l'écran, ↑ ↓ en profondeur (pas de côté)
 // Entrée d'un joueur pour la prochaine image de simulation (déplacement quantifié, identique chez les deux joueurs)
 function localInput(pl) {
+  if (sim instanceof DungeonSim && sim.g.phase === 'reward' && pickReq[pl] >= 0) { pending[pl] = 0; return pickInput(pickReq[pl]); }
+  if (sim instanceof DungeonSim && sim.g.phase === 'hub' && shopReq[pl] >= 0) { const n = shopReq[pl]; shopReq[pl] = -1; pending[pl] = 0; return shopInput(n); }
   const h = held[pl];
   for (const k of HELD) h[k] = false;
   if (!game.paused) for (const code of down) {
@@ -1156,6 +1497,8 @@ function localInput(pl) {
     if (!b) continue;
     for (const [p, act] of b) if (p === pl && HELD.includes(act)) h[act] = true;
   }
+  if (!game.paused) for (const act of tapped[pl]) h[act] = true;
+  tapped[pl].clear();
   const rx = Math.cos(camAng), rz = -Math.sin(camAng);   // droite de l'écran
   const fx = -Math.sin(camAng), fz = -Math.cos(camAng);  // vers le fond de l'écran
   const hh = (h.r ? 1 : 0) - (h.l ? 1 : 0), v = (h.u ? 1 : 0) - (h.d ? 1 : 0);
@@ -1187,11 +1530,13 @@ let ai = null;
 let ai0 = null;
 const DEMO = new URLSearchParams(location.search).has('demo');
 addEventListener('error', (e) => { document.body.dataset.err = e.message; });
-const cfg = { mode: 'solo', diff: '1', p1: 'soldier', p2: 'orc', arena: 'colisee' };
+const cfg = { game: 'arena', mode: 'solo', diff: '1', p1: 'soldier', p2: 'orc', arena: 'colisee' };
 try { Object.assign(cfg, JSON.parse(localStorage.getItem('spartiate-cfg') || '{}')); } catch (e) { /* stockage indisponible */ }
 const qsArena = new URLSearchParams(location.search).get('arena');
 if (qsArena) cfg.arena = qsArena;
 if (!ARENAS[cfg.arena]) cfg.arena = 'colisee';
+if (new URLSearchParams(location.search).has('dungeon')) cfg.game = 'dungeon';
+if (cfg.game !== 'dungeon') cfg.game = 'arena';
 
 let match = null;           // réglages du combat en cours (en ligne : choisis par l'hôte)
 
@@ -1201,6 +1546,7 @@ function makeFighters(p1 = cfg.p1, p2 = cfg.p2) {
 }
 // aperçu du menu : en ligne, on montre le personnage choisi par l'adversaire
 function menuFighters() {
+  if (sim instanceof DungeonSim) return;
   const peer = cfg.mode === 'online' && net.peerKind;
   if (!peer) makeFighters();
   else if (net.role === 'guest') makeFighters(peer, cfg.p1);
@@ -1241,14 +1587,15 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   net.live = m.mode === 'online';
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause'].forEach((id) => $(id).classList.add('hidden'));
-  $('hud').classList.remove('hidden');
+  ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
+  $('hud').classList.remove('hidden', 'dng', 'solo');
+  $('againBtn').textContent = 'Revanche';
   $('help').classList.remove('hidden');
   $('help').innerHTML = controlsHTML(m.mode, true);
   setupBindings(m.mode, net.live ? net.me : 0);
   if (curArena !== m.arena) buildArena(m.arena);
   const seed = (m.seed ?? Math.random() * 4294967296) >>> 0;
-  sim = new Sim(seed);
+  sim = new Sim(seed, [m.p1, m.p2]);
   makeFighters(m.p1, m.p2);
   ai = m.mode === 'solo' ? new AI(sim, 1, +cfg.diff, seed ^ 0x9e3779b9) : null;
   ai0 = DEMO && !net.live ? new AI(sim, 0, 2, seed ^ 0x85ebca6b) : null;
@@ -1270,6 +1617,7 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
 }
 
 function endMatch() {
+  if (match?.game === 'dungeon') { endDungeon(); return; }
   const [a, b] = game.wins;
   const n1 = CHARS[match.p1], n2 = CHARS[match.p2];
   const me = net.live ? net.me : 0;
@@ -1292,16 +1640,22 @@ function toMenu(remote = false) {
   rb = null;
   sim.g.phase = 'menu';
   game.paused = false;
-  ['hud', 'help', 'result', 'pause'].forEach((id) => $(id).classList.add('hidden'));
+  ['hud', 'help', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
   $('fade').classList.remove('on');
   $('menu').classList.remove('hidden');
+  menuScene();
+  refreshMenu();
+}
+// décor et personnages derrière le menu, selon le jeu choisi
+function menuScene() {
+  if (cfg.game === 'dungeon') { dungeonPreview(); return; }
+  if (sim instanceof DungeonSim) sim = new Sim(1);
   if (curArena !== cfg.arena) buildArena(cfg.arena);
   menuFighters();
-  refreshMenu();
 }
 
 function togglePause() {
-  if (!['intro', 'fight', 'ko'].includes(game.phase)) return;
+  if (!['intro', 'fight', 'ko', 'clear', 'exit', 'dead', 'hub'].includes(game.phase)) return;
   game.paused = !game.paused;
   $('pauseTxt').textContent = net.live ? 'En ligne, le combat continue pendant la pause !' : 'Échap pour reprendre';
   $('pause').classList.toggle('hidden', !game.paused);
@@ -1310,7 +1664,13 @@ function togglePause() {
 
 // Une image de simulation (1/60 s). Retourne false si on doit attendre l'adversaire (en ligne).
 function simTick() {
-  for (let i = 0; i < 2; i++) F[i]?.capture(sim.f[i]);
+  F.forEach((v, i) => sim.f[i] && v.capture(sim.f[i]));
+  if (sim instanceof DungeonSim && !rb) {
+    sim.step(localInput(0), sim.g.np > 1 ? localInput(1) : NEUTRAL);
+    playEvents(sim.ev);
+    sim.ev.length = 0;
+    return true;
+  }
   if (rb) {
     if (!rb.tick(localInput(net.me))) return false;
     playEvents(rb.takeEvents());
@@ -1334,6 +1694,7 @@ function simTick() {
 // =====================================================================
 function updateHud() {
   if (game.phase === 'menu' || !F.length) return;
+  if (sim instanceof DungeonSim) { dungeonHud(); return; }
   sim.f.forEach((f, i) => {
     const n = i + 1;
     const hp = Math.max(0, f.hp);
@@ -1360,6 +1721,7 @@ let camAng = 0;               // angle de la caméra autour du point milieu
 const camPos = new THREE.Vector3();
 const camTgt = new THREE.Vector3();
 function camGoal(dt) {
+  if (sim instanceof DungeonSim && game.phase !== 'loading') { dungeonCam(dt); return; }
   if (game.phase === 'menu' || game.phase === 'loading') {
     camAng += dt * 0.12;
     camPos.set(Math.sin(camAng) * 8.6, 3.4, Math.cos(camAng) * 8.6);
@@ -1448,7 +1810,9 @@ function step(rdt) {
   }
   const g = sim.g, alpha = Math.min(1, acc / DT);
   const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
-  F.forEach((f, i) => f.render(sim.f[i], animDt, clockT, alpha));
+  if (sim instanceof DungeonSim && game.phase !== 'menu') dungeonSync();
+  syncArrows(alpha);
+  F.forEach((f, i) => sim.f[i] && f.render(sim.f[i], animDt, clockT, alpha));
   for (const u of updaters) u(rdt, clockT);
   updateParticles(rdt);
   updateRings(rdt);
@@ -1462,10 +1826,867 @@ function step(rdt) {
 // éléments d'interface qui suivent l'état de la simulation (écrits seulement quand ils changent)
 let uiFade = false, uiNet = '';
 function syncUi() {
-  const fade = game.phase === 'ko' && sim.g.flagFade;
+  const fade = sim instanceof DungeonSim ? game.phase === 'exit' : game.phase === 'ko' && sim.g.flagFade;
   if (fade !== uiFade) { uiFade = fade; $('fade').classList.toggle('on', fade); }
   const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}` : '';
   if (txt !== uiNet) { uiNet = txt; $('netStat').textContent = txt; }
+}
+
+// =====================================================================
+//  Donjon (rogue-like) : affichage. Toute la logique est dans dungeon.js.
+//  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges) plutôt que ses
+//  événements : en ligne, le rollback peut revenir en arrière, l'image se recale seule.
+// =====================================================================
+const dng = { room: -1, gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] };
+const pickReq = [-1, -1];            // bénédiction choisie à l'écran, envoyée comme entrée
+const DNG_REC = 'spartiate-donjon-record';
+const ISO = Math.PI / 4;             // caméra en diagonale au-dessus de la salle (vue isométrique)
+const HERO_COL = [0xff5a4a, 0x4aa3ff];
+function dungeonRecord() { try { return +localStorage.getItem(DNG_REC) || 0; } catch (e) { return 0; } }
+const clipOf = (key, name) => THREE.AnimationClip.findByName(G[key].animations, name);
+function playOnce(mixer, key, name) {
+  const a = mixer.clipAction(clipOf(key, name));
+  a.setLoop(THREE.LoopOnce, 1);
+  a.clampWhenFinished = true;
+  a.reset().play();
+  return a;
+}
+// héros joués sur cette machine
+function localHeroes() {
+  if (!(sim instanceof DungeonSim)) return [];
+  if (match?.mode === 'online') return [net.me];
+  return sim.g.np > 1 ? [0, 1] : [0];
+}
+
+// Les deux murs du fond (z = -R et x = -R) sont hauts ; les deux murs côté caméra
+// sont bas pour ne pas cacher l'action. La sortie est toujours dans un mur du fond.
+const SIDES = [
+  { id: '+z', ang: 0, far: false }, { id: '+x', ang: Math.PI / 2, far: false },
+  { id: '-z', ang: Math.PI, far: true }, { id: '-x', ang: -Math.PI / 2, far: true },
+];
+
+// lanterne murale des mines (le mur est derrière, la lanterne pend vers ry)
+function wallLantern(x, z, ry, lightI) {
+  P('b_lantern', x, 1.3, z, ry);
+  const l = new THREE.PointLight(0xffc070, lightI, 9, 1.4);
+  l.position.set(x + Math.sin(ry) * 0.35, 1.55, z + Math.cos(ry) * 0.35);
+  world.add(l);
+  const ph = rand(0, 10);
+  updaters.push((dt, t) => { l.intensity = lightI * (0.9 + Math.sin(t * 3 + ph) * 0.05 + Math.sin(t * 11 + ph) * 0.04); });
+}
+// au-delà des murs : jardin (ruines) ou champ de lave (forge). On voit surtout les côtés bas (+x, +z) ;
+// derrière les murs du fond, seulement ce qui dépasse (arbres), au-delà du couloir de la sortie.
+function outsideDecor(kind, D) {
+  const far = D + TILE * 3;
+  const out = (x, z) => Math.max(Math.abs(x), Math.abs(z)) > D + 0.2;
+  const seen = (x, z) => (x > D + 0.2 || z > D + 0.2) || Math.min(x, z) < -far;     // côtés bas, ou derrière le couloir
+  if (kind === 'lava') {
+    const R = D + TILE * 5;
+    for (let x = -R; x <= R + 0.01; x += TILE)
+      for (let z = -R; z <= R + 0.01; z += TILE) {
+        if (!out(x, z) || !(x > D + 0.2 || z > D + 0.2)) continue;
+        const rim = Math.max(x, z) < D + TILE + 0.2;           // une rangée de dalles le long du muret
+        P(rim || Math.random() < 0.2 ? 'b_basalt-floor' : 'b_lava', x, 0, z, rot4());
+      }
+    for (const [x, z] of [[D + 3, -3], [D + 3, 3], [-3, D + 3], [3, D + 3], [D + 3, D + 3]]) {
+      const l = new THREE.PointLight(0xff5a1a, 7, 11, 1.4);
+      l.position.set(x, 0.6, z);
+      world.add(l);
+    }
+    // bulles qui éclatent à la surface de la lave
+    let bubT = 0;
+    updaters.push((dt) => {
+      bubT -= dt;
+      if (bubT > 0) return;
+      bubT = rand(0.15, 0.4);
+      const a = rand(0, 1) < 0.5, u = rand(D + TILE * 1.6, D + TILE * 4.5), v = rand(-D, D + TILE * 4);
+      emit(a ? u : v, 0.0, a ? v : u, 3, { color: [0xff9a2e, 0xffe27a], speed: 0.6, up: 2.2, size: 0.06, life: 0.6, grav: 6 });
+    });
+  } else if (kind === 'garden') {
+    for (let i = 0; i < 26; i++) {
+      const x = rand(-D - 8, D + 8), z = rand(-D - 8, D + 8);
+      if (Math.max(Math.abs(x), Math.abs(z)) < D + 1.4 || !seen(x, z)) continue;
+      const r = Math.random();
+      if (r < 0.55) P('a_tree', x, 0, z, rand(0, TAU), S * rand(0.95, 1.45));
+      else if (r < 0.85) P('b_bush', x, 0, z, rand(0, TAU), S * rand(0.8, 1.3));
+      else P('a_columnD', x, 0, z, rot4(), S * rand(0.9, 1.2));
+    }
+  }
+}
+// ---------- Biomes (un par tranche de 5 salles, voir biomeOf dans dungeon.js) ----------
+// Pièces : [clé, échelle y absolue] (null = pas d'étirement : les modèles générés ont déjà la bonne
+// hauteur) ; block : [clé, hauteur du modèle] pour les estrades. Couleurs : [début, fin de la tranche].
+// Obstacles : mêmes emplacements et collisions dans tous les biomes (dungeon.js), seul l'habillage change.
+const BIOME = {
+  crypt: {
+    name: 'LES CRYPTES', floor: ['d_floor', 'd_floorD'], detail: 0.25,
+    wall: ['d_wall', 2.25], wallAlt: null, low: ['d_wallHalf', 0.55], open: ['d_wallOpen', 2.475], block: ['d_wall', 1.1],
+    obs: { column: ['d_column', 1.15, true], barrel: ['d_barrel', 1.2], rocks: ['d_rocks', 0.95] },
+    bg: [0x2c2636, 0x0c0a12], sky: [0xfff1dc, 0x8a88b8], gnd: [0x6a5040, 0x2a1c1a], hi: [1.3, 1.0], sun: [0xffe2b0, 0xa8b0ff], si: [1.6, 1.0],
+    ground: [0x1c1820, 0x0a080c], fog: [24, 46], wallLight: 'torch', banners: true, brazier: 'd_barrel', lantern: 1,
+    motes: { color: 0xffd9a0, up: 0.08, size: 0.05 },
+  },
+  mine: {
+    name: 'LES MINES DE CRISTAL', floor: ['b_mine-floor', 'b_mine-floor-stones'], detail: 0.3,
+    wall: ['b_mine-wall', null], wallAlt: ['b_mine-wall-ore', 0.22], low: ['b_mine-low', null], open: ['b_mine-portal', null], block: ['b_mine-low', 0.55],
+    obs: { column: ['b_mine-pillar', 1, true], barrel: ['b_minecart', 1, true], rocks: ['b_crystals', 1] },
+    bg: [0x1c1820, 0x07060a], sky: [0xffe0b8, 0x7a88c8], gnd: [0x5a4030, 0x1a1210], hi: [1.15, 0.85], sun: [0xffd8a0, 0x9ab0ff], si: [1.3, 0.8],
+    ground: [0x17120f, 0x080605], fog: [22, 42], wallLight: 'lantern', banners: false, brazier: 'd_barrel', lantern: 1.1,
+    motes: { color: 0x9ad0ff, up: 0.05, size: 0.045 }, glowObs: { rocks: 0x6aa8ff },
+  },
+  ruins: {
+    name: 'LES RUINES ENVAHIES', floor: ['a_floor', 'a_floorD', 'b_grass-floor', 'b_grass-floor-flowers'], detail: 0.25, grass: 0.45,
+    wall: ['b_ruin-wall', null], wallAlt: ['b_ruin-wall-broken', 0.4], low: ['b_ruin-low', null], open: ['b_ruin-portal', null], block: ['a_block', 0.5],
+    obs: { column: ['a_columnD', 1.15, true], barrel: ['a_bricks', 1.2], rocks: ['b_bush', 1] },
+    sky: [0xfff4e0, 0xffc8a0], gnd: [0x5a7040, 0x3a3a30], hi: [1.5, 1.2], sun: [0xfff0d0, 0xffb070], si: [2.2, 1.7],
+    skyTex: [[0, '#4a8fd8'], [0.6, '#a8d0ee'], [1, '#f4e2c0']], skyTexEnd: [[0, '#3a3a78'], [0.5, '#c06a70'], [1, '#ffc080']],
+    bg: [0xf4e2c0, 0xffc080], ground: [0x5e8a48, 0x4a6a3a], fog: [30, 70], wallLight: null, banners: false, brazier: 'a_columnD', lantern: 0.3,
+    motes: { color: 0xe8f0a0, up: 0.03, size: 0.04 }, outside: 'garden',
+  },
+  forge: {
+    name: 'LA FORGE VOLCANIQUE', floor: ['b_basalt-floor', 'b_basalt-floor-cracks'], detail: 0.35,
+    wall: ['b_basalt-wall', null], wallAlt: null, low: ['b_basalt-low', null], open: ['b_basalt-portal', null], block: ['b_basalt-low', 0.55],
+    obs: { column: ['b_obsidian', 1, true], barrel: ['b_anvil', 1, true], rocks: ['b_lava-rocks', 1] },
+    bg: [0x2a0e08, 0x120404], sky: [0xffb080, 0xff7a50], gnd: [0x601a08, 0x300a04], hi: [1.0, 0.85], sun: [0xffa070, 0xff7050], si: [1.2, 0.9],
+    ground: [0x140806, 0x0a0403], fog: [22, 44], wallLight: 'torch', banners: true, brazier: 'a_columnD', lantern: 0.8,
+    motes: { color: 0xff8a3a, up: 0.45, size: 0.06 }, glowObs: { rocks: 0xff6a2a, column: 0xff6a2a }, outside: 'lava',
+  },
+};
+const rot4 = () => ((Math.random() * 4) | 0) * Math.PI / 2;
+
+// n : numéro de la salle. Chaque biome s'assombrit un peu au fil de sa tranche ; salle du boss en rouge.
+function buildDungeonRoom(room, n) {
+  world.clear();
+  updaters = [];
+  for (const id of ['talk', 'shop']) $(id).classList.add('hidden');   // marchand (salle d'armes)
+  crowd = null;
+  arenaHooks = {};
+  curArena = 'dungeon';
+  Object.assign(dng, { gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] });
+  const boss = room.boss;
+  const B = BIOME[biomeOf(n)];
+  dng.biome = biomeOf(n);
+  const k = clamp(((Math.max(n, 1) - 1) % 5) / 4, 0, 1) * (boss ? 1 : 0.85);   // 0 : début de la tranche … 1 : salle du boss
+  const red = boss ? 0.45 : 0;                                                   // teinte rouge de la salle du boss
+  const col = ([a, b], tint) => new THREE.Color(a).lerp(new THREE.Color(b), k).lerp(new THREE.Color(tint ?? 0x000000), tint === undefined ? 0 : red);
+  const num = ([a, b]) => a + (b - a) * k;
+  const bg = col(B.bg, 0x2a0606);
+  if (B.skyTex) {
+    // ciel : dégradé du début vers le crépuscule de fin de tranche
+    const st = B.skyTex.map(([p, c], i) => [p, '#' + new THREE.Color(c).lerp(new THREE.Color(B.skyTexEnd[i][1]), k).lerp(new THREE.Color(0x6a1010), red).getHexString()]);
+    scene.background = skyTex(st);
+  } else scene.background = bg;
+  scene.fog = new THREE.Fog(bg, B.fog[0] - 4 * k, B.fog[1] - 6 * k);
+  lights(col(B.sky, 0xb07080), col(B.gnd, 0x2a1010), num(B.hi), col(B.sun, 0xff9070), num(B.si), [-4, 14, -2]);
+  ground(col(B.ground));
+
+  // dalles du sol (estrades : même tirage)
+  const floorKey = () => {
+    if (B.grass && Math.random() < B.grass) return B.floor[Math.random() < 0.3 ? 3 : 2];
+    return B.floor[Math.random() < B.detail ? 1 : 0];
+  };
+  const wallKey = () => (B.wallAlt && Math.random() < B.wallAlt[1] ? B.wallAlt[0] : B.wall[0]);
+  // pièce de mur : [clé, échelle y] ; les modèles générés sont symétriques, on les retourne au hasard
+  const piece = ([key, sy], x, z, ry, gen = key === B.wall[0]) => {
+    const o = P(gen ? wallKey() : key, x, 0, z, ry + (sy === null && Math.random() < 0.5 ? Math.PI : 0));
+    if (sy !== null) o.scale.y = sy;
+    return o;
+  };
+
+  const D = ROOM_R + TILE / 2;      // centre des blocs de mur
+  for (let x = -ROOM_T; x <= ROOM_T + 0.01; x += TILE)
+    for (let z = -ROOM_T; z <= ROOM_T + 0.01; z += TILE)
+      P(floorKey(), x, 0, z, rot4());
+
+  const exitId = room.exit === 'z' ? '-z' : '-x', entryId = room.exit === 'z' ? '+z' : '+x';
+  for (const sd of SIDES) {
+    const ox = Math.sin(sd.ang), oz = Math.cos(sd.ang);     // vers l'extérieur
+    const tx = Math.cos(sd.ang), tz = -Math.sin(sd.ang);    // le long du mur
+    const at = (d, t) => [ox * d + tx * t, oz * d + tz * t];
+    for (let t = -ROOM_T; t <= ROOM_T + 0.01; t += TILE) {
+      const [x, z] = at(D, t);
+      const mid = Math.abs(t) < 0.1;
+      if (sd.far) {
+        if (mid && sd.id === exitId) {
+          const o = P(B.open[0], x, 0, z, sd.ang + Math.PI);
+          if (B.open[1] !== null) o.scale.y = B.open[1];
+        } else piece(B.wall, x, z, sd.ang + Math.PI);
+      } else if (!(mid && sd.id === entryId)) piece(B.low, x, z, sd.ang);
+    }
+    if (!sd.far) continue;
+    // lumières des murs du fond (salle d'armes : pas sur le mur de la porte, les présentoirs y sont)
+    if (B.wallLight && !(room.hub && sd.id === exitId)) for (const t of [-3.75, 3.75]) {
+      const [x, z] = at(ROOM_R - 0.13, t);
+      if (B.wallLight === 'torch') torch(x, 1.5, z, sd.ang + Math.PI, 4 + 4 * k);
+      else wallLantern(x, z, sd.ang + Math.PI, 4 + 4 * k);
+    }
+    if (sd.id !== exitId) continue;
+    // porte de sortie : herse, bannières, couloir éclairé derrière
+    if (B.banners) for (const t of [-1.5, 1.5]) { const [x, z] = at(D, t); sway(P('d_banner', x, 0.25, z, sd.ang + Math.PI), 0.04, 1.4, 'x'); }
+    for (const d of [D, D + TILE, D + TILE * 2]) { const [x, z] = at(d, 0); P(B.floor[0], x, 0, z); }
+    for (const d of [D + TILE, D + TILE * 2]) for (const t of [-TILE, TILE]) { const [x, z] = at(d, t); piece(B.wall, x, z, sd.ang); }
+    { const [x, z] = at(D + TILE * 2, 0); const l = new THREE.PointLight(0xffa860, 5, 6, 1.5); l.position.set(x, 1.4, z); world.add(l); }
+    const [gx, gz] = at(ROOM_R + 0.08, 0);
+    const gate = P('d_gate', gx, 0, gz, sd.ang + Math.PI, 2.0);
+    gate.scale.y = 2.6;
+    const gm = new THREE.AnimationMixer(gate);
+    const closing = playOnce(gm, 'd_gate', 'close');
+    gm.update(10);
+    updaters.push((dt) => gm.update(dt));
+    dng.gate = {
+      open() {
+        closing.stop();
+        playOnce(gm, 'd_gate', 'open');
+        sfx.heavy();
+        emit(gx, 0.2, gz, 14, { color: [0x8a8090, 0x5a5260], speed: 1.5, up: 1.5, size: 0.08, life: 0.7, grav: 4, spread: 0.5 });
+      },
+    };
+  }
+  // coins
+  piece(B.wall, -D, -D, 0);
+  piece(B.wall, D, -D, 0);
+  piece(B.wall, -D, D, 0);
+  piece(B.low, D, D, 0);
+  if (B.outside) outsideDecor(B.outside, D);
+
+  // estrades (blocs surmontés de dalles) et escaliers
+  for (const s of room.surf) {
+    for (let x = s.x0 + TILE / 2; x < s.x1; x += TILE)
+      for (let z = s.z0 + TILE / 2; z < s.z1; z += TILE) {
+        if (!s.ramp) {
+          P(B.block[0], x, 0, z, rot4()).scale.y = PLAT_H / B.block[1];
+          P(floorKey(), x, PLAT_H + 0.003, z, rot4());
+        } else {
+          // le modèle d'escalier monte vers son -z local : on le tourne vers le haut de la rampe
+          const dir = Math.sign(s.to - s.from), dx = s.ramp === 'x' ? dir : 0, dz = s.ramp === 'z' ? dir : 0;
+          P('d_stairs', x, 0, z, Math.atan2(-dx, -dz)).scale.y = PLAT_H / 0.9;
+        }
+      }
+    if (!s.ramp) {
+      // un brasero sur un coin de l'estrade, côté mur
+      const cx = Math.abs(s.x0) > Math.abs(s.x1) ? s.x0 + 0.45 : s.x1 - 0.45;
+      const cz = Math.abs(s.z0) > Math.abs(s.z1) ? s.z0 + 0.45 : s.z1 - 0.45;
+      const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.16, 0.18, 10), ironMat);
+      bowl.position.set(cx, PLAT_H + 0.09, cz); bowl.castShadow = true;
+      world.add(bowl);
+      fire(world, cx, PLAT_H + 0.14, cz, 0.9, 3 + 3 * k);
+    }
+  }
+
+  // obstacles (leur collision est dans dungeon.js) : [clé, échelle, quart de tour seulement]
+  for (const o of room.obs) {
+    if (o.kind === 'stand' || o.kind === 'counter') continue;      // salle d'armes : socles et comptoir construits par buildHub
+    const [key, s, square] = B.obs[o.kind] ?? B.obs.rocks;
+    P(key, o.x, 0, o.z, square ? rot4() : rand(0, TAU), S * s);
+    if (o.kind === 'barrel' && key === 'd_barrel') P('d_pot', o.x + 0.45, 0, o.z + 0.3, rand(0, TAU), 1.1);
+    const glow = B.glowObs?.[o.kind];
+    if (glow) { const l = new THREE.PointLight(glow, 2.5, 4, 1.6); l.position.set(o.x, 0.9, o.z); world.add(l); }
+  }
+  if (boss) for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) brazier(x, z, B.brazier, B.brazier === 'd_barrel' ? 1.3 : 1.1, 6);
+  if (room.hub) buildHub(room);
+
+  // pièges à pics : l'animation suit l'état des pics dans la simulation
+  room.traps.forEach((t, i) => {
+    const o = P('d_trap', t.x, 0.004, t.z, 0, S);
+    const mx = new THREE.AnimationMixer(o);
+    playOnce(mx, 'd_trap', 'hide');
+    mx.update(1);
+    updaters.push((dt) => mx.update(dt));
+    dng.traps.push({ x: t.x, z: t.z, mx, up: false, warnT: 0 });
+  });
+
+  // une lanterne par héros
+  const lanterns = [0, 1].map(() => { const l = new THREE.PointLight(0xffc890, (3 + 6 * k) * B.lantern, 10, 1.4); world.add(l); return l; });
+  updaters.push(() => {
+    lanterns.forEach((l, i) => {
+      const v = F[i], on = sim instanceof DungeonSim && i < sim.g.np && v;
+      l.visible = !!on;
+      if (on) l.position.set(v.rx, v.ry + 2.6, v.rz);
+    });
+  });
+
+  // poussière dans la lumière (cristaux des mines, pollen des ruines, braises de la forge)
+  const N = 160, pos = new Float32Array(N * 3), seed = [];
+  for (let i = 0; i < N; i++) seed.push([rand(-6.5, 6.5), rand(0, 3.5), rand(-6.5, 6.5), rand(0, 6)]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const motes = new THREE.Points(geo, new THREE.PointsMaterial({ color: B.motes.color, size: B.motes.size, transparent: true, opacity: 0.6, blending: THREE.AdditiveBlending, depthWrite: false }));
+  motes.frustumCulled = false;
+  world.add(motes);
+  updaters.push((dt, t) => {
+    for (let i = 0; i < N; i++) {
+      const s = seed[i];
+      s[1] += dt * B.motes.up; if (s[1] > 3.5) s[1] = 0;
+      pos[i * 3] = s[0] + Math.sin(t * 0.3 + s[3]) * 0.4;
+      pos[i * 3 + 1] = s[1];
+      pos[i * 3 + 2] = s[2] + Math.cos(t * 0.25 + s[3]) * 0.3;
+    }
+    geo.attributes.position.needsUpdate = true;
+  });
+
+  // coffre (apparaît quand la salle est nettoyée) ; sa lumière existe dès le départ, éteinte,
+  // pour que son apparition ne force pas la recompilation des shaders
+  const glow = new THREE.PointLight(0xffd34a, 0, 4, 1.5);
+  world.add(glow);
+  dng.spawnChest = () => {
+    const cx = sim.g.chestX, cz = sim.g.chestZ;
+    const ch = P('d_chest', cx, 0, cz, ISO, S * 1.2);
+    const cm = new THREE.AnimationMixer(ch);
+    glow.position.set(cx, 1.1, cz);
+    let opened = false, sparkT = 0, grow = 0;
+    ch.scale.setScalar(0.01);
+    ring(cx, 0.05, cz, 0xffd34a, 2.2, 0.6, true);
+    emit(cx, 0.4, cz, 20, { color: [0xffd34a, 0xfff0a0], speed: 2, up: 3, size: 0.07, life: 0.8, grav: 6 });
+    updaters.push((dt, t) => {
+      cm.update(dt);
+      if (grow < 1) { grow = Math.min(1, grow + dt * 4); ch.scale.setScalar(S * 1.2 * (1 + Math.sin(grow * Math.PI) * 0.25) * grow); }
+      if (opened) { glow.intensity = Math.max(0.8, glow.intensity - dt * 6); return; }
+      glow.intensity = 4 + Math.sin(t * 5) * 1.2;
+      sparkT -= dt;
+      if (sparkT < 0) { sparkT = 0.12; emit(cx + rand(-0.4, 0.4), 0.7, cz + rand(-0.4, 0.4), 1, { color: [0xffe27a, 0xffffff], speed: 0.3, up: 1.2, size: 0.05, life: 0.8, grav: -0.5 }); }
+    });
+    dng.openChest = () => {
+      opened = true;
+      playOnce(cm, 'd_chest', 'open');
+      emit(cx, 0.6, cz, 30, { color: [0xffd34a, 0xffe27a, 0xffffff], speed: 2.5, up: 5, size: 0.08, life: 1.1, grav: 9 });
+    };
+  };
+}
+
+// ---------- Salle d'armes : statues des héros, marchand d'armes, dalles de choix ----------
+// étiquette toujours tournée vers la caméra
+function label(text, sub, x, y, z, w = 1.5) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = sub ? 150 : 96;
+  const x2 = c.getContext('2d');
+  x2.fillStyle = 'rgba(14,9,5,0.78)';
+  x2.beginPath(); x2.roundRect(4, 4, 504, c.height - 8, 22); x2.fill();
+  x2.strokeStyle = 'rgba(217,164,65,0.8)'; x2.lineWidth = 4; x2.stroke();
+  x2.textAlign = 'center'; x2.textBaseline = 'middle';
+  x2.fillStyle = '#f1c66d'; x2.font = '800 54px Cinzel, serif';
+  x2.fillText(text, 256, sub ? 52 : c.height / 2, 480);
+  if (sub) { x2.fillStyle = '#f5ead4'; x2.font = '500 38px "Barlow Condensed", sans-serif'; x2.fillText(sub, 256, 108, 480); }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }));
+  sp.scale.set(w, w * c.height / 512, 1);
+  sp.position.set(x, y, z);
+  sp.renderOrder = 5;
+  world.add(sp);
+  return sp;
+}
+const padGeo = new THREE.CircleGeometry(PAD_R, 32).rotateX(-Math.PI / 2);
+const padRing = new THREE.RingGeometry(PAD_R - 0.06, PAD_R, 40).rotateX(-Math.PI / 2);
+function buildHub(room) {
+  const pads = room.pads.map((pd) => {
+    const hero = pd.t === 'hero';
+    const col = hero ? 0xffc04a : 0x6fc3ff;
+    // dalle lumineuse
+    const disc = new THREE.Mesh(padGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.18, depthWrite: false, toneMapped: false }));
+    disc.position.set(pd.x, 0.012, pd.z);
+    const rim = new THREE.Mesh(padRing, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.7, depthWrite: false, toneMapped: false }));
+    rim.position.set(pd.x, 0.014, pd.z);
+    world.add(disc, rim);
+    if (!hero) return { pd, disc, rim, show: null, mixer: null, yes: null, sel: false };
+    // socle de pierre et statue vivante du héros, tournée vers la salle
+    const st = padStand(pd);
+    const base = P('d_wall', st.x, 0, st.z, 0, 0.62);
+    base.scale.y = 0.2;
+    const show = inst(pd.id, 1.6);
+    show.position.set(st.x, 0.25, st.z);
+    show.rotation.y = Math.PI / 2;
+    const bow = show.getObjectByName('bow');
+    if (bow) bow.getObjectByName('nocked').visible = false;
+    world.add(show);
+    const mixer = new THREE.AnimationMixer(show);
+    mixer.clipAction(clipOf(pd.id, 'idle')).play();
+    mixer.update(Math.random());
+    const clip = clipOf(pd.id, 'emote-yes');
+    let yes = null;
+    if (clip) { yes = mixer.clipAction(clip); yes.setLoop(THREE.LoopOnce, 1); }
+    label(HEROES[pd.id].name, HEROES[pd.id].desc, st.x + 0.2, 2.15, st.z, 1.25);
+    return { pd, disc, rim, show, mixer, yes, sel: false };
+  });
+  buildMerchant();
+  // tapis au centre de la salle
+  const rug = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 5.2), new THREE.MeshStandardMaterial({ color: 0x7a1e1a, roughness: 1 }));
+  rug.rotation.x = -Math.PI / 2; rug.position.set(0.6, 0.008, 1.2); rug.receiveShadow = true;
+  world.add(rug);
+  const rugIn = new THREE.Mesh(new THREE.PlaneGeometry(2.7, 4.7), new THREE.MeshStandardMaterial({ color: 0xa8742a, roughness: 1 }));
+  rugIn.rotation.x = -Math.PI / 2; rugIn.position.set(0.6, 0.01, 1.2);
+  world.add(rugIn);
+  const rugC = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 4.4), new THREE.MeshStandardMaterial({ color: 0x7a1e1a, roughness: 1 }));
+  rugC.rotation.x = -Math.PI / 2; rugC.position.set(0.6, 0.012, 1.2);
+  world.add(rugC);
+  label('EN AVANT !', 'Franchis la porte quand tu es prêt', 0, 2.9, -6.2, 1.9);
+
+  // ce que portent les héros : leur dalle brille, la statue salue au moment du choix
+  updaters.push((dt, t) => {
+    const hs = sim instanceof DungeonSim ? sim.heroes : [];
+    for (const p of pads) {
+      const sel = hs.some((h) => (p.pd.t === 'hero' ? h.kind === p.pd.id : h.shop > 0));
+      if (sel && !p.sel && p.yes) p.yes.reset().play();
+      p.sel = sel;
+      // la dalle du marchand pulse doucement pour attirer l'œil
+      p.disc.material.opacity = sel ? 0.45 + 0.12 * Math.sin(t * 4) : p.pd.t === 'shop' ? 0.2 + 0.1 * Math.sin(t * 2.5) : 0.14;
+      p.rim.material.opacity = sel ? 1 : 0.55;
+      if (p.mixer) p.mixer.update(dt);
+    }
+  });
+}
+
+// ---------- Marchand d'armes ----------
+// Un vieux marchand barbu derrière son étal, à droite de la porte. Un héros qui marche sur la dalle
+// devant le comptoir entre dans sa boutique (état p.shop de la simulation) : la caméra passe derrière
+// lui, le marchand lui parle et les armes défilent au-dessus du comptoir (← → pour choisir).
+// Tout ici est de l'affichage : le choix lui-même passe par la simulation (entrées des joueurs).
+const SHOP_LINES = {
+  sword: 'Le glaive et son bouclier : simple, rapide, fidèle.',
+  spear: 'La lance ! Tiens-les à distance, mon brave.',
+  tower: 'Le pavois… derrière ça, on ne craint pas grand-chose.',
+  axe: 'Une bonne hache, ça fend les crânes d\'orc !',
+  hammer: 'Le marteau : un seul coup, mais quel coup !',
+  staff: 'Le sceptre de feu… attention à ma barbe !',
+  tome: 'Ce grimoire appelle des chiens fidèles. Ouaf !',
+  bow: 'Un arc, pour frapper de loin. Malin, ça.',
+};
+const SHOP_SHORT = { sword: 'Glaive', spear: 'Lance', tower: 'Pavois', axe: 'Hache', hammer: 'Marteau', staff: 'Sceptre', tome: 'Grimoire', bow: 'Arc' };
+const shopReq = [-1, -1];            // arme choisie à l'écran (clic, touches 1 à 8), envoyée comme entrée
+const shopUi = { key: '', say: '', sayT: 0, last: [{ shop: 0, wpn: '' }, { shop: 0, wpn: '' }] };
+// héros joué sur cette machine qui est dans la boutique (-1 sinon) : la caméra se place derrière lui
+function localShopper() {
+  if (!(sim instanceof DungeonSim) || sim.g.phase !== 'hub') return -1;
+  return localHeroes().find((h) => sim.f[h]?.shop > 0) ?? -1;
+}
+function say(text, dur) { shopUi.say = text; shopUi.sayT = dur; }
+// arme seule, telle qu'exposée au-dessus du comptoir
+function weaponShow(id) {
+  const g = new THREE.Group();
+  const key = { spear: 'spear', axe: 'axe', hammer: 'hammer', staff: 'staff', tome: 'tome' }[id] ?? 'sword';
+  const main = id === 'bow' ? bowGroup() : inst(key, id === 'spear' ? 1.6 : 1.3);
+  if (id === 'bow') { main.getObjectByName('nocked').visible = true; main.scale.setScalar(1.5); }
+  else main.position.y = id === 'spear' ? -0.45 : key === 'sword' ? -0.22 : -0.35;
+  if (id === 'staff') glowOrb(main);
+  if (id === 'tome') { glowNode(main, 'rune', runeColor); main.position.y = 0; }
+  g.add(main);
+  if (id === 'sword' || id === 'tower' || id === 'axe') {
+    const sh = inst(id === 'tower' ? 'tower' : 'shield', id === 'tower' ? 1.5 : 1.15);
+    sh.position.set(0, id === 'tower' ? -0.25 : 0, -0.18);
+    g.add(sh);
+  }
+  return g;
+}
+function buildMerchant() {
+  const M = MERCHANT;
+  const stall = inst('stall', 1);
+  stall.position.set(M.x, 0, M.counterZ);
+  world.add(stall);
+  // pièces d'or et pot sur le comptoir, râteliers d'armes contre le mur
+  for (const [dx, dz, r] of [[-0.85, 0.05, 0.3], [-0.7, -0.1, 1.2], [0.9, 0, 2]]) P('d_coin', M.x + dx, 0.6, M.counterZ + dz, r, 0.5);
+  P('d_pot', M.x + 1.35, 0, M.counterZ - 0.45, 0.4, 1);
+  for (const x of [-1.8, -3.6]) P('a_rack', x, 0, -6.15, 0, 1.3);
+  P('d_barrel', -5.2, 0, -5.9, 0.3, S);
+  const sign = label("MARCHAND D'ARMES", '', M.x, 2.45, M.counterZ + 0.1, 1.7);
+
+  // le marchand se tient sur une caisse (sa tête dépasse du comptoir), à droite de l'étal ;
+  // les armes défilent sur la gauche du comptoir
+  const MX = M.x + 0.5, AX = M.x - 0.6;
+  const box = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.22, 0.5), new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 1 }));
+  box.position.set(MX, 0.11, M.z); box.castShadow = box.receiveShadow = true;
+  world.add(box);
+  const man = inst('merchant', 1.6);
+  man.position.set(MX, 0.22, M.z);
+  world.add(man);
+  const mixer = new THREE.AnimationMixer(man);
+  const idle = mixer.clipAction(clipOf('merchant', 'idle'));
+  idle.play();
+  let cur = null;
+  // geste ponctuel (salut, oui, non), puis retour au repos
+  const gesture = (name) => {
+    const a = mixer.clipAction(clipOf('merchant', name));
+    if (cur && cur !== a) cur.fadeOut(0.15);
+    a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; a.fadeIn(0.15).play();
+    idle.fadeOut(0.15);
+    cur = a;
+  };
+  mixer.addEventListener('finished', (e) => {
+    if (e.action !== cur) return;
+    cur.fadeOut(0.25); cur = null;
+    idle.reset().fadeIn(0.25).play();
+  });
+
+  // armes qui défilent au-dessus du comptoir pendant le choix
+  const shows = WEAPON_IDS.map((id) => {
+    const g = weaponShow(id);
+    g.visible = false;
+    world.add(g);
+    return g;
+  });
+  const lamp = new THREE.PointLight(0xffd9a0, 0.8, 4, 1.5);
+  lamp.position.set(M.x, 1.9, M.counterZ + 0.9);
+  world.add(lamp);
+  shopUi.last.forEach((o) => { o.shop = 0; o.wpn = ''; });
+  say('', 0);
+
+  updaters.push((dt, t) => {
+    const hs = sim instanceof DungeonSim ? sim.heroes : [];
+    const buyer = hs.find((h) => h.shop > 0);
+    // réactions du marchand, d'après l'état de la simulation (rien à défaire en cas de rollback)
+    hs.forEach((h, i) => {
+      const was = shopUi.last[i];
+      if (was.wpn) {
+        if (h.shop && !was.shop) { gesture('interact-right'); say('Tu veux quelle arme, mon brave ?', 0); }
+        else if (h.shop && h.shop !== was.shop) say(SHOP_LINES[WEAPON_IDS[h.shop - 1]] ?? '', 0);
+        else if (!h.shop && was.shop) {
+          if (h.wpn !== was.wpn) { gesture('emote-yes'); say('Bon choix, mon brave ! Fais-en bon usage.', 2.6); }
+          else { gesture('emote-no'); say('Reviens quand tu veux !', 2); }
+        }
+      }
+      was.shop = h.shop; was.wpn = h.wpn;
+    });
+    // il se tourne vers son client, ou vers le héros le plus proche
+    let look = 0, best = 4.5;
+    for (const h of hs) {
+      const d = h.shop ? -1 : Math.hypot(h.x - MX, h.z - M.z);
+      if (d < best) { best = d; look = clamp(Math.atan2(h.x - MX, h.z - M.z), -0.9, 0.9); }
+    }
+    man.rotation.y += (look - man.rotation.y) * Math.min(1, dt * 4);
+    mixer.update(dt);
+    shopUi.sayT -= dt;
+    if (!buyer && shopUi.sayT <= 0) {
+      const near = hs.some((h) => h.state !== 'dead' && Math.hypot(h.x - M.x, h.z - (M.counterZ + 1.5)) < 2.4);
+      shopUi.say = near ? 'Approche, mon brave ! J\'ai de belles armes.' : '';
+    }
+    // carrousel : l'arme montrée au centre, ses voisines de part et d'autre
+    const sel = buyer ? buyer.shop - 1 : -1, N = WEAPON_IDS.length, k2 = Math.min(1, dt * 10);
+    shows.forEach((g, k) => {
+      let d = sel < 0 ? 9 : (k - sel + N) % N;
+      if (d > N / 2) d -= N;
+      if (Math.abs(d) > 1) { g.visible = false; return; }
+      const x = AX + d * 0.58;
+      if (!g.visible) { g.visible = true; g.position.set(x, 1, M.counterZ); g.scale.setScalar(0.01); }
+      g.position.x += (x - g.position.x) * k2;
+      g.position.y = (d ? 0.92 : 1.12) + Math.sin(t * 2 + k) * 0.04;
+      g.position.z = M.counterZ + (d ? -0.1 : 0.1);
+      g.scale.setScalar(g.scale.x + ((d ? 0.55 : 1.05) - g.scale.x) * k2);
+      g.rotation.y = d ? -0.5 * d : t * 1.2;
+    });
+    lamp.intensity += ((buyer ? 3 : 0.8) - lamp.intensity) * Math.min(1, dt * 4);
+    sign.visible = localShopper() < 0;   // vue de près : l'enseigne passerait sous le titre
+    shopSync();
+  });
+}
+
+// bulle du marchand et panneau de choix (HTML par-dessus la scène)
+function shopSync() {
+  const hub = sim instanceof DungeonSim && sim.g.phase === 'hub' && !game.paused;
+  const talk = $('talk');
+  const v = v1.set(MERCHANT.x + 0.5, 1.75, MERCHANT.z).project(camera);
+  if (hub && shopUi.say && v.z < 1) {
+    talk.classList.remove('hidden');
+    if (talk.dataset.txt !== shopUi.say) { talk.dataset.txt = shopUi.say; $('talkTxt').textContent = shopUi.say; }
+    talk.style.left = ((v.x + 1) / 2 * innerWidth) + 'px';
+    talk.style.top = ((1 - v.y) / 2 * innerHeight) + 'px';
+  } else talk.classList.add('hidden');
+
+  const h = hub ? localShopper() : -1;
+  for (const k of [0, 1]) if (k !== h) shopReq[k] = -1;
+  $('help').classList.toggle('shopping', h >= 0);
+  if (h < 0) { shopUi.key = ''; $('shop').classList.add('hidden'); return; }
+  const p = sim.f[h], sel = p.shop - 1;
+  const key = [h, sel, p.wpn].join('|');
+  if (key === shopUi.key) return;
+  shopUi.key = key;
+  const id = WEAPON_IDS[sel], w = WEAPONS[id];
+  $('shopName').textContent = w.name;
+  $('shopMine').classList.toggle('hidden', id !== p.wpn);
+  $('shopDesc').textContent = w.desc;
+  $('shopList').innerHTML = WEAPON_IDS.map((wid, k) =>
+    `<button class="${k === sel ? 'on' : ''}${wid === p.wpn ? ' mine' : ''}" data-k="${k}"><kbd>${k + 1}</kbd>${esc(SHOP_SHORT[wid] ?? WEAPONS[wid].name)}</button>`).join('');
+  $('shopList').querySelectorAll('button').forEach((b) => { b.onclick = () => { shopReq[h] = +b.dataset.k; }; });
+  const ks = KEYSETS[localHeroes().length > 1 ? h : 0];
+  const k1 = (act) => kb(key1(ks, act) ?? '?');
+  $('shopKeys').innerHTML = `${k1('l')} ${k1('r')} choisir · ${k1('atk')} ou ${k1('jump')} prendre · ${k1('d')} ou ${k1('blk')} partir`;
+  $('shop').classList.remove('hidden');
+}
+
+// vues des héros (gardées d'une salle à l'autre) et des ennemis de la salle
+function dungeonViews() {
+  const np = sim.g.np;
+  const keep = F.length >= np && F.slice(0, np).every((v, i) => v.hero);
+  if (!keep) { F.forEach((v) => v.dispose()); F = []; }
+  else { F.slice(np).forEach((v) => v.dispose()); F.length = np; heroViews(); }
+  for (let i = F.length; i < sim.f.length; i++) F.push(makeView(i));
+}
+// vue du combattant i du donjon : héros, ennemi ou chien invoqué
+function makeView(i) {
+  const e = sim.f[i], np = sim.g.np;
+  if (e.kind === 'dog') {
+    const v = new DogView(i);
+    v.setSize(e.size);
+    v.addHpBar(0xb98aff);
+    v.hpBar.position.y = 1.05;
+    return v;
+  }
+  const v = new FighterView(i, e.kind, e.wpn);
+  if (i < np) {
+    v.hero = true;
+    v.ring.material.color.set(np > 1 ? HERO_COL[i] : 0xffd34a);
+  } else {
+    v.setSize(e.size);
+    v.ring.material.color.set(e.boss ? 0xff3020 : 0xb03a2a);
+    v.addHpBar(e.boss ? 0xff6a30 : 0xe0452f);
+  }
+  return v;
+}
+// chiens invoqués en cours de salle (ou retirés par un retour en arrière en ligne) : seules leurs vues changent
+function extraViews() {
+  while (F.length > sim.f.length) F.pop().dispose();
+  for (let i = sim.g.np; i < F.length; i++) if (F[i].kind !== sim.f[i].kind) { F[i].dispose(); F[i] = makeView(i); }
+  while (F.length < sim.f.length) F.push(makeView(F.length));
+}
+
+// un héros a changé de personnage ou d'arme (salle d'armes, ou rollback en ligne) : nouvelle vue
+function heroViews() {
+  for (let i = 0; i < sim.g.np && i < F.length; i++) {
+    const e = sim.f[i], v = F[i];
+    if (v.kind === e.kind && v.wpn === e.wpn) continue;
+    v.dispose();
+    const n = new FighterView(i, e.kind, e.wpn);
+    n.hero = true;
+    n.ring.material.color.copy(v.ring.material.color);
+    F[i] = n;
+  }
+}
+
+// héros et armes choisis dans la salle d'armes : proposés à nouveau la prochaine fois
+function saveHeroes() {
+  const loc = localHeroes();
+  loc.forEach((h, k) => {
+    const n = match?.mode === 'online' ? 1 : k + 1;
+    cfg['p' + n] = sim.f[h].kind;
+    cfg['w' + n] = sim.f[h].wpn;
+  });
+  saveCfg();
+}
+
+// la salle affichée rattrape celle de la simulation
+function dungeonRoom() {
+  if (dng.room === 0 && sim.g.room === 1) saveHeroes();
+  buildDungeonRoom(sim.room, sim.g.room);
+  // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
+  const n = sim.g.room;
+  if (n > 1 && dng.room >= 0 && biomeOf(n) !== biomeOf(n - 1)) {
+    const b = $('biome');
+    b.textContent = BIOME[biomeOf(n)].name;
+    b.className = '';
+    void b.offsetWidth;
+    b.className = 'show';
+  }
+  dng.room = sim.g.room;
+  dungeonViews();
+  snapCamera();
+}
+
+// À chaque image : porte, coffre, pièges et fenêtre de bénédiction suivent la simulation
+function dungeonSync() {
+  const g = sim.g;
+  if (dng.room !== g.room) dungeonRoom();
+  else { heroViews(); if (F.length !== sim.f.length) extraViews(); }
+  if (g.exitOpen && !dng.gateOpen) { dng.gateOpen = true; dng.gate?.open(); }
+  if (g.chest >= 1 && !dng.chest) { dng.chest = 1; dng.spawnChest?.(); }
+  if (g.chest === 2 && dng.chest === 1) { dng.chest = 2; dng.openChest?.(); }
+  dng.traps.forEach((t, k) => {
+    const up = trapUp(g.clock, k);
+    if (up !== t.up) {
+      t.up = up;
+      playOnce(t.mx, 'd_trap', up ? 'show' : 'hide');
+      if (up) { sfx.clang(); emit(t.x, 0.2, t.z, 8, { color: [0xc0c0c8, 0x8a8090], speed: 1.4, up: 2.5, size: 0.06, life: 0.5, grav: 6 }); }
+    }
+    // avertissement : un peu de poussière juste avant la sortie des pics
+    const ph = trapPhase(g.clock, k);
+    if (!up && ph > TRAP.up0 - TRAP.warn && ph < TRAP.up0 && g.phase !== 'reward' && --t.warnT < 0) {
+      t.warnT = 4;
+      emit(t.x + rand(-0.5, 0.5), 0.05, t.z + rand(-0.5, 0.5), 1, { color: 0x8a8090, speed: 0.4, up: 1, size: 0.06, life: 0.4, grav: 3 });
+    }
+  });
+  rewardSync();
+}
+
+// salle vide derrière le menu
+function dungeonPreview() {
+  sim = new DungeonSim(1, [cfg.p1]);
+  const col = (x, z) => ({ x, z, r: 0.4, kind: 'column' });
+  sim.room = { exit: 'z', obs: [col(-3, -3), col(3, -3), col(-3, 3), col(3, 3)], surf: [], traps: [], boss: false };
+  sim.f[0].yaw = sim.f[0].visTarget = ISO;
+  buildDungeonRoom(sim.room, 1);
+  dng.room = -2;   // aucune salle de la partie : la 1re (ou la salle d'armes) sera construite
+  F.forEach((v) => v.dispose());
+  F = [];
+  dungeonViews();
+}
+
+// m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed }
+function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p1, p2: cfg.p2, w1: cfg.w1, w2: cfg.w2 }) {
+  match = { ...m, game: 'dungeon' };
+  net.live = m.mode === 'online';
+  rb = null;
+  ac();
+  game.paused = false;
+  ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
+  const np = m.mode === 'solo' ? 1 : 2;
+  $('hud').classList.remove('hidden');
+  $('hud').classList.add('dng');
+  $('hud').classList.toggle('solo', np === 1);
+  $('help').classList.remove('hidden');
+  $('help').innerHTML = controlsHTML(m.mode, true);
+  $('againBtn').textContent = 'Recommencer';
+  setupBindings(m.mode, net.live ? net.me : 0);
+  const seed = (m.seed ?? Math.random() * 4294967296) >>> 0;
+  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2]);
+  F.forEach((v) => v.dispose());
+  F = [];
+  ai = ai0 = null;
+  pending[0] = pending[1] = 0;
+  pickReq.fill(-1);
+  rewardUi = '';
+  for (const k in uiTxt) delete uiTxt[k];   // l'arène a pu réécrire ces textes
+  sim.startHub();   // on commence dans la salle d'armes
+  playEvents(sim.ev);
+  sim.ev.length = 0;
+  rb = net.live ? new Rollback(sim, {
+    me: net.me,
+    send: (msg, reliable) => (net.link ? net.link.send(msg, reliable) : netSend(msg)),
+    onDesync: (d) => console.warn('Désynchronisation détectée à l\'image', d.frame),
+  }) : null;
+  dungeonRoom();
+  acc = 0;
+}
+
+function endDungeon() {
+  const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
+  const guest = net.live && net.role === 'guest';
+  if (best) try { localStorage.setItem(DNG_REC, String(g.room)); } catch (e) { /* ignoré */ }
+  $('resTitle').textContent = g.np > 1 ? 'VAINCUS…' : 'VAINCU…';
+  $('resSub').textContent = `Tombé${g.np > 1 ? 's' : ''} dans la salle ${g.room} · ${g.kills} ennemi${g.kills > 1 ? 's' : ''} vaincu${g.kills > 1 ? 's' : ''}` +
+    (best ? ' · nouveau record !' : ` · record : salle ${rec}`) + (guest ? '  ·  l’hôte peut relancer' : '');
+  $('againBtn').classList.toggle('hidden', guest);
+  $('result').classList.remove('hidden');
+  $('help').classList.add('hidden');
+}
+
+// ---------- Bénédictions : chaque héros choisit la sienne ----------
+// touches : seul ou en ligne 1 2 3 ; à deux sur le même clavier J1 1 2 3, J2 8 9 0 (ou pavé 1 2 3)
+function rewardKey(code) {
+  const d = /^Digit(\d)$/.exec(code), np = /^Numpad([1-3])$/.exec(code);
+  const loc = localHeroes();
+  if (loc.length > 1) {
+    if (d && '123'.includes(d[1])) return [0, +d[1] - 1];
+    if (d && '890'.includes(d[1])) return [1, '890'.indexOf(d[1])];
+    if (np) return [1, +np[1] - 1];
+    return null;
+  }
+  if (d && '123'.includes(d[1])) return [loc[0], +d[1] - 1];
+  if (np) return [loc[0], +np[1] - 1];
+  return null;
+}
+function pickBoon(h, n) {
+  if (!(sim instanceof DungeonSim) || h === undefined || !sim.mustPick(h) || !localHeroes().includes(h)) return;
+  pickReq[h] = n;   // transmis à la simulation par localInput (et donc au partenaire en ligne)
+  rewardUi = '';
+}
+function clickBoon(n) { pickBoon(localHeroes().find((h) => sim.mustPick(h) && pickReq[h] < 0), n); }
+
+let rewardUi = '';
+function rewardSync() {
+  const g = sim.g, loc = localHeroes();
+  if (g.phase !== 'reward') {
+    rewardUi = '';
+    $('reward').classList.add('hidden');
+    pickReq.fill(-1);
+    return;
+  }
+  for (const h of [0, 1]) if (!sim.mustPick(h)) pickReq[h] = -1;
+  const offer = sim.offer;
+  const key = [g.room, ...offer, g.pick0, g.pick1, ...pickReq].join('|');
+  if (key === rewardUi) return;
+  if (!rewardUi) down.clear();
+  rewardUi = key;
+  const duo = loc.length > 1;
+  const btns = $('reward').querySelectorAll('button');
+  offer.forEach((id, i) => {
+    const keys = duo ? `${i + 1}</kbd> <kbd>${'890'[i]}` : `${i + 1}`;
+    btns[i].innerHTML = `<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>`;
+    btns[i].disabled = !loc.some((h) => sim.mustPick(h) && pickReq[h] < 0);
+  });
+  const st = [];
+  for (let h = 0; h < g.np; h++) {
+    const p = sim.f[h], pk = g['pick' + h], who = g.np > 1 ? `J${h + 1}` : 'Toi';
+    let s;
+    if (p.state === 'dead') s = 'à terre';
+    else if (pk >= 0) s = '✔ ' + BOONS[offer[pk]].name;
+    else if (pickReq[h] >= 0) s = '…';
+    else s = loc.includes(h) ? 'choisis !' : 'choisit…';
+    st.push(`${who} (${Math.ceil(p.hp)} / ${p.maxHp} PV) : ${s}`);
+  }
+  $('rewardTxt').textContent = st.join('   ·   ');
+  $('reward').classList.remove('hidden');
+}
+
+const uiTxt = {};
+function setTxt(id, v) { if (uiTxt[id] !== v) { uiTxt[id] = v; $(id).textContent = v; } }
+function dungeonHud() {
+  const g = sim.g;
+  sim.heroes.forEach((p, i) => {
+    const n = i + 1, hp = Math.max(0, p.hp / p.maxHp * 100);
+    $('h' + n).style.width = hp + '%';
+    $('h' + n).classList.toggle('low', hp < 30);
+    $('t' + n).style.width = hp + '%';
+    $('g' + n).style.width = Math.max(0, p.guard) + '%';
+    $('g' + n).classList.toggle('low', p.guard < 30);
+    $('s' + n).style.width = Math.max(0, p.sta) + '%';
+    $('s' + n).classList.toggle('low', p.sta < STA.tired);
+    $('s' + n).classList.toggle('fail', p.staFail > 0);
+    const who = g.np > 1 ? `J${n} · ` : '';
+    const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
+    setTxt('n' + n, who + what + ' · ' + (p.state === 'dead' ? 'À TERRE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`));
+  });
+  setTxt('timer', g.room ? `SALLE ${g.room}` : "SALLE D'ARMES");
+  if (g.room === 0) { setTxt('roundLbl', 'CHOISIS TON HÉROS, PRENDS TON ARME CHEZ LE MARCHAND, PUIS PASSE LA PORTE'); return; }
+  const left = sim.foesLeft;
+  let lbl = left ? `${left} ENNEMI${left > 1 ? 'S' : ''}` : '';
+  if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : 'LA PORTE EST OUVERTE';
+  setTxt('roundLbl', lbl);
+}
+
+function dungeonCam(dt) {
+  if (game.phase === 'menu') {
+    camAng += dt * 0.1;
+    camPos.set(Math.sin(camAng) * 12, 10, Math.cos(camAng) * 12);
+    camTgt.set(0, 0.6, 0);
+    return;
+  }
+  // chez le marchand : la caméra passe derrière le héros, face au comptoir
+  const sh = localShopper();
+  if (sh >= 0) {
+    const p = sim.f[sh];
+    camAng = 0;      // les flèches suivent l'écran : ← → le long du comptoir, ↓ pour s'en aller
+    camPos.set(p.x + 1.05, 2.4, p.z + 2.45);
+    camTgt.set(MERCHANT.x + 0.15, 0.8, MERCHANT.counterZ - 0.3);
+    return;
+  }
+  camAng = ISO;   // fixe : les déplacements suivent l'écran
+  const alive = sim.heroes.filter((h) => h.state !== 'dead');
+  const hs = alive.length ? alive : sim.heroes;
+  const mx = hs.reduce((a, h) => a + h.x, 0) / hs.length, mz = hs.reduce((a, h) => a + h.z, 0) / hs.length;
+  const my = hs.reduce((a, h) => a + h.y, 0) / hs.length;
+  const sep = hs.length > 1 ? Math.hypot(hs[0].x - hs[1].x, hs[0].z - hs[1].z) : 0;
+  const close = game.phase === 'dead' || game.phase === 'end';
+  const tx = clamp(mx, -2.5, 2.5), tz = clamp(mz, -2.5, 2.5);
+  const far = Math.max(0, sep - 3);
+  const dist = (close ? 6.5 : 9.5) + far * 0.45, h = (close ? 7 : 10.5) + far * 0.5;
+  camTgt.set(tx, 0.8 + my * 0.5, tz);
+  camPos.set(tx + Math.sin(ISO) * dist, h + my * 0.5, tz + Math.cos(ISO) * dist);
 }
 
 // =====================================================================
@@ -1477,14 +2698,26 @@ function refreshMenu() {
     seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.val === String(cfg[seg.dataset.key])));
   });
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.val === cfg.arena));
-  const online = cfg.mode === 'online';
-  $('diffSec').classList.toggle('hidden', cfg.mode !== 'solo');
+  const online = cfg.mode === 'online', dg = cfg.game === 'dungeon';
+  $('diffSec').classList.toggle('hidden', dg || cfg.mode !== 'solo');
   $('netSec').classList.toggle('hidden', !online);
-  $('p2Sec').classList.toggle('hidden', online);
-  $('arenaSec').classList.toggle('hidden', online && net.role === 'guest');
-  $('p1Lbl').textContent = online ? 'Ton personnage' : 'Joueur 1';
+  $('p2Sec').classList.toggle('hidden', online || dg);
+  $('p1Sec').classList.toggle('hidden', dg);   // en donjon, on choisit dans la salle d'armes
+  const modeTxt = dg ? { solo: 'Seul', duo: '2 joueurs (même clavier)', online: 'En ligne (coop)' }
+    : { solo: '1 joueur contre l\'IA', duo: '2 joueurs', online: 'En ligne (réseau local)' };
+  document.querySelectorAll('[data-key="mode"] button').forEach((b) => { b.textContent = modeTxt[b.dataset.val]; });
+  $('arenaSec').classList.toggle('hidden', dg || (online && net.role === 'guest'));
+  $('p1Lbl').textContent = dg && cfg.mode === 'solo' ? 'Ton héros' : online ? 'Ton personnage' : 'Joueur 1';
+  $('menuSub').textContent = dg ? 'Les profondeurs du donjon' : 'Les arènes des petits gladiateurs';
   refreshGo();
-  $('p2Lbl').textContent = cfg.mode === 'solo' ? 'Adversaire (IA)' : 'Joueur 2';
+  $('p2Lbl').textContent = dg ? 'Joueur 2 (héros)' : cfg.mode === 'solo' ? 'Adversaire (IA)' : 'Joueur 2';
+  if (dg) {
+    const rec = dungeonRecord();
+    $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
+      `<div class="row" style="margin-top:8px"><b>Donjon :</b> tout commence dans la <b>salle d'armes</b> : marche sur la dalle devant une statue pour prendre ce héros (chacun a un petit talent), va voir le <b>vieux marchand</b> pour choisir ton arme (glaive, lance, pavois, hache, marteau, sceptre de feu, grimoire ou arc), puis passe la porte. Traverse ensuite les salles une à une. Élimine tous les ennemis pour ouvrir la porte du fond, ouvre le <b>coffre</b> pour choisir une bénédiction (soin, force, vitalité…), puis franchis la porte. Plus bas, des <b>estrades</b> (monte par l'escalier ou en sautant : d'en haut, on frappe sans être touché au sol) et des <b>pièges à pics</b> (la poussière annonce leur sortie). Un <b>chef orc</b> garde chaque 5<sup>e</sup> salle. Tu te tournes tout seul vers l'ennemi le plus proche · <b>À deux</b> : un héros tombé se relève à la salle suivante, la partie s'arrête quand les deux tombent · Échap = pause` +
+      (rec ? `<br><b>Record :</b> salle ${rec}` : '') + '</div>';
+    return;
+  }
   $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
     `<div class="row" style="margin-top:8px"><b>Astuces :</b> l'arène est en 3D : bouge dans toutes les directions, la caméra tourne autour du combat · un <b>pas de côté</b> (${esc(lab(key1(KEYSETS[0], 'u')))} / ${esc(lab(key1(KEYSETS[0], 'd')))}) fait rater les coups lents · le blocage use ta garde · la <b>parade</b> au bon moment étourdit l'attaquant · <b>briser la garde</b> traverse blocage et parade, mais on l'esquive en <b>sautant</b>, en se décalant ou en frappant en premier · pris dans un enchaînement ? fais une <b>roulade</b> (invincible pendant la rotation) · la <b>barre verte</b> est ton endurance : attaques, roulades, sauts et parades en consomment, laisse-la remonter · Échap = pause</div>`;
 }
@@ -1569,12 +2802,15 @@ function setupMenu() {
         if (key === 'mode' && cfg.mode !== 'online' && net.ws) { netClose(); netInfo('Partie en ligne quittée.'); }
         if (key === 'p1') netSend({ t: 'hello', kind: cfg.p1 });
         refreshMenu();
-        if (key === 'p1' || key === 'p2' || key === 'mode') menuFighters();
+        if (key === 'game') menuScene();
+        else if (cfg.game === 'dungeon') { if (key === 'p1') dungeonPreview(); }
+        else if (key === 'p1' || key === 'p2' || key === 'mode') menuFighters();
       };
     });
   });
-  $('go').onclick = () => (cfg.mode === 'online' ? netStart() : startMatch());
-  $('againBtn').onclick = () => (match?.mode === 'online' ? netStart() : startMatch());
+  $('go').onclick = () => (cfg.mode === 'online' ? netStart() : cfg.game === 'dungeon' ? startDungeon() : startMatch());
+  $('againBtn').onclick = () => (match?.mode === 'online' ? netStart() : match?.game === 'dungeon' ? startDungeon() : startMatch());
+  $('reward').querySelectorAll('button').forEach((b, i) => { b.onclick = () => clickBoon(i); });
   $('menuBtn').onclick = () => toMenu();
   $('resumeBtn').onclick = togglePause;
   $('quitBtn').onclick = () => toMenu();
@@ -1646,19 +2882,20 @@ function hostInfo() {
   return `Code de la partie : <span class="code">${esc(net.code)}</span><br>Ton ami ouvre ${urls || 'l’adresse de ce PC'} dans son navigateur, choisit « En ligne » et entre ce code.`;
 }
 function refreshGo() {
-  let txt = 'COMBATTRE', ok = true;
+  const dg = cfg.game === 'dungeon';
+  let txt = dg ? 'ENTRER' : 'COMBATTRE', ok = true;
   if (cfg.mode === 'online') {
-    if (net.role === 'host') { ok = net.peer; if (!ok) txt = 'En attente d’un adversaire…'; }
-    else { ok = false; txt = net.role === 'guest' ? 'L’hôte va lancer le combat…' : 'Crée ou rejoins une partie'; }
+    if (net.role === 'host') { ok = net.peer; if (!ok) txt = dg ? 'En attente d’un équipier…' : 'En attente d’un adversaire…'; }
+    else { ok = false; txt = net.role === 'guest' ? 'L’hôte va lancer la partie…' : 'Crée ou rejoins une partie'; }
   }
   $('go').textContent = txt;
   $('go').disabled = !ok;
 }
 function netStart() {
   if (net.role !== 'host' || !net.peer) return;
-  const m = { mode: 'online', p1: cfg.p1, p2: net.peerKind || 'soldier', arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
+  const m = { mode: 'online', game: cfg.game, p1: cfg.p1, p2: net.peerKind || 'soldier', w1: cfg.w1 || '', arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
   netSend({ t: 'start', ...m });
-  startMatch(m);
+  if (m.game === 'dungeon') startDungeon(m); else startMatch(m);
 }
 function netMsg(m) {
   if (m.t === 'ri' || m.t === 'rs') { if (rb) rb.receive(m); return; }
@@ -1685,8 +2922,9 @@ function netMsg(m) {
       if (game.phase === 'menu') menuFighters();
       break;
     case 'start':
-      if (net.role === 'guest' && CHARS[m.p1] && CHARS[m.p2] && ARENAS[m.arena])
-        startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
+      if (net.role !== 'guest' || !CHARS[m.p1] || !CHARS[m.p2]) break;
+      if (m.game === 'dungeon') startDungeon({ mode: 'online', p1: m.p1, p2: m.p2, w1: m.w1, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
+      else if (ARENAS[m.arena]) startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
       break;
     case 'menu':
       if (!net.live) break;
@@ -1725,6 +2963,8 @@ async function boot() {
   try {
     await Promise.all(keys.map((k) => loader.loadAsync(encodeURI(FILES[k])).then((g) => {
       G[k] = g;
+      // pièces lumineuses des décors (cristaux, lave, lanternes) : couleur de la palette, sans ombrage
+      g.scene.traverse((o) => { if (o.isMesh && o.name.startsWith('glow')) o.material = new THREE.MeshBasicMaterial({ map: o.material.map, toneMapped: false }); });
       $('lp').style.width = (++done / keys.length * 100) + '%';
     })));
   } catch (err) {
@@ -1741,7 +2981,10 @@ async function boot() {
   game.loading = false;
   $('loading').classList.add('hidden');
   toMenu();
-  if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
+  if (new URLSearchParams(location.search).has('dungeon')) startDungeon();
+  // ?debug : accès à la simulation depuis la console (tests dans le navigateur)
+  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; } };
+  else if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
   const warm = +new URLSearchParams(location.search).get('sim');
   for (let i = 0; i < warm * 60; i++) step(DT);
 }
@@ -1750,5 +2993,5 @@ boot();
 
 // Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart };
+  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart, startDungeon };
 }

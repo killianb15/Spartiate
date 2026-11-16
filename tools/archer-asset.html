@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Générateur de l'archère</title>
+<style>html, body { margin: 0; background: #2b2a33; color: #eee; font-family: sans-serif; } canvas { display: block; }</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<script type="module">
+// =====================================================================
+//  Génère assets/archer/archer.glb (l'archère elfe, modèle original) et assets/archer/arrow.glb.
+//
+//  Le personnage est entièrement modélisé ici, en pièces arrondies fixées sur un squelette qui
+//  porte les mêmes noms et positions de repos que les personnages Kenney (root, leg-left,
+//  leg-right, torso, arm-left, arm-right, head) : il réutilise ainsi toutes leurs animations.
+//  Au repos les bras sont à l'horizontale (le long de ±x), le visage regarde +z.
+//
+//  Ouvrir tools/archer-asset.html via le serveur du jeu : aperçu + téléchargement des fichiers.
+// =====================================================================
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+
+// ---------- palette ----------
+const mat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.75, ...o });
+const C = {
+  skin: mat(0xf4c7a1), blush: mat(0xf29a8c), hair: mat(0xc8572a), hairDark: mat(0x9a3f1c),
+  eye: mat(0x1d2433, { roughness: 0.3 }), eyeHi: mat(0xffffff, { emissive: 0x888888 }), mouth: mat(0x8a3a2e),
+  hood: mat(0x2f6d3c), hoodIn: mat(0x1f4a29), trim: mat(0xd9a93e, { metalness: 0.5, roughness: 0.4 }),
+  tunic: mat(0x6f9d4c), tunicDark: mat(0x557d3a), leather: mat(0x7b4a27), leatherDark: mat(0x45281a),
+  pants: mat(0x4b3b2f), wood: mat(0x5b3519), woodLight: mat(0x8a5a2b), string: mat(0xf3ecd8),
+  steel: mat(0xc5cad3, { metalness: 0.7, roughness: 0.3 }), featherR: mat(0xd8452f), featherW: mat(0xf6f1e7),
+};
+
+// pièce arrondie (w, h, d) centrée en (x, y, z) dans le repère de l'os parent
+function rb(parent, w, h, d, m, x, y, z, r = 0.03, rot = null) {
+  const o = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 2, Math.min(r, w / 2 - 0.001, h / 2 - 0.001, d / 2 - 0.001)), m);
+  o.position.set(x, y, z);
+  if (rot) o.rotation.set(...rot);
+  o.castShadow = true;
+  parent.add(o);
+  return o;
+}
+function cone(parent, r, h, m, x, y, z, rot, seg = 6) {
+  const o = new THREE.Mesh(new THREE.ConeGeometry(r, h, seg), m);
+  o.position.set(x, y, z);
+  o.rotation.set(...rot);
+  o.castShadow = true;
+  parent.add(o);
+  return o;
+}
+function cyl(parent, r0, r1, h, m, x, y, z, rot = [0, 0, 0], seg = 10) {
+  const o = new THREE.Mesh(new THREE.CylinderGeometry(r0, r1, h, seg), m);
+  o.position.set(x, y, z);
+  o.rotation.set(...rot);
+  o.castShadow = true;
+  parent.add(o);
+  return o;
+}
+
+// ---------- flèche : pointe vers +z ----------
+function makeArrow(len = 0.62, r = 0.011) {
+  const g = new THREE.Group();
+  cyl(g, r, r, len, C.woodLight, 0, 0, 0, [Math.PI / 2, 0, 0], 6);
+  cone(g, r * 3.2, len * 0.15, C.steel, 0, 0, len / 2 + len * 0.07, [Math.PI / 2, 0, 0], 4);
+  cyl(g, r * 1.6, r * 1.6, len * 0.04, C.leatherDark, 0, 0, -len / 2 + len * 0.22, [Math.PI / 2, 0, 0], 6);
+  for (let k = 0; k < 3; k++) {
+    const f = new THREE.Mesh(new THREE.BoxGeometry(0.004, r * 5, len * 0.2), k ? C.featherW : C.featherR);
+    const a = k * 2.094;
+    f.position.set(Math.cos(a) * r * 2.6, Math.sin(a) * r * 2.6, -len / 2 + len * 0.1);
+    f.rotation.z = a + Math.PI / 2;
+    g.add(f);
+  }
+  return g;
+}
+
+// ---------- arc à double courbure : branches vers l'avant (+z), pointes recourbées vers l'arrière ----------
+function makeBow() {
+  const g = new THREE.Group();
+  g.name = 'bow';
+  const H = 0.37;
+  const half = (s) => [
+    new THREE.Vector3(0, 0, 0.075), new THREE.Vector3(0, s * 0.12, 0.1), new THREE.Vector3(0, s * 0.25, 0.085),
+    new THREE.Vector3(0, s * 0.33, 0.04), new THREE.Vector3(0, s * H, 0.035),
+  ];
+  for (const s of [-1, 1]) {
+    const curve = new THREE.CatmullRomCurve3(half(s));
+    const limb = new THREE.Mesh(new THREE.TubeGeometry(curve, 20, 0.016, 7, false), C.wood);
+    limb.castShadow = true;
+    g.add(limb);
+    const tip = cone(g, 0.02, 0.05, C.trim, 0, s * (H + 0.02), 0.035, [s < 0 ? Math.PI : 0, 0, 0], 6);   // pointe dorée
+    tip.scale.z = 0.7;
+    cyl(g, 0.02, 0.02, 0.015, C.trim, 0, s * 0.2, 0.097, [0.15 * s, 0, 0], 8);                            // anneau décoratif
+  }
+  // poignée gainée de cuir
+  cyl(g, 0.026, 0.026, 0.11, C.leatherDark, 0, 0, 0.078, [0, 0, 0], 8);
+  cyl(g, 0.029, 0.029, 0.014, C.trim, 0, 0.06, 0.078, [0, 0, 0], 8);
+  cyl(g, 0.029, 0.029, 0.014, C.trim, 0, -0.06, 0.078, [0, 0, 0], 8);
+  // corde
+  cyl(g, 0.0045, 0.0045, H * 2 + 0.01, C.string, 0, 0, 0.03, [0, 0, 0], 4);
+  // flèche encochée (le jeu ne l'affiche que pendant la visée)
+  const nock = makeArrow();
+  nock.name = 'nocked';
+  nock.position.set(0.03, 0, 0.12);
+  g.add(nock);
+  return g;
+}
+
+// ---------- le personnage ----------
+const REST = {
+  'leg-left': [0.0836, 0.17625, -0.02375], 'leg-right': [-0.0836, 0.17625, -0.02375],
+  torso: [0, 0.17625, -0.02375], 'arm-left': [0.0999, 0.1115, 0.0115], 'arm-right': [-0.0999, 0.1115, 0.0115],
+  head: [0, 0.167, 0.0264],
+};
+function buildArcher() {
+  const top = new THREE.Group();
+  top.name = 'character-archer';
+  const root = new THREE.Group();
+  root.name = 'root';
+  top.add(root);
+  const bone = (name, parent) => { const b = new THREE.Group(); b.name = name; b.position.set(...REST[name]); parent.add(b); return b; };
+  const legL = bone('leg-left', root), legR = bone('leg-right', root), torso = bone('torso', root);
+  const armL = bone('arm-left', torso), armR = bone('arm-right', torso), head = bone('head', torso);
+
+  // ----- jambes : pantalon + bottes à revers -----
+  for (const [leg, s] of [[legL, 1], [legR, -1]]) {
+    rb(leg, 0.1, 0.1, 0.12, C.pants, s * 0.005, -0.055, -0.005, 0.03);
+    rb(leg, 0.112, 0.085, 0.15, C.leatherDark, s * 0.005, -0.135, 0.012, 0.03);       // botte
+    rb(leg, 0.12, 0.03, 0.135, C.leather, s * 0.005, -0.09, 0.0, 0.012);               // revers
+  }
+
+  // ----- buste : tunique, ceinture, baudrier, col de la capuche, cape, carquois -----
+  rb(torso, 0.27, 0.17, 0.2, C.tunic, 0, 0.085, 0.0, 0.05);
+  rb(torso, 0.3, 0.07, 0.22, C.tunicDark, 0, 0.0, 0.0, 0.03);                         // bas de la tunique
+  rb(torso, 0.285, 0.032, 0.215, C.leather, 0, 0.035, 0.0, 0.012);                    // ceinture
+  rb(torso, 0.05, 0.04, 0.02, C.trim, 0, 0.035, 0.11, 0.008);                         // boucle
+  rb(torso, 0.035, 0.24, 0.015, C.leather, 0.0, 0.1, 0.105, 0.006, [0, 0, -0.75]);    // baudrier sur la poitrine
+  rb(torso, 0.035, 0.22, 0.015, C.leather, 0.0, 0.1, -0.107, 0.006, [0, 0, 0.75]);    // et dans le dos
+  rb(torso, 0.33, 0.06, 0.24, C.hood, 0, 0.165, -0.005, 0.03);                        // col / bas de la capuche
+  rb(torso, 0.1, 0.035, 0.03, C.trim, 0, 0.16, 0.117, 0.01);                          // fermoir du col
+  const cape = rb(torso, 0.27, 0.21, 0.025, C.hood, 0, 0.06, -0.125, 0.01, [0.12, 0, 0]);
+  cape.name = 'cape';
+  rb(torso, 0.27, 0.02, 0.028, C.trim, 0, -0.045, -0.112, 0.006, [0.12, 0, 0]);       // liseré de la cape
+  // carquois
+  const q = new THREE.Group();
+  q.name = 'quiver';
+  cyl(q, 0.05, 0.043, 0.22, C.leather, 0, 0, 0, [0, 0, 0], 10);
+  cyl(q, 0.054, 0.054, 0.02, C.trim, 0, 0.1, 0, [0, 0, 0], 10);
+  cyl(q, 0.048, 0.048, 0.018, C.leatherDark, 0, -0.05, 0, [0, 0, 0], 10);
+  for (const [x, z, h] of [[0.018, 0.012, 0.13], [-0.02, 0.004, 0.1], [0.0, -0.022, 0.15], [0.022, -0.016, 0.11]]) {
+    const a = makeArrow(0.3, 0.008);
+    a.rotation.x = Math.PI / 2;            // pointe dans le carquois, plumes en haut
+    a.position.set(x, h - 0.01, z);
+    q.add(a);
+  }
+  q.position.set(-0.05, 0.1, -0.16);
+  q.rotation.set(-0.15, 0, 0.42);
+  torso.add(q);
+
+  // ----- bras (le long de +x pour le gauche, -x pour le droit) : manche, brassard, main -----
+  for (const [arm, s] of [[armL, 1], [armR, -1]]) {
+    rb(arm, 0.13, 0.115, 0.12, C.tunic, s * 0.065, 0, 0.01, 0.035);
+    rb(arm, 0.1, 0.105, 0.11, C.leather, s * 0.16, 0, 0.01, 0.03);                    // brassard
+    rb(arm, 0.02, 0.11, 0.115, C.trim, s * 0.205, 0, 0.01, 0.006);
+    rb(arm, 0.075, 0.085, 0.085, C.skin, s * 0.25, 0, 0.012, 0.03);                   // main
+  }
+  const bow = makeBow();
+  bow.position.set(0.255, 0, 0.05);
+  armL.add(bow);
+
+  // ----- tête : visage, frange rousse, oreilles d'elfe, capuche -----
+  rb(head, 0.4, 0.37, 0.34, C.skin, 0, 0.2, 0.02, 0.09);
+  for (const s of [-1, 1]) {
+    rb(head, 0.06, 0.08, 0.02, C.eye, s * 0.085, 0.185, 0.188, 0.015);                // yeux
+    rb(head, 0.022, 0.022, 0.01, C.eyeHi, s * 0.085 + 0.012, 0.205, 0.199, 0.005);    // reflets
+    rb(head, 0.075, 0.018, 0.015, C.hairDark, s * 0.09, 0.255, 0.188, 0.006, [0, 0, -s * 0.18]);   // sourcils
+    rb(head, 0.055, 0.03, 0.01, C.blush, s * 0.135, 0.13, 0.186, 0.012);              // joues
+    const ear = cone(head, 0.035, 0.16, C.skin, s * 0.235, 0.215, -0.005, [0, 0, -s * 1.15], 4);   // oreille d'elfe
+    ear.scale.set(1, 1, 0.45);
+  }
+  rb(head, 0.03, 0.025, 0.02, C.skin, 0, 0.145, 0.197, 0.01);                       // nez
+  rb(head, 0.06, 0.014, 0.01, C.mouth, 0, 0.098, 0.19, 0.005);                       // bouche
+  rb(head, 0.022, 0.012, 0.01, C.mouth, 0.034, 0.104, 0.19, 0.004, [0, 0, 0.5]);     // coins du sourire
+  rb(head, 0.022, 0.012, 0.01, C.mouth, -0.034, 0.104, 0.19, 0.004, [0, 0, -0.5]);
+  // frange balayée sur le front
+  rb(head, 0.36, 0.08, 0.06, C.hair, 0, 0.33, 0.165, 0.025);
+  rb(head, 0.13, 0.1, 0.05, C.hair, -0.1, 0.29, 0.18, 0.025, [0, 0, 0.35]);
+  rb(head, 0.1, 0.085, 0.05, C.hairDark, 0.11, 0.3, 0.178, 0.025, [0, 0, -0.3]);
+  // mèches sur les côtés, tresse dans le dos
+  for (const s of [-1, 1]) rb(head, 0.035, 0.14, 0.05, C.hair, s * 0.18, 0.21, 0.16, 0.015);
+  for (let k = 0; k < 3; k++) rb(head, 0.07 - k * 0.012, 0.07, 0.06 - k * 0.01, k % 2 ? C.hairDark : C.hair, 0, 0.05 - k * 0.065, -0.2, 0.025);
+  cyl(head, 0.03, 0.03, 0.02, C.trim, 0, -0.16, -0.2, [0, 0, 0], 8);
+  // capuche : coque arrière + bandeau supérieur + joues, laisse le visage dégagé
+  rb(head, 0.46, 0.42, 0.24, C.hood, 0, 0.22, -0.055, 0.09);
+  rb(head, 0.47, 0.11, 0.2, C.hood, 0, 0.395, 0.08, 0.05);
+  rb(head, 0.44, 0.03, 0.03, C.trim, 0, 0.36, 0.18, 0.01);                           // liseré doré du bord
+  for (const s of [-1, 1]) {
+    rb(head, 0.05, 0.3, 0.17, C.hood, s * 0.218, 0.2, 0.09, 0.025);
+  }
+  cone(head, 0.08, 0.2, C.hood, 0, 0.35, -0.21, [-2.2, Math.PI / 4, 0], 4);         // pointe de la capuche
+  return top;
+}
+
+// Allège le modèle : sous chaque nœud, les pièces de même matière sont fusionnées en un seul
+// maillage (les nœuds nommés — os, arc, flèche encochée — restent séparés).
+function merge(node) {
+  for (const c of [...node.children]) if (!c.isMesh) merge(c);
+  const groups = new Map();
+  for (const c of node.children) if (c.isMesh && !c.name) { if (!groups.has(c.material)) groups.set(c.material, []); groups.get(c.material).push(c); }
+  for (const [m, list] of groups) {
+    if (list.length < 2) continue;
+    const geos = list.map((c) => { c.updateMatrix(); const g = (c.geometry.index ? c.geometry.toNonIndexed() : c.geometry.clone()).applyMatrix4(c.matrix); g.deleteAttribute('uv'); return g; });
+    const merged = new THREE.Mesh(mergeVertices(mergeGeometries(geos)), m);   // sommets identiques partagés
+    merged.castShadow = true;
+    list.forEach((c) => node.remove(c));
+    node.add(merged);
+  }
+  // les groupes sans nom (flèches du carquois…) sont aplatis dans leur parent avant fusion
+}
+function flatten(node) {
+  for (const c of [...node.children]) {
+    flatten(c);
+    if (!c.isMesh && !c.name && c.children.length) {
+      c.updateMatrix();
+      for (const k of [...c.children]) { k.applyMatrix4(c.matrix); node.add(k); }
+      node.remove(c);
+    }
+  }
+}
+
+const gltf = await new GLTFLoader().loadAsync(encodeURI('/assets/dungeon/Models/GLB format/character-human.glb'));
+const anims = gltf.animations;           // animations Kenney (elles visent les os par leur nom)
+const archer = buildArcher();
+flatten(archer);
+merge(archer);
+const arrowRoot = new THREE.Group();
+arrowRoot.name = 'arrow-root';
+const arrow = makeArrow();
+arrow.name = 'arrow';
+arrowRoot.add(arrow);
+
+function toGLB(obj, animations = []) {
+  return new Promise((res, rej) => new GLTFExporter().parse(obj, (buf) => res(buf), rej, { binary: true, animations }));
+}
+const b64 = (buf) => new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.readAsDataURL(new Blob([buf])); });
+window.build = async () => ({ archer: await b64(await toGLB(archer, anims)), arrow: await b64(await toGLB(arrowRoot)) });
+
+// ---------- aperçu : repos, visée (face et profil), marche, dos ----------
+const W = 1400, Hh = 600;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, Hh);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x34323d);
+scene.add(new THREE.HemisphereLight(0xfff4e0, 0x404058, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 2.4); sun.position.set(2, 4, 3); sun.castShadow = true; scene.add(sun);
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), new THREE.MeshStandardMaterial({ color: 0x45424f }));
+floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+const cam = new THREE.PerspectiveCamera(28, W / Hh, 0.1, 50);
+cam.position.set(0, 1.15, 6.2); cam.lookAt(0, 0.6, 0);
+const poses = [['idle', 0.4, 0.35], ['holding-both-shoot', 0.3, 0.6], ['holding-both-shoot', 0.5, -1.3], ['walk', 0.25, 0.9], ['idle', 0.4, Math.PI - 0.5]];
+poses.forEach(([clip, t, ry], i) => {
+  const o = SkeletonUtils.clone(archer);   // copie : l'original part tel quel dans le fichier exporté
+  o.position.x = -2.6 + i * 1.3;
+  o.rotation.y = ry;
+  o.scale.setScalar(1.6);
+  scene.add(o);
+  const mx = new THREE.AnimationMixer(o);
+  mx.clipAction(THREE.AnimationClip.findByName(anims, clip)).play();
+  mx.update(t);
+});
+const fly = arrow.clone();
+fly.scale.setScalar(1.6);
+fly.position.set(-0.6, 1.25, 0.6); fly.rotation.y = Math.PI / 2 - 0.25;
+scene.add(fly);
+renderer.render(scene, cam);
+
+for (const [name, key] of [['archer.glb', 'archer'], ['arrow.glb', 'arrow']]) {
+  const a = document.createElement('button');
+  a.textContent = 'Télécharger ' + name;
+  a.style.margin = '8px';
+  a.onclick = async () => {
+    const r = await window.build();
+    const link = document.createElement('a');
+    link.href = 'data:model/gltf-binary;base64,' + r[key];
+    link.download = name;
+    link.click();
+  };
+  document.body.appendChild(a);
+}
+window.ready = true;
+</script>
+</body>
+</html>

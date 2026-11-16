@@ -19,8 +19,35 @@ export const BRK = { start: 0.34, end: 0.47, dur: 0.8 };
 export const PAR = { win: 0.2, dur: 0.42 };
 export const ROLL = { dur: 0.48, inv0: 0.03, inv1: 0.36, speed: 7.5 };
 // endurance : chaque action en consomme, elle remonte quand on souffle un peu
-export const STA = { regen: 30, delay: 0.7, atk: 9, brk: 22, roll: 28, jump: 12, par: 10, tired: 15 };
-export const HIT_W = 0.72;   // demi-largeur de la zone touchée : un pas de côté suffit pour esquiver
+export const STA = { regen: 30, delay: 0.7, atk: 9, brk: 22, roll: 28, jump: 12, par: 10, tired: 15, summon: 30 };
+// archer : tir (relâche de la flèche à rel, nouveau tir possible à chain), flèche (vitesse, dégâts, durée de vol)
+export const SHOT = { rel: 0.2, chain: 0.36, dur: 0.5, speed: 15, dmg: 10, life: 1.1, guard: 16, melee: 1.5, bash: 6, run: 1.12 };
+// sceptre : boule de feu (plus lente qu'une flèche) qui explose en zone : rayon, dégâts, garde perdue
+// au blocage, recul ; rel/chain/dur : comme SHOT mais pour l'incantation (cadence plus lente)
+export const FIRE = { speed: 8.5, life: 1.3, radius: 1.7, dmg: 9, guard: 20, knock: 3.2, rel: 0.26, chain: 0.62, dur: 0.66, touch: 0.5 };
+// grimoire : incantation qui invoque un chien (rel : le chien apparaît ; chain/dur : fin de l'incantation)
+export const CAST = { rel: 0.4, chain: 0.85, dur: 0.85, max: 2 };
+export const HIT_W = 0.72;
+// Armes : portée du coup, dégâts, coups d'un enchaînement, vitesse de course, coût du blocage
+// (multiplie la garde perdue), crush (multiplie la garde que fait perdre un coup bloqué).
+// 'bow' tire des flèches (voir SHOT). Hache et marteau : modèles générés par tools/blender/weapons.py.
+export const WEAPONS = {
+  sword: { name: 'Glaive et bouclier', desc: 'Équilibré : enchaînement de 3 coups', reach: 1.45, dmg: 9, combo: 3, run: 1, guard: 1 },
+  spear: { name: 'Lance', desc: 'Frappe de loin, mais 2 coups par enchaînement', reach: 2.0, dmg: 10, combo: 2, run: 1, guard: 1.15 },
+  tower: { name: 'Épée et pavois', desc: 'Le grand bouclier encaisse mieux, mais on court moins vite', reach: 1.45, dmg: 9, combo: 3, run: 0.88, guard: 0.6 },
+  axe: { name: 'Hache et bouclier', desc: 'Gros dégâts, 2 coups par enchaînement', reach: 1.5, dmg: 12, combo: 2, run: 1, guard: 1 },
+  hammer: { name: 'Marteau de guerre', desc: 'Un seul coup écrasant, qui ruine la garde', reach: 1.6, dmg: 17, combo: 1, run: 0.94, guard: 1.3, crush: 1.8 },
+  staff: { name: 'Sceptre de feu', desc: 'Boules de feu qui explosent et brûlent tout autour', reach: 1.45, dmg: 6, combo: 3, run: 1, guard: 1.4, bow: true, fire: true },
+  tome: { name: 'Grimoire', desc: 'Invoque des chiens qui se battent pour toi (2 au plus)', reach: 1.3, dmg: 5, combo: 2, run: 1, guard: 1.3, summon: true },
+  // crocs des chiens invoqués (pas proposés dans la salle d'armes)
+  bite: { name: 'Crocs', desc: '', reach: 1.25, dmg: 8, combo: 2, run: 1.25, guard: 1.5, hidden: true },
+  bow: { name: 'Arc', desc: 'Tire des flèches ; on court plus vite, mais on bloque mal', reach: 1.45, dmg: SHOT.bash, combo: 3, run: SHOT.run, guard: 1.6, bow: true },
+};
+export const wpnOf = (f) => WEAPONS[f.wpn] ?? WEAPONS.sword;
+// temps du tir (arc), de l'incantation de la boule de feu (sceptre) ou de l'invocation (grimoire)
+const shotOf = (f) => (wpnOf(f).summon ? CAST : wpnOf(f).fire ? FIRE : SHOT);
+// arme par défaut d'un personnage (l'archère a son arc)
+export const defaultWeapon = (kind) => (kind === 'archer' ? 'bow' : 'sword');   // demi-largeur de la zone touchée : un pas de côté suffit pour esquiver
 const BUF = 0.18;            // durée de mémorisation d'une touche pressée
 
 // Entrée d'un joueur pour une image : déplacement quantifié (-127..127), blocage, touches pressées (bits)
@@ -33,7 +60,7 @@ const fx = (f) => sin(f.yaw);
 const fz = (f) => cos(f.yaw);
 export const canRoll = (f) => f.sta >= STA.roll;
 
-function newFighter(idx) {
+export function newFighter(idx) {
   return {
     idx, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, yaw: 0, visTarget: 0,
     hp: 100, guard: 100, state: 'idle', stateT: 0, dur: 0, sta: 100, staT: 9, staFail: 0,
@@ -41,14 +68,19 @@ function newFighter(idx) {
     // description de l'animation demandée (la vue la lit quand animN change)
     anim: 'idle', animTs: 1, animLoop: true, animRestart: false, animFade: 0, animN: 0,
     resetN: 0,   // +1 à chaque remise à zéro (la vue réinitialise alors son squelette)
+    arch: false, // archer : l'attaque tire une flèche
+    wpn: 'sword', // arme (clé de WEAPONS)
   };
 }
-const newInput = () => ({ mx: 0, mz: 0, blk: false, atk: 0, par: 0, brk: 0, jump: 0, roll: 0 });
+export const newInput = () => ({ mx: 0, mz: 0, blk: false, atk: 0, par: 0, brk: 0, jump: 0, roll: 0 });
 
 export class Sim {
-  constructor(seed = 1) {
+  // kinds : personnage de chaque combattant ('archer' tire des flèches)
+  constructor(seed = 1, kinds = ['soldier', 'orc']) {
     this.rng = new Rng(seed);
     this.f = [newFighter(0), newFighter(1)];
+    this.f.forEach((f, i) => { f.wpn = defaultWeapon(kinds[i]); f.arch = !!wpnOf(f).bow; });
+    this.pr = [];           // flèches en vol (objets plats, sauvegardés avec le reste)
     this.inp = [newInput(), newInput()];
     this.g = { phase: 'menu', round: 1, w0: 0, w1: 0, timer: ROUND_TIME, t: 0, slow: 1, slowT: 0, hitstop: 0,
       roundWinner: -1, flagGo: false, flagPose: false, flagFade: false, frame: 0 };
@@ -62,18 +94,43 @@ export class Sim {
   emit(...e) { if (this.record) this.ev.push(e); }
   take(i, a) { const inp = this.inp[i]; if (inp[a] > 0) { inp[a] = 0; return true; } return false; }
 
+  // ---------------- points d'extension (le donjon les redéfinit) ----------------
+  // adversaire vers lequel le combattant i se tourne (null : aucun, il suit sa direction de marche)
+  target(i) { return this.f[1 - i]; }
+  // garde le combattant dans l'aire de jeu
+  bound(f) {
+    const r = hypot(f.x, f.z);
+    if (r > FIGHT_R) { f.x *= FIGHT_R / r; f.z *= FIGHT_R / r; }
+  }
+  // hauteur du sol sous le combattant (le donjon a des estrades et des escaliers)
+  groundY(f) { return 0; }
+  // après le déplacement horizontal : monter/descendre une marche (rien dans l'arène)
+  settle(f) {}
+  // vrai si aller dans la direction (mx, mz) envoie f contre un bord (utilisé par l'IA)
+  nearWall(f, mx, mz) { return hypot(f.x, f.z) > FIGHT_R - 0.8 && (mx * f.x + mz * f.z) > 0; }
+  // def vient de tomber sous les coups de att
+  onKO(att, def) { this.endRound(att.idx, 'K.O. !'); }
+  // la flèche tirée par le combattant n° o peut-elle toucher f ?
+  foeOf(o, f) { return o !== f.idx; }
+  // invocation (grimoire) : l'arène n'en a pas, le donjon les ajoute
+  canSummon(f) { return false; }
+  summon(f) {}
+  // la flèche heurte-t-elle le décor ?
+  arrowWall(a) { return a.y < 0.02 || hypot(a.x, a.z) > 9.6; }
+
   // ---------------- sauvegarde / restauration / empreinte ----------------
   save() {
-    return { f: [{ ...this.f[0] }, { ...this.f[1] }], g: { ...this.g }, inp: [{ ...this.inp[0] }, { ...this.inp[1] }], rng: this.rng.s };
+    return { f: [{ ...this.f[0] }, { ...this.f[1] }], g: { ...this.g }, inp: [{ ...this.inp[0] }, { ...this.inp[1] }], rng: this.rng.s, pr: this.pr.map((a) => ({ ...a })) };
   }
   load(s) {
     this.f = [{ ...s.f[0] }, { ...s.f[1] }];
     this.g = { ...s.g };
     this.inp = [{ ...s.inp[0] }, { ...s.inp[1] }];
     this.rng.s = s.rng;
+    this.pr = (s.pr ?? []).map((a) => ({ ...a }));
   }
   // empreinte 32 bits de tout l'état de jeu (détection de désynchronisation)
-  hash() { return hashState({ f: this.f, g: this.g, inp: this.inp, rng: this.rng.s }); }
+  hash() { return hashState({ f: this.f, g: this.g, inp: this.inp, rng: this.rng.s, pr: this.pr }); }
 
   // ---------------- déroulement du match ----------------
   placeStart(gap) {
@@ -82,7 +139,7 @@ export class Sim {
   }
   reset(f, x, z, yaw) {
     const n = f.resetN + 1, an = f.animN + 1;
-    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an });
+    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an, arch: f.arch, wpn: f.wpn });
   }
   startMatch() {
     const g = this.g;
@@ -96,6 +153,7 @@ export class Sim {
     g.flagGo = g.flagPose = g.flagFade = false;
     g.timer = ROUND_TIME; g.slow = 1; g.slowT = 0; g.hitstop = 0;
     this.inp[0] = newInput(); this.inp[1] = newInput();
+    this.pr = [];
     this.emit('round', g.round);
     this.emit('announce', g.round === 3 ? 'ROUND FINAL' : `ROUND ${g.round}`, '', 1.25);
     this.emit('sfx', 'gong');
@@ -148,6 +206,7 @@ export class Sim {
       }
     }
 
+    this.updateArrows();
     if (ph === 'fight') {
       this.resolve(f[0], f[1]);
       this.resolve(f[1], f[0]);
@@ -189,6 +248,106 @@ export class Sim {
     this.play(f, f.combo === 2 ? 'attack-melee-left' : 'attack-melee-right', { loop: false, restart: true, fade: 0.05 });
     this.emit('sfx', 'swing');
   }
+  // archer : bander l'arc (la flèche part à SHOT.rel, voir 'shoot')
+  startShot(f) {
+    this.setState(f, 'shoot');
+    f.hitDone = false;
+    if (wpnOf(f).summon) { this.play(f, 'holding-left-shoot', { loop: false, restart: true, ts: 0.9, fade: 0.05 }); this.emit('sfx', 'spell'); }
+    else if (wpnOf(f).fire) this.play(f, 'holding-right-shoot', { loop: false, restart: true, ts: 1.1, fade: 0.05 });
+    else this.play(f, 'holding-both-shoot', { loop: false, restart: true, ts: 1.4, fade: 0.05 });
+  }
+  // projectile : flèche (k = 0) ou boule de feu (k = 1, sceptre)
+  fire(f, opp) {
+    const k = wpnOf(f).fire ? 1 : 0, speed = k ? FIRE.speed : SHOT.speed;
+    const sx = fx(f), sz = fz(f), y0 = f.y + 1.05;
+    const x0 = f.x + sx * 0.5, z0 = f.z + sz * 0.5;
+    // visée verticale vers la poitrine de la cible (estrades, sauts)
+    let vy = 0;
+    if (opp) {
+      const d = hypot(opp.x - x0, opp.z - z0);
+      if (d > 0.3) vy = Math.max(-8, Math.min(8, (opp.y + 0.95 - y0) / (d / speed)));
+    }
+    this.pr.push({ x: x0, y: y0, z: z0, vx: sx * speed, vy, vz: sz * speed, o: f.idx, t: 0, k });
+    this.emit('sfx', k ? 'fireball' : 'bow');
+  }
+  // explosion de la boule de feu a : blesse tous les adversaires du lanceur dans le rayon
+  explode(a) {
+    const att = this.f[a.o], R = FIRE.radius;
+    this.emit('emit', a.x, a.y, a.z, 34, { color: [0xffe27a, 0xff9a2e, 0xff4a1c, 0x5a3020], speed: 4.5, up: 3.5, size: 0.11, life: 0.6, grav: 3 });
+    this.emit('ring', a.x, Math.max(0.05, a.y - 0.6), a.z, 0xff8a2e, R * 1.15, 0.4, true);
+    this.emit('ring', a.x, a.y, a.z, 0xffe27a, 1.4, 0.25);
+    this.emit('sfx', 'boom');
+    this.emit('shake', 0.16);
+    if (this.g.phase !== 'fight' || !att) return;
+    for (const d of this.f) {
+      if (d.state === 'dead' || !this.foeOf(a.o, d)) continue;
+      const dx = d.x - a.x, dz = d.z - a.z, dist = hypot(dx, dz), sz = d.size ?? 1;
+      if (dist > R + 0.3 * (sz - 1) || Math.abs(d.y + 0.8 - a.y) > 1.5) continue;
+      if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) continue;   // roulade : on passe à travers
+      // bloquer face à l'explosion : la garde encaisse
+      if (d.state === 'block' && (dist < 0.05 || (fx(d) * dx + fz(d) * dz) / dist < -0.2)) {
+        d.guard -= FIRE.guard * wpnOf(d).guard; d.guardT = 0;
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(att, d, FIRE.dmg, FIRE.knock, 0.3, d.x, d.y + 1, d.z);
+      if (d.state !== 'dead' && dist > 0.05) { d.vx = dx / dist * FIRE.knock; d.vz = dz / dist * FIRE.knock; }   // soufflé loin du centre
+    }
+  }
+  // déplace les flèches ; elles ne blessent que pendant le combat
+  updateArrows() {
+    const dt = this.dt, fight = this.g.phase === 'fight';
+    for (let k = this.pr.length - 1; k >= 0; k--) {
+      const a = this.pr[k];
+      a.t += dt; a.x += a.vx * dt; a.y += a.vy * dt; a.z += a.vz * dt;
+      const fb = a.k === 1;
+      let gone = a.t > (fb ? FIRE.life : SHOT.life), boom = gone && fb;
+      if (!gone && this.arrowWall(a)) {
+        gone = true; boom = fb;
+        if (!fb) {
+          this.emit('emit', a.x, a.y, a.z, 5, { color: [0xc8a070, 0x8a5a2b], speed: 1.2, up: 1.2, size: 0.05, life: 0.4, grav: 6 });
+          this.emit('sfx', 'thunk');
+        }
+      }
+      if (!gone && fight) for (const d of this.f) {
+        if (d.state === 'dead' || !this.foeOf(a.o, d)) continue;
+        const sz = d.size ?? 1;
+        if (hypot(d.x - a.x, d.z - a.z) > (fb ? FIRE.touch : 0.4) * sz || a.y < d.y + 0.15 || a.y > d.y + 1.55 * sz) continue;
+        if (this.arrowHit(a, d)) { gone = true; boom = fb; break; }
+      }
+      if (gone) this.pr.splice(k, 1);
+      if (boom) this.explode(a);
+    }
+  }
+  // flèche a sur le combattant d ; vrai si la flèche s'arrête là
+  arrowHit(a, d) {
+    if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) return false;   // traverse la roulade
+    const att = this.f[a.o] ?? d, g = this.g;
+    const sp = hypot(a.vx, a.vz) || 1, facing = fx(d) * a.vx / sp + fz(d) * a.vz / sp < -0.2;
+    if (d.state === 'parry' && d.stateT <= PAR.win && facing) {
+      // parade : la flèche repart vers le tireur
+      a.vx = -a.vx; a.vz = -a.vz; a.vy = -a.vy; a.o = d.idx; a.t = 0;
+      this.emit('fx', d.idx, 'parried');
+      this.emit('ring', a.x, a.y, a.z, 0x8fd8ff, 1.6, 0.35);
+      this.emit('pop', 'RENVOI !', d.x, d.y + 2.0, d.z, 'parry');
+      this.emit('sfx', 'parry');
+      g.hitstop = 0.08;
+      return false;
+    }
+    if (a.k === 1) return true;      // boule de feu : elle explose (dégâts de zone dans explode)
+    if (d.state === 'block' && facing) {
+      d.guard -= SHOT.guard * wpnOf(d).guard; d.guardT = 0;
+      this.emit('fx', d.idx, 'blocked');
+      this.emit('emit', a.x, a.y, a.z, 8, { color: [0xffe27a, 0xffffff], speed: 3, up: 2, size: 0.05, life: 0.3, grav: 10 });
+      this.emit('sfx', 'clang');
+      if (d.guard <= 0) this.guardBreak(att, d, a.x, a.y, a.z, 0);
+      return true;
+    }
+    this.damage(att, d, SHOT.dmg, 1.6, 0.22, a.x, a.y, a.z);
+    return true;
+  }
   startBreak(f) {
     this.setState(f, 'brk');
     f.hitDone = false; f.brkSfx = false;
@@ -205,7 +364,7 @@ export class Sim {
     f.airAtk = false;
     this.play(f, 'jump', { loop: false, fade: 0.06 });
     this.emit('sfx', 'jump');
-    this.emit('emit', f.x, 0.05, f.z, 6, { color: [0xc8a070, 0xa88050], speed: 1.4, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
+    this.emit('emit', f.x, f.y + 0.05, f.z, 6, { color: [0xc8a070, 0xa88050], speed: 1.4, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
   }
   spend(f, cost) {
     if (f.sta < cost) {
@@ -226,7 +385,7 @@ export class Sim {
     this.emit('fx', f.idx, 'noFlinch');
     this.play(f, 'crouch', { fade: 0.05 });
     this.emit('sfx', 'roll');
-    this.emit('emit', f.x, 0.05, f.z, 7, { color: [0xc8a070, 0xa88050], speed: 1.6, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
+    this.emit('emit', f.x, f.y + 0.05, f.z, 7, { color: [0xc8a070, 0xa88050], speed: 1.6, up: 0.8, size: 0.08, life: 0.5, grav: 3 });
   }
   stun(f, d) {
     this.setState(f, 'stun', d);
@@ -241,17 +400,18 @@ export class Sim {
   win(f) { this.setState(f, 'win'); this.play(f, 'emote-yes', { fade: 0.2 }); }
 
   updateFighter(i, canAct) {
-    const f = this.f[i], opp = this.f[1 - i], inp = this.inp[i], dt = this.dt;
+    const f = this.f[i], opp = this.target(i), inp = this.inp[i], dt = this.dt;
     f.stateT += dt;
     const st = f.state;
     const mx = canAct ? inp.mx : 0, mz = canAct ? inp.mz : 0;
     const moving = hypot(mx, mz) > 0.1;
-    const grounded = f.y <= 0;
-    const toOpp = atan2(opp.x - f.x, opp.z - f.z);
-    const dOpp = hypot(opp.x - f.x, opp.z - f.z);
+    const gy = this.groundY(f), grounded = f.y <= gy;
+    // sans adversaire à portée, on se tourne dans le sens de la marche
+    const toOpp = opp ? atan2(opp.x - f.x, opp.z - f.z) : (moving ? atan2(mx, mz) : f.yaw);
+    const dOpp = opp ? hypot(opp.x - f.x, opp.z - f.z) : (moving ? 1 : 0);
     const ffx = fx(f), ffz = fz(f);
     // verrouillage : on fait toujours face à l'adversaire, sauf pendant un coup déjà lancé
-    const track = (st === 'idle' || st === 'walk' || st === 'block' || st === 'air' || st === 'parry' || (st === 'attack' && f.stateT < ATK.track));
+    const track = (st === 'idle' || st === 'walk' || st === 'block' || st === 'air' || st === 'parry' || (st === 'attack' && f.stateT < ATK.track) || (st === 'shoot' && f.stateT < shotOf(f).rel));
     if (track && dOpp > 0.05) f.yaw = lerpAng(f.yaw, toOpp, Math.min(1, dt * 20));
     let visYaw = f.yaw;
 
@@ -260,7 +420,10 @@ export class Sim {
         if (!canAct) { f.vx = f.vz = 0; if (st !== 'idle') this.toIdle(f); break; }
         if (this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
         if (this.take(i, 'brk') && this.spend(f, STA.brk)) { this.startBreak(f); break; }
-        if (this.take(i, 'atk') && this.spend(f, STA.atk)) { this.startAttack(f); break; }
+        // archer : tir, ou coup d'arc si l'adversaire est collé
+        // grimoire : invocation (si on peut encore invoquer), sinon coup de livre
+        if (wpnOf(f).summon && this.canSummon(f) && this.inp[i].atk > 0 && f.sta >= STA.summon) { this.take(i, 'atk'); this.spend(f, STA.summon); this.startShot(f); break; }
+        if (this.take(i, 'atk') && this.spend(f, STA.atk)) { if (f.arch && !(opp && dOpp < SHOT.melee)) this.startShot(f); else this.startAttack(f); break; }
         if (this.take(i, 'par') && this.spend(f, STA.par)) { this.startParry(f); break; }
         if (this.take(i, 'jump') && this.spend(f, STA.jump)) { this.doJump(f, mx, mz); break; }
         if (inp.blk) {
@@ -268,7 +431,7 @@ export class Sim {
           f.vx = mx * 1.1; f.vz = mz * 1.1;
           break;
         }
-        const spd = f.sta < STA.tired ? 2.5 : 3.4;
+        const spd = (f.sta < STA.tired ? 2.5 : 3.4) * wpnOf(f).run;   // l'archer est plus léger, le pavois plus lourd
         f.vx = mx * spd; f.vz = mz * spd;
         if (moving) {
           if (st !== 'walk') this.setState(f, 'walk');
@@ -279,7 +442,7 @@ export class Sim {
           const k = back ? -0.35 : 0.35;
           visYaw = atan2(ffx + mx * k, ffz + mz * k);
           f.dustT -= dt;
-          if (f.dustT < 0) { f.dustT = 0.22; this.emit('emit', f.x, 0.05, f.z, 1, { color: 0xc8a070, speed: 0.6, up: 0.6, size: 0.07, life: 0.45, grav: 2 }); }
+          if (f.dustT < 0) { f.dustT = 0.22; this.emit('emit', f.x, f.y + 0.05, f.z, 1, { color: 0xc8a070, speed: 0.6, up: 0.6, size: 0.07, life: 0.45, grav: 2 }); }
         } else if (st !== 'idle') this.toIdle(f);
         break;
       }
@@ -287,9 +450,19 @@ export class Sim {
         const t = f.stateT;
         if (t > 0.06 && t < 0.2) { f.vx = ffx * 2.6; f.vz = ffz * 2.6; }
         else { const k = exp(-dt * 12); f.vx *= k; f.vz *= k; }
-        if (canAct && t > ATK.chain && f.combo < 3 && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
+        if (canAct && t > ATK.chain && f.combo < wpnOf(f).combo && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
         if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
         if (t >= ATK.dur) { f.combo = 0; this.toIdle(f); }
+        break;
+      }
+      case 'shoot': {
+        const t = f.stateT, k = exp(-dt * 12);
+        f.vx *= k; f.vz *= k;
+        const S = shotOf(f);
+        if (!f.hitDone && t >= S.rel) { f.hitDone = true; if (wpnOf(f).summon) this.summon(f); else this.fire(f, opp); }
+        if (canAct && t > S.chain && !wpnOf(f).summon && this.take(i, 'atk') && this.spend(f, STA.atk)) { this.startShot(f); break; }
+        if (canAct && t > S.rel && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (t >= S.dur) this.toIdle(f);
         break;
       }
       case 'brk': {
@@ -316,7 +489,7 @@ export class Sim {
         const t = f.stateT, sp = ROLL.speed * (1 - 0.75 * t / ROLL.dur);
         f.vx = f.rdx * sp; f.vz = f.rdz * sp;
         f.dustT -= dt;
-        if (f.dustT < 0) { f.dustT = 0.06; this.emit('emit', f.x, 0.05, f.z, 1, { color: 0xc8a070, speed: 0.5, up: 0.5, size: 0.08, life: 0.4, grav: 2 }); }
+        if (f.dustT < 0) { f.dustT = 0.06; this.emit('emit', f.x, f.y + 0.05, f.z, 1, { color: 0xc8a070, speed: 0.5, up: 0.5, size: 0.08, life: 0.4, grav: 2 }); }
         if (t >= ROLL.dur) this.toIdle(f);
         break;
       }
@@ -330,7 +503,13 @@ export class Sim {
           const k = Math.min(1, dt * 3);
           f.vx += (mx * 3.3 - f.vx) * k;
           f.vz += (mz * 3.3 - f.vz) * k;
-          if (!f.airAtk && this.take(i, 'atk') && this.spend(f, STA.atk)) {
+          if (!f.airAtk && f.arch && this.take(i, 'atk') && this.spend(f, STA.atk)) {
+            // tir en plein saut (airAtkT hors de la fenêtre de coup : pas de coup au corps à corps)
+            f.airAtk = true; f.airAtkT = 9;
+            if (opp) f.yaw = toOpp;
+            this.play(f, wpnOf(f).fire ? 'holding-right-shoot' : 'holding-both-shoot', { loop: false, restart: true, ts: 1.6, fade: 0.04 });
+            this.fire(f, opp);
+          } else if (!f.airAtk && this.take(i, 'atk') && this.spend(f, STA.atk)) {
             f.airAtk = true; f.airAtkT = 0; f.hitDone = false;
             this.play(f, 'attack-melee-right', { loop: false, restart: true, fade: 0.04 });
             this.emit('sfx', 'swing');
@@ -346,19 +525,19 @@ export class Sim {
     }
     f.visTarget = visYaw;
 
-    if (f.state === 'air' || f.y > 0) {
+    if (f.state === 'air' || f.y > gy) {
       f.vy -= 24 * dt;
       f.y += f.vy * dt;
-      if (f.y <= 0) {
-        f.y = 0; f.vy = 0;
-        this.emit('emit', f.x, 0.05, f.z, 8, { color: [0xc8a070, 0xa88050], speed: 1.8, up: 0.7, size: 0.08, life: 0.5, grav: 3 });
+      if (f.y <= gy) {
+        f.y = gy; f.vy = 0;
+        this.emit('emit', f.x, gy + 0.05, f.z, 8, { color: [0xc8a070, 0xa88050], speed: 1.8, up: 0.7, size: 0.08, life: 0.5, grav: 3 });
         if (f.state === 'air') { f.airAtk = false; this.emit('sfx', 'land'); this.toIdle(f); }
       }
     }
     f.x += f.vx * dt;
     f.z += f.vz * dt;
-    const r = hypot(f.x, f.z);
-    if (r > FIGHT_R) { f.x *= FIGHT_R / r; f.z *= FIGHT_R / r; }
+    this.bound(f);
+    this.settle(f);
 
     f.guardT += dt;
     if (f.state !== 'block' && f.guardT > 0.9) f.guard = Math.min(100, f.guard + 24 * dt);
@@ -380,7 +559,7 @@ export class Sim {
     const afx = fx(att), afz = fz(att);
     const dx = def.x - att.x, dz = def.z - att.z, dy = def.y - att.y;
     const along = dx * afx + dz * afz, lateral = Math.abs(dx * afz - dz * afx);
-    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : 1.45)) return;
+    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45)) return;
     if (kind === 'air' ? (dy > 0.6 || dy < -1.7) : Math.abs(dy) > 0.9) return;
     const reach = Math.min(Math.max(along, 0.3), 0.75);
     const cx = att.x + afx * reach, cy = Math.max(att.y, def.y) + 0.85, cz = att.z + afz * reach;
@@ -393,14 +572,14 @@ export class Sim {
     const facingOk = fx(def) * afx + fz(def) * afz < -0.2;
 
     if (kind === 'brk') {
-      if (def.y > 0.35) { this.emit('pop', 'ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); this.emit('sfx', 'dodge'); return; }
+      if (def.y - this.groundY(def) > 0.35) { this.emit('pop', 'ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); this.emit('sfx', 'dodge'); return; }
       if (def.state === 'block' || def.state === 'parry') { this.guardBreak(att, def, cx, cy, cz, 6); return; }
       this.damage(att, def, 14, 5.5, 0.45, cx, cy, cz);
       return;
     }
     if (def.state === 'parry' && def.stateT <= PAR.win && facingOk) { this.parried(att, def, cx, cy, cz); return; }
     if (def.state === 'block' && facingOk) { this.blocked(att, def, kind === 'air' ? 34 : 22, cx, cy, cz); return; }
-    this.damage(att, def, kind === 'air' ? 11 : 9, 3.2, 0.3, cx, cy, cz);
+    this.damage(att, def, kind === 'air' && !att.arch ? 11 : wpnOf(att).dmg, 3.2, 0.3, cx, cy, cz);
   }
 
   push(f, dirF, speed) { f.vx = fx(dirF) * speed; f.vz = fz(dirF) * speed; }
@@ -422,7 +601,7 @@ export class Sim {
       this.die(def);
       this.push(def, att, 5);
       g.hitstop = 0.22;
-      this.endRound(att.idx, 'K.O. !');
+      this.onKO(att, def);
       return;
     }
     g.hitstop = 0.07;
@@ -432,6 +611,7 @@ export class Sim {
 
   blocked(att, def, cost, cx, cy, cz) {
     const g = this.g;
+    cost *= wpnOf(def).guard * (wpnOf(att).crush ?? 1);     // on pare moins bien avec un arc qu'avec un bouclier, mieux avec un pavois
     def.guard -= cost; def.guardT = 0;
     this.push(def, att, 2.4); this.push(att, att, -1.4);
     this.emit('fx', def.idx, 'blocked');
@@ -456,7 +636,7 @@ export class Sim {
     g.hitstop = 0.13;
     this.emit('shake', 0.25);
     this.emit('cheer', 0.8);
-    if (def.hp <= 0) { this.die(def); this.endRound(att.idx, 'K.O. !'); return; }
+    if (def.hp <= 0) { this.die(def); this.onKO(att, def); return; }
     this.stun(def, 1.15);
   }
 
@@ -490,7 +670,9 @@ export function hashState(s) {
     F64[0] = typeof v === 'boolean' ? (v ? 1 : 0) : v;
     h = Math.imul(h ^ U32[0], 16777619); h = Math.imul(h ^ U32[1], 16777619);
   };
-  for (const o of [s.f[0], s.f[1], s.g, s.inp[0], s.inp[1]]) for (const k in o) mix(o[k]);
+  for (const o of [...s.f, s.g, ...s.inp]) for (const k in o) mix(o[k]);
   mix(s.rng);
+  if (s.ai) for (const a of s.ai) if (a) for (const k in a) mix(a[k]);   // état des IA (donjon)
+  if (s.pr) for (const a of s.pr) for (const k in a) mix(a[k]);            // flèches en vol
   return h >>> 0;
 }

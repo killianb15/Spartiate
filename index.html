@@ -121,6 +121,11 @@
     font-family: Cinzel, serif; font-weight: 900; font-size: clamp(42px, 9vw, 110px); letter-spacing: .08em; color: #fff3d6;
     -webkit-text-stroke: 2px #4a2c0c; text-shadow: 0 6px 0 #4a2c0c, 0 0 40px rgba(255,180,60,.6); opacity: 0; }
   #announce.show { animation: ann 1.2s ease-out forwards; }
+  #biome { position: fixed; left: 0; right: 0; top: 27%; text-align: center; z-index: 8; pointer-events: none; opacity: 0;
+    font-family: Cinzel, serif; font-weight: 800; font-size: clamp(20px, 3.6vw, 40px); letter-spacing: .16em; color: #f1c66d;
+    text-shadow: 0 3px 0 #2a1806, 0 0 24px rgba(0,0,0,.8); }
+  #biome.show { animation: biome 3.2s ease-out forwards; }
+  @keyframes biome { 0% { opacity: 0; letter-spacing: .5em; } 18% { opacity: 1; letter-spacing: .16em; } 75% { opacity: 1; } 100% { opacity: 0; } }
   #announce.ko { color: #ff6a50; text-shadow: 0 6px 0 #3a0c06, 0 0 50px rgba(255,60,30,.7); }
   @keyframes ann { 0% { opacity: 0; transform: scale(2.2); } 12% { opacity: 1; transform: scale(.95); } 20% { transform: scale(1); }
     80% { opacity: 1; } 100% { opacity: 0; transform: scale(1.05); } }
@@ -150,6 +155,38 @@
   .overlay .btns button { padding: 12px 26px; border-radius: 10px; border: 2px solid var(--line); background: rgba(255,255,255,.06);
     font-family: Cinzel, serif; font-weight: 800; font-size: 20px; letter-spacing: .06em; }
   .overlay .btns button.main { border-color: #f1c66d; background: linear-gradient(180deg, #e3b04f, #9b6418); color: #1b0f05; }
+
+  /* ---------- Donjon ---------- */
+  #hud.dng .pips, #hud.dng.solo .p2 { visibility: hidden; }
+  #hud.dng #timer { font-size: 32px; letter-spacing: .06em; }
+  .boons button { display: flex; flex-direction: column; gap: 6px; width: 220px; text-align: left; padding: 14px 16px; }
+  .boons button:disabled { opacity: .45; cursor: default; }
+  #rewardTxt { font-size: 20px; }
+  .boons button:hover { border-color: #f1c66d; background: rgba(217,164,65,.16); }
+  .boons button b { font-weight: 800; color: var(--bronze); }
+  .boons button span { font-family: 'Barlow Condensed', sans-serif; font-weight: 500; font-size: 18px; letter-spacing: 0; color: var(--ink); }
+
+  /* ---------- Marchand d'armes ---------- */
+  #talk { position: fixed; z-index: 6; pointer-events: none; transform: translate(-50%, calc(-100% - 14px)); max-width: min(360px, calc(100vw - 32px));
+    background: #f5ead4; color: #2a1a0c; border: 3px solid #4a2c0c; border-radius: 16px; padding: 8px 14px 9px;
+    font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 20px; line-height: 1.15; text-align: center;
+    box-shadow: 0 4px 0 #4a2c0c, 0 8px 24px rgba(0,0,0,.45); }
+  #talk::after { content: ''; position: absolute; left: 50%; bottom: -13px; transform: translateX(-50%); border: 10px solid transparent;
+    border-top: 12px solid #4a2c0c; border-bottom: 0; }
+  #talk b { display: block; font-family: Cinzel, serif; font-size: 12px; letter-spacing: .14em; color: #8a5a1c; }
+  #help.shopping { visibility: hidden; }
+  #shop { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 6; width: min(880px, calc(100vw - 32px));
+    background: rgba(14,9,5,.86); border: 2px solid #d9a441; border-radius: 14px; padding: 12px 16px 10px; text-align: center; }
+  #shopName { font-family: Cinzel, serif; font-weight: 900; font-size: 24px; color: var(--bronze); letter-spacing: .04em; }
+  #shopMine { font-size: 15px; color: #8fd8ff; margin-left: 8px; letter-spacing: .1em; }
+  #shopDesc { font-size: 18px; color: var(--ink); margin: 0 0 8px; }
+  #shopList { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+  #shopList button { padding: 3px 9px; border-radius: 8px; border: 2px solid var(--line); background: rgba(255,255,255,.05);
+    font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 16px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+  #shopList button:hover { border-color: #f1c66d; }
+  #shopList button.on { border-color: #f1c66d; background: rgba(217,164,65,.25); color: var(--ink); }
+  #shopList button.mine { box-shadow: inset 0 -3px 0 #8fd8ff; }
+  #shopKeys { font-size: 15px; color: var(--muted); margin-top: 6px; }
 
   /* ---------- Configuration des touches ---------- */
   #keysOv { z-index: 30; }
@@ -198,9 +235,15 @@
 
 <div id="menu" class="hidden">
   <h1>SPARTIATE</h1>
-  <div class="sub">Les arènes des petits gladiateurs</div>
+  <div class="sub" id="menuSub">Les arènes des petits gladiateurs</div>
 
-  <div class="sec"><label>Mode</label>
+  <div class="sec"><label>Jeu</label>
+    <div class="seg" data-key="game">
+      <button data-val="arena">Combat en arène</button>
+      <button data-val="dungeon">Donjon (rogue-like)</button>
+    </div>
+  </div>
+  <div class="sec" id="modeSec"><label>Mode</label>
     <div class="seg" data-key="mode">
       <button data-val="solo">1 joueur contre l'IA</button>
       <button data-val="duo">2 joueurs</button>
@@ -219,11 +262,15 @@
     <div class="netrow"><input id="codeIn" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="joinBtn">Rejoindre</button></div>
     <div id="netInfo">Crée une partie et donne le code à ton ami, ou entre le code qu'il t'a donné.</div>
   </div>
-  <div class="sec"><label id="p1Lbl">Joueur 1</label>
+  <div class="sec" id="p1Sec"><label id="p1Lbl">Joueur 1</label>
     <div class="seg" data-key="p1">
       <button data-val="soldier">Gladiateur</button>
       <button data-val="human">Mirmillon</button>
       <button data-val="orc">Orc</button>
+      <button data-val="archer">Archer</button>
+      <button data-val="knight">Chevalier</button>
+      <button data-val="zombie">Zombie</button>
+      <button data-val="robot">Automate</button>
     </div>
   </div>
   <div class="sec" id="p2Sec"><label id="p2Lbl">Adversaire</label>
@@ -231,6 +278,10 @@
       <button data-val="soldier">Gladiateur</button>
       <button data-val="human">Mirmillon</button>
       <button data-val="orc">Orc</button>
+      <button data-val="archer">Archer</button>
+      <button data-val="knight">Chevalier</button>
+      <button data-val="zombie">Zombie</button>
+      <button data-val="robot">Automate</button>
     </div>
   </div>
   <div class="sec" id="arenaSec"><label>Arène</label>
@@ -266,7 +317,15 @@
 </div>
 
 <div id="help" class="hidden"></div>
+<div id="talk" class="hidden"><b>Le vieux marchand</b><span id="talkTxt"></span></div>
+<div id="shop" class="hidden">
+  <div><span id="shopName"></span><span id="shopMine" class="hidden">✔ TON ARME</span></div>
+  <div id="shopDesc"></div>
+  <div id="shopList"></div>
+  <div id="shopKeys"></div>
+</div>
 <div id="announce"></div>
+<div id="biome"></div>
 <div id="pops"></div>
 <div id="flash"></div>
 <div id="fade"></div>
@@ -288,6 +347,12 @@
     <button class="main" id="againBtn">Revanche</button>
     <button id="menuBtn">Menu principal</button>
   </div>
+</div>
+
+<div id="reward" class="overlay hidden">
+  <h2>BÉNÉDICTION</h2>
+  <p id="rewardTxt">Choisis un présent</p>
+  <div class="btns boons"><button></button><button></button><button></button></div>
 </div>
 
 <div id="keysOv" class="overlay hidden">

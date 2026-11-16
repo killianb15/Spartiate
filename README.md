@@ -40,6 +40,97 @@ possibles par joueur ; `Suppr` vide une case, `Échap` annule. Les réglages son
 gardés dans le navigateur. En solo et en ligne, les touches des deux joueurs
 contrôlent ton personnage.
 
+## L'Archer
+
+Personnage jouable (arène et donjon), qu'on retrouve aussi comme ennemi dans le donjon à partir de la salle 2.
+**Attaquer** tire une flèche, ou donne un coup d'arc si l'adversaire est collé. On peut aussi tirer en sautant.
+- Une flèche se **bloque** (au prix de la garde), s'évite d'un **pas de côté**, d'un **saut** ou d'une **roulade**,
+  et une **parade** au bon moment la **renvoie** vers le tireur.
+- L'archer court un peu plus vite, mais encaisse moins bien en bloquant au corps à corps.
+
+Le modèle `assets/archer/archer.glb` (une archère elfe) est généré avec Blender par
+`tools/blender/archer.py` (voir « Modèles générés avec Blender ») : il part d'un corps Kenney
+(`tools/blender/sources/character-female-f.glb`, CC0) pour avoir exactement leur style et leurs
+animations, recoloré (tunique verte, cheveux blancs d'elfe), avec ses propres oreilles étirées en oreilles
+d'elfe et un carquois. L'arc n'est pas dans le modèle : c'est `assets/weapons/weapon-bow.glb`, que le jeu met en
+main à qui le choisit (l'archère l'a par défaut).
+`arrow.glb` est la flèche. L'ancien générateur `tools/archer-asset.html` n'est plus utilisé.
+
+## Mode Donjon (rogue-like, expérimental)
+
+Dans le menu, choisis **Jeu → Donjon (rogue-like)** (ou ouvre `http://localhost:8123/?dungeon`).
+Vue isométrique, mêmes coups qu'en arène (attaque, blocage, parade, brise-garde, roulade).
+Élimine les ennemis de la salle : la porte du fond s'ouvre et un coffre apparaît. Il propose
+trois bénédictions (soin, force, vitalité…). Franchis ensuite la porte pour passer à la salle
+suivante. Les premières salles sont bien éclairées ; plus loin, il fait plus sombre et on
+trouve des estrades (on y monte par l'escalier ou en sautant) et des pièges à pics. Un chef
+orc garde chaque 5ᵉ salle.
+
+Le donjon se joue **seul**, **à deux sur le même clavier** ou **en ligne en coopération**
+(mêmes étapes que pour le combat en ligne). À deux, il y a plus d'ennemis. Chacun choisit sa
+bénédiction (J1 : touches `1 2 3`, J2 : `8 9 0`). Un héros tombé se relève à la salle
+suivante, et la partie s'arrête quand les deux sont tombés. La logique est dans `dungeon.js`.
+
+### Salle d'armes (choix du héros et de l'arme)
+
+Une partie de donjon commence dans la **salle d'armes** : marche sur la dalle dorée devant une
+statue pour prendre ce héros, sur la dalle bleue devant un présentoir pour prendre l'arme, puis
+passe la porte. Le choix est retenu pour la partie suivante. À deux, chacun choisit le sien.
+
+| Héros      | Talent                              | | Arme              | Effet                                         |
+|------------|-------------------------------------|-|-------------------|-----------------------------------------------|
+| Gladiateur | équilibré                           | | Glaive et bouclier| équilibré, enchaînement de 3 coups            |
+| Mirmillon  | +10 % de dégâts                     | | Lance             | portée longue, 2 coups par enchaînement       |
+| Orc        | 120 PV                              | | Épée et pavois    | bloque bien mieux, court moins vite           |
+| Archère    | endurance +25 %                     | | Hache et bouclier | gros dégâts, 2 coups par enchaînement         |
+| Chevalier  | −15 % de dégâts subis               | | Marteau de guerre | 1 coup écrasant qui ruine la garde, sans bouclier |
+| Zombie     | chaque coup porté soigne 1 PV       | | Arc               | tire des flèches, court vite, bloque mal      |
+| Automate   | 110 PV, −8 % de dégâts subis        | | Sceptre de feu    | boules de feu qui explosent en zone           |
+|            |                                     | | Grimoire          | invoque des chiens qui se battent pour toi    |
+
+**Sceptre de feu** : l'attaque lance une boule de feu, plus lente qu'une flèche. Elle explose au
+contact d'un ennemi, d'un mur, d'une colonne ou en fin de course, et blesse **tous** les ennemis
+dans un rayon de 1,7 (en les soufflant vers l'extérieur). On l'évite d'une roulade ; bloquer face à
+l'explosion la fait encaisser par la garde ; une parade au bon moment la renvoie au lanceur.
+
+**Grimoire** (tenu dans la main gauche) : l'attaque invoque un **chien** devant toi (30 d'endurance),
+2 chiens au plus par joueur ; avec deux chiens, l'attaque devient un coup de livre. Les chiens sont
+pilotés par l'IA, dans la simulation : ils attaquent les ennemis à ta place, les ennemis s'en prennent
+aussi à eux, et ils disparaissent à la salle suivante (on peut les essayer dans la salle d'armes).
+Un chien tombé ne compte pas comme un héros à terre.
+
+Le chevalier, le zombie et l'automate viennent du pack Kenney *Mini Characters* (CC0,
+`assets/characters/`). Des zombies apparaissent aussi comme ennemis à partir de la salle 4.
+Le choix passe par la position du héros dans la simulation : il fonctionne tel quel en ligne.
+
+Tests : `node --test tests/`. Ajouter `&debug` à l'adresse (`?dungeon&debug`) expose la simulation
+dans la console du navigateur (`spartiate.sim`), pratique pour tester une salle à la main.
+
+## Modèles générés avec Blender
+
+La hache, le marteau, le sceptre, le grimoire (`assets/weapons/`), le chien invoqué
+(`assets/summons/dog.glb`) et l'arc sont des modèles originaux générés **par script**
+avec Blender, sans interface. Ils utilisent la palette Kenney (`colormap.png`) : mêmes teintes
+que le reste du jeu.
+
+```
+"C:\Program Files\Blender Foundation\Blender 5.3\blender.exe" -b --factory-startup -P tools/blender/weapons.py
+```
+
+- `tools/blender/kenney.py` : la boîte à outils (boîtes arrondies, cylindres, prismes, couleurs
+  de la palette par leur nom, export GLB, aperçu PNG).
+- `tools/blender/weapons.py` : les armes ; modifie une forme ou une couleur et relance la commande.
+- `tools/blender/archer.py` : l'archère, sa flèche et l'arc (même commande, avec `archer.py`).
+- `tools/blender/dog.py` : le chien invoqué. Il est fait de pièces articulées (corps, tête, queue,
+  pattes) que le jeu anime lui-même (`DogView` dans `game.js`), le squelette Kenney étant humanoïde.
+- `tools/blender/check_weapons.py` : vérifie la tenue des armes pendant les coups, comme dans le jeu
+  (planche `previews/coups.png` : une ligne par arme, une colonne par instant du coup ; `COMBO=2`
+  pour le balayage, `VIEW`/`HEIGHT`/`DIST` pour la caméra). Pendant un coup, le jeu oriente l'arme le
+  long d'un arc (`swingPose` dans `game.js`) : les animations Kenney font tourner le bras sur lui-même
+  et une arme simplement fixée à la main pointerait vers l'arrière au moment de l'impact.
+- `tools/blender/previews/` : aperçus rendus à chaque génération, à côté de l'épée Kenney pour l'échelle.
+- Convention des armes : la main tient l'arme à l'origine, l'arme monte le long de +Y.
+
 ## Jouer en ligne (réseau local)
 
 1. Celui qui crée la partie lance le jeu ; le terminal affiche une adresse du type
