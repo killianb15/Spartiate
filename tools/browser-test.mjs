@@ -8,7 +8,7 @@
 //                        --remote-debugging-port=9333 --user-data-dir=<dossier temporaire> --window-size=1280,720
 //                        --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run about:blank
 //  3. node tools/browser-test.mjs <tome|staff|shop|biomes> <dossier des captures>   (shop : le marchand d'armes ;
-//     biomes : une salle de chaque biome, boss compris)
+//     biomes : une salle de chaque biome, boss compris ; boss : le colosse et l'outil de débogage F2)
 //  Sortie : CHARGE true/false, lignes ETAT (combattants : [type, camp, état, PV]), ERREURS n + détail.
 //  Le cache HTTP est désactivé (sinon un ancien game.js peut être servi).
 // =====================================================================
@@ -99,6 +99,41 @@ if (scenario === 'biomes') {
     await shot('salle-' + n);
     console.log('SALLE', n, 'titre:', titre, 'obstacles:', await evalJs(`JSON.stringify(spartiate.sim.room.obs.map((o) => o.kind))`));
   }
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
+if (scenario === 'boss') {
+  // outil de débogage (F2) : salle du colosse, invincible, attaques spéciales, rage, téléportation au clic
+  const clk = (sel) => evalJs(`(() => { const b = document.querySelector(${JSON.stringify(sel)}); if (!b) return false; b.click(); return true; })()`);
+  const boss = () => evalJs(`(() => { const s = spartiate.sim, e = s.f.find((o) => o.foe === 'colosse'); return JSON.stringify({ salle: s.g.room, phase: s.g.phase, boss: e && [e.state, e.sp, Math.round(e.hp), e.maxHp, e.rage], heros: [s.f[0].state, Math.round(s.f[0].hp), +s.f[0].x.toFixed(1), +s.f[0].z.toFixed(1)], ennemis: s.foesLeft, vues: spartiate.views.length + '/' + s.f.length, barre: document.getElementById('bossBar').className, nom: document.getElementById('bbName').textContent, info: document.getElementById('dbgInfo').textContent }); })()`);
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 });
+  await sleep(300);
+  console.log('PANNEAU', await evalJs(`!document.getElementById('dbg').classList.contains('hidden')`));
+  await clk('[data-room="10"]'); await clk('#dbgGod');
+  await sleep(2200); await shot('colosse-arrivee'); console.log('ETAT', await boss());
+  await sleep(1200);
+  await clk('[data-boss="slam"]'); await sleep(350); await shot('saut-zone'); console.log('ETAT', await boss());
+  await sleep(700); await shot('saut-impact'); console.log('ETAT', await boss());
+  await sleep(1500);
+  await evalJs(`(() => { const s = spartiate.sim, e = s.f.find((o) => o.foe === 'colosse'); s.debugTp(0, e.x, e.z + 5.5); return true; })()`);
+  await sleep(300);
+  await clk('[data-boss="charge"]'); await sleep(450); await shot('charge-couloir'); console.log('ETAT', await boss());
+  await sleep(900); await shot('charge-fin'); console.log('ETAT', await boss());
+  await sleep(1500);
+  await clk('[data-boss="rage"]'); await sleep(600); await shot('rage'); console.log('ETAT', await boss());
+  await sleep(1600); await shot('rage-renforts'); console.log('ETAT', await boss());
+  // téléportation au clic
+  await clk('#dbgTp');
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 400, y: 450, button: 'left', clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 400, y: 450, button: 'left', clickCount: 1 });
+  await sleep(500); console.log('ETAT tp', await boss());
+  await clk('[data-foe="boss"]'); await sleep(800); console.log('ETAT apparition', await boss());
+  await clk('#dbgKill'); await sleep(1500); await shot('vaincu'); console.log('ETAT', await boss());
+  await clk('[data-room="5"]'); await sleep(2500); await shot('chef-orc'); console.log('ETAT', await boss());
+  await clk('[data-room="0"]'); await sleep(1500); await shot('salle-armes-retour'); console.log('ETAT', await boss());
   console.log('ERREURS', errors.length);
   for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
   ws.close();

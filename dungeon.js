@@ -43,7 +43,27 @@ export const FOES = {
   zombie: { kind: 'zombie', name: 'Zombie', hp: 44, pow: 0.45, lv: 0, size: 1 },
   // chien invoqué par le grimoire : il se bat dans le camp des héros
   dog: { kind: 'dog', name: 'Chien', hp: 24, pow: 0.6, lv: 1, size: 0.8 },
-  boss: { kind: 'orc', name: 'Chef orc', hp: 140, pow: 0.85, lv: 2, size: 1.4 },
+  // boss (boss : garde une salle sur 5, voir bossOf) ; moves : attaques spéciales (voir BOSS), adds : renforts
+  // appelés quand il enrage ; wpn : arme (sinon celle du personnage)
+  boss: { kind: 'orc', name: 'Chef orc', hp: 140, pow: 0.85, lv: 2, size: 1.4, boss: true },
+  colosse: { kind: 'robot', name: "Colosse d'airain", hp: 190, pow: 0.75, lv: 2, size: 1.9, boss: true, wpn: 'hammer', moves: true, adds: 'zombie' },
+};
+// boss de la salle n (une salle sur BOSS_EVERY) : le chef orc, puis le colosse, en alternance
+export const bossOf = (n) => (Math.floor(n / BOSS_EVERY) % 2 ? 'boss' : 'colosse');
+
+// Attaques spéciales du colosse (state 'special', f.sp = 'slam' | 'charge' | 'roar') :
+//  - slam : il s'accroupit (wind), bondit et retombe sur la position visée (spX, spZ) : onde de choc de
+//    rayon R (Rrage une fois enragé) ; on l'évite en sautant, en roulant ou en sortant de la zone ; bloquer
+//    coûte de la garde ; il reste ensuite planté un instant (rest) ;
+//  - charge : il gratte le sol (wind) puis fonce tout droit (dur) ; s'il heurte un mur ou un obstacle, il
+//    reste sonné (stun) : c'est le moment de frapper ;
+//  - roar : à la moitié de ses PV (rage), il rugit, repousse tout le monde et appelle des renforts.
+// Pendant une attaque spéciale, il encaisse les coups sans broncher (pas d'interruption).
+export const BOSS = {
+  cd: 4.2, cdRage: 2.8, first: 2.5, rage: 0.5, speedRage: 1.25,
+  slam: { wind: 0.6, windRage: 0.42, vy: 10, R: 2.7, Rrage: 3.3, dmg: 22, knock: 6.5, guard: 45, rest: 0.75 },
+  charge: { wind: 0.75, windRage: 0.5, dur: 0.9, speed: 10.5, dmg: 18, knock: 7, guard: 40, hitR: 0.6, stun: 1.7 },
+  roar: { dur: 1.4, at: 0.45, R: 3.6, knock: 7.5 },
 };
 
 // Héros jouables, chacun avec un petit trait (appliqué par equip)
@@ -258,7 +278,7 @@ export class DungeonSim extends Sim {
   newRoom() {
     const g = this.g, r = this.rng, np = g.np;
     g.room++;
-    const n = g.room, boss = n % BOSS_EVERY === 0;
+    const n = g.room, boss = n % BOSS_EVERY === 0, bossId = boss ? bossOf(n) : '';
     const exit = r.next() < 0.5 ? 'z' : 'x';
     const used = new Set();                       // dalles occupées « i,j »
     const key = (i, j) => i + ',' + j;
@@ -313,7 +333,7 @@ export class DungeonSim extends Sim {
       const nt = 2 + ((r.next() * 3) | 0);
       for (let k = 0; k < nt; k++) { const t = freeTile(); if (t) traps.push({ x: t[0], z: t[1] }); }
     }
-    this.room = { exit, obs, surf, traps, boss };
+    this.room = { exit, obs, surf, traps, boss, bossId };
 
     // les héros entrent par le mur opposé à la sortie (les héros tombés se relèvent)
     const ent = ROOM_R - 0.7;
@@ -328,7 +348,8 @@ export class DungeonSim extends Sim {
 
     // ennemis (plus nombreux à deux)
     const list = [];
-    if (boss) { list.push('boss'); for (let k = 0; k < Math.min(4, n / BOSS_EVERY + np - 1); k++) list.push('grunt'); }
+    // le chef orc vient avec des orcs ; le colosse arrive seul (ses renforts viennent quand il enrage)
+    if (boss) { list.push(bossId); if (bossId === 'boss') for (let k = 0; k < Math.min(4, n / BOSS_EVERY + np - 1); k++) list.push('grunt'); }
     else {
       let count = Math.min(5, 1 + Math.floor(n / 2));
       if (np > 1) count = Math.min(7, Math.ceil(count * 1.5));
@@ -341,7 +362,6 @@ export class DungeonSim extends Sim {
         list.push(id === 'grunt' && n >= 4 && k % 2 ? 'zombie' : id);
       }
     }
-    const hpK = (1 + 0.07 * (n - 1)) * (np > 1 ? 1.15 : 1), powK = 1 + 0.04 * (n - 1);
     const foes = [];
     const [px, pz] = exit === 'z' ? [0, ent] : [ent, 0];
     for (const id of list) {
@@ -351,18 +371,12 @@ export class DungeonSim extends Sim {
         // dans la moitié de la salle côté sortie, loin des héros
         const a = r.range(-ROOM_T + 0.5, ROOM_T - 0.5), b = r.range(-ROOM_T + 0.5, 0.5);
         [x, z] = exit === 'z' ? [a, b] : [b, a];
-        if (id === 'boss') [x, z] = exit === 'z' ? [0, -3] : [-3, 0];
+        if (T.boss) [x, z] = exit === 'z' ? [0, -3] : [-3, 0];
         const free = obs.every((o) => hypot(o.x - x, o.z - z) > o.r + 0.8) && foes.every((e) => hypot(e.x - x, e.z - z) > 1.4) &&
           surf.every((s) => !s.ramp || !inRect(s, x, z, 0.3));
         if (free && hypot(px - x, pz - z) > 4) break;
       }
-      const e = newFighter(np + foes.length);
-      const hp = Math.round(T.hp * hpK);
-      const ey = atan2(px - x, pz - z);
-      Object.assign(e, { x, z, yaw: ey, visTarget: ey, kind: T.kind, wpn: defaultWeapon(T.kind), arch: T.kind === 'archer', foe: id, size: T.size, boss: id === 'boss',
-        hp, maxHp: hp, pow: T.pow * powK, armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
-      e.y = this.groundY(e);
-      foes.push(e);
+      foes.push(this.newFoe(id, np + foes.length, x, z, atan2(px - x, pz - z)));
     }
     this.f = [...this.heroes, ...foes];
     this.inp = this.f.map(() => newInput());
@@ -374,8 +388,32 @@ export class DungeonSim extends Sim {
     g.exitOpen = false; g.chest = 0; g.pick0 = g.pick1 = -1;
     g.slow = 1; g.slowT = 0; g.hitstop = 0;
     this.emit('room', n);
-    this.emit('announce', boss ? 'CHEF ORC !' : `SALLE ${n}`, boss ? 'ko' : '', 1.3);
+    this.emit('announce', boss ? FOES[bossId].name.toUpperCase() + ' !' : `SALLE ${n}`, boss ? 'ko' : '', 1.3);
     this.emit('sfx', 'gong');
+  }
+  // ennemi n° idx de type id (PV et dégâts selon la profondeur et le nombre de héros)
+  newFoe(id, idx, x, z, yaw) {
+    const T = FOES[id], n = Math.max(1, this.g.room);
+    const hp = Math.round(T.hp * (1 + 0.07 * (n - 1)) * (this.g.np > 1 ? 1.15 : 1));
+    const e = Object.assign(newFighter(idx), { x, z, yaw, visTarget: yaw, kind: T.kind, wpn: T.wpn ?? defaultWeapon(T.kind), foe: id, size: T.size,
+      boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
+    e.arch = !!wpnOf(e).bow;
+    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first, rage: 0 });
+    e.y = this.groundY(e);
+    return e;
+  }
+  // ajoute un ennemi en cours de salle (renforts, outil de débogage) ; il se bat tout de suite
+  addFoe(id, x, z) {
+    const idx = this.f.length, lim = ROOM_R - 0.7;
+    x = clamp(x, -lim, lim); z = clamp(z, -lim, lim);
+    const o = this.f[0];
+    const e = this.newFoe(id, idx, x, z, atan2(o.x - x, o.z - z));
+    this.f.push(e);
+    this.inp.push(newInput());
+    this.ais.push(new AI(this, idx, FOES[id].lv, (this.rng.next() * 4294967296) >>> 0));
+    this.emit('emit', x, e.y + 0.3, z, 22, { color: [0x8a8090, 0x5a5260, 0x6aff6a], speed: 2.2, up: 3, size: 0.09, life: 0.7, grav: 6 });
+    this.emit('ring', x, e.y + 0.05, z, 0x7aff7a, 1.6, 0.5, true);
+    return e;
   }
 
   // ---------------- points d'extension de Sim ----------------
@@ -482,14 +520,199 @@ export class DungeonSim extends Sim {
   }
 
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
+    if (def.god) { this.emit('pop', 'INVINCIBLE', def.x, def.y + 1.8, def.z, 'miss'); return; }
     dmg = Math.max(1, Math.round(dmg * att.pow * (1 - def.armor)));
     if (att.leech) heal(att, att.leech);
     if (def.boss) knock *= 0.4;               // le chef ne recule presque pas
-    super.damage(att, def, dmg, knock, dur, cx, cy, cz);
+    if (def.sp) this.armorHit(def, dmg, cx, cy, cz);
+    else super.damage(att, def, dmg, knock, dur, cx, cy, cz);
+    // le colosse enrage à la moitié de ses PV
+    if (def.sp !== undefined && !def.rage && def.state !== 'dead' && def.hp <= def.maxHp * BOSS.rage) this.startSpecial(def, 'roar');
+  }
+  // coup encaissé sans broncher (boss pendant une attaque spéciale)
+  armorHit(def, dmg, cx, cy, cz) {
+    def.hp = Math.max(0, def.hp - dmg);
+    this.emit('fx', def.idx, 'hit');
+    this.emit('emit', cx, cy, cz, 12, { color: [0xffffff, 0xffe27a, 0xff6a4a], speed: 4, up: 3, size: 0.09, life: 0.4, grav: 9 });
+    this.emit('pop', `-${dmg}`, def.x, def.y + 1.75 * def.size, def.z, 'dmg');
+    this.emit('sfx', 'clang');
+    this.g.hitstop = Math.max(this.g.hitstop, 0.04);
+    if (def.hp <= 0) { def.sp = ''; this.die(def); this.g.hitstop = 0.22; this.onKO(null, def); }
+  }
+
+  // ---------------- attaques spéciales du boss ----------------
+  // le boss e lance-t-il une attaque spéciale ? (à chaque image du combat, avant son IA)
+  bossThink(e, dt) {
+    if (e.sp || e.state === 'dead') return;
+    e.spCd -= dt;
+    if (e.spCd > 0 || (e.state !== 'idle' && e.state !== 'walk')) return;
+    const o = this.target(e.idx);
+    if (!o) return;
+    const d = hypot(o.x - e.x, o.z - e.z);
+    // loin : charge ; près : saut écrasant ; entre les deux : au hasard (rng de la simulation)
+    this.startSpecial(e, d > 4.2 ? 'charge' : d < 2.4 ? 'slam' : this.rng.next() < 0.5 ? 'charge' : 'slam');
+  }
+  startSpecial(e, kind) {
+    const o = this.target(e.idx), lim = ROOM_R - 1;
+    this.setState(e, 'special');
+    Object.assign(e, { sp: kind, spT: 0, spA: 0, spHit: 0, vx: 0, vz: 0, combo: 0, airAtk: false });
+    if (kind === 'slam') {
+      e.spX = clamp(o ? o.x : e.x, -lim, lim); e.spZ = clamp(o ? o.z : e.z, -lim, lim);
+      this.play(e, 'crouch', { fade: 0.08 });
+      this.emit('sfx', 'heavy');
+    } else if (kind === 'charge') {
+      e.spX = sin(e.yaw); e.spZ = cos(e.yaw);
+      this.play(e, 'emote-no', { ts: 1.8, fade: 0.08 });
+      this.emit('sfx', 'steam');
+    } else {
+      e.rage = 1;
+      this.play(e, 'emote-yes', { ts: 0.8, fade: 0.08, loop: false });
+      this.emit('sfx', 'roar');
+      this.emit('announce', `${FOES[e.foe].name.toUpperCase()} ENRAGE !`, 'ko', 1.4);
+    }
+  }
+  endSpecial(e) {
+    e.sp = ''; e.vx = e.vz = 0;
+    e.spCd = (e.rage ? BOSS.cdRage : BOSS.cd) * (0.8 + 0.4 * this.rng.next());
+    if (e.state === 'special') this.toIdle(e);
+  }
+  // une image d'attaque spéciale (avant le déplacement fait par updateFighter)
+  special(e, canAct) {
+    if (e.state !== 'special' || !canAct) { if (e.state === 'special') this.endSpecial(e); else e.sp = ''; return; }
+    const dt = this.dt, rage = !!e.rage;
+    e.spT += dt;
+    if (e.sp === 'slam') {
+      const S = BOSS.slam, wind = rage ? S.windRage : S.wind;
+      if (e.spA === 0) {
+        e.yaw = atan2(e.spX - e.x, e.spZ - e.z); e.visTarget = e.yaw;
+        if (e.spT >= wind) {
+          // bond calculé pour retomber sur le point visé
+          const T = 2 * S.vy / 24;
+          e.spA = 1; e.vy = S.vy; e.y += 0.01;
+          e.vx = (e.spX - e.x) / T; e.vz = (e.spZ - e.z) / T;
+          this.play(e, 'jump', { loop: false, fade: 0.06 });
+          this.emit('sfx', 'jump');
+          this.emit('emit', e.x, e.y + 0.05, e.z, 14, { color: [0xc8a070, 0xa88050], speed: 2.4, up: 1, size: 0.1, life: 0.6, grav: 3 });
+        }
+      } else if (e.spA === 1) {
+        if (e.y <= this.groundY(e) + 0.001 && e.vy <= 0) { this.quake(e); e.spA = 2; e.spT = 0; e.vx = e.vz = 0; this.play(e, 'crouch', { fade: 0.05 }); }
+      } else if (e.spT >= S.rest) this.endSpecial(e);
+    } else if (e.sp === 'charge') {
+      const C = BOSS.charge;
+      if (e.spA === 0) {
+        // il vise jusqu'au dernier moment, puis la direction est figée
+        const o = this.target(e.idx), wind = rage ? C.windRage : C.wind;
+        if (o && e.spT < wind - 0.15) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.spX = sin(e.yaw); e.spZ = cos(e.yaw); }
+        e.visTarget = e.yaw;
+        if (e.spT >= wind) { e.spA = 1; e.spT = 0; this.play(e, 'sprint', { ts: 1.7, fade: 0.05 }); this.emit('sfx', 'heavy'); this.emit('shake', 0.15); }
+      } else {
+        const sp = C.speed * (rage ? BOSS.speedRage : 1) * (e.spT > C.dur - 0.2 ? Math.max(0.2, (C.dur - e.spT) / 0.2) : 1);
+        e.vx = e.spX * sp; e.vz = e.spZ * sp;
+        e.dustT -= dt;
+        if (e.dustT < 0) { e.dustT = 0.05; this.emit('emit', e.x, e.y + 0.05, e.z, 2, { color: [0xc8a070, 0xa88050], speed: 1, up: 1, size: 0.1, life: 0.5, grav: 3 }); }
+        this.chargeHits(e);
+        if (this.chargeWall(e)) {
+          // tête la première dans le mur : sonné
+          e.vx = e.vz = 0; e.sp = '';
+          this.stun(e, C.stun);
+          e.spCd = rage ? BOSS.cdRage : BOSS.cd;
+          this.emit('pop', 'SONNÉ !', e.x, e.y + 2.2 * e.size, e.z, 'brk');
+          this.emit('sfx', 'brk');
+          this.emit('shake', 0.4);
+          this.emit('emit', e.x + e.spX * 0.6, e.y + 1.2, e.z + e.spZ * 0.6, 26, { color: [0xc0c0c8, 0x8a8090, 0xffe27a], speed: 4, up: 3, size: 0.1, life: 0.7, grav: 8 });
+        } else if (e.spT >= C.dur) this.endSpecial(e);
+      }
+    } else if (e.sp === 'roar') {
+      const R = BOSS.roar;
+      if (e.spA === 0 && e.spT >= R.at) {
+        e.spA = 1;
+        this.emit('ring', e.x, e.y + 0.1, e.z, 0xff5a20, R.R * 1.2, 0.6, true);
+        this.emit('ring', e.x, e.y + 1.2, e.z, 0xffb04a, R.R, 0.4);
+        this.emit('shake', 0.35);
+        for (const d of this.f) {
+          if (d.state === 'dead' || d.team === e.team) continue;
+          const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
+          if (dist > R.R || dist < 0.01) continue;
+          d.vx = dx / dist * R.knock; d.vz = dz / dist * R.knock;
+          if (d.state !== 'air' && d.state !== 'roll') { this.setState(d, 'hit', 0.4); this.play(d, 'idle', { fade: 0.05 }); }
+        }
+        // renforts : un de plus à deux
+        const add = FOES[e.foe].adds;
+        if (add) for (let k = 0; k <= this.g.np; k++) {
+          const a = e.yaw + Math.PI * 2 * (k + 0.5) / (this.g.np + 1);
+          this.addFoe(add, e.x + sin(a) * 2.6, e.z + cos(a) * 2.6);
+        }
+      }
+      if (e.spT >= R.dur) this.endSpecial(e);
+    }
+  }
+  // retombée du saut : onde de choc autour du point d'impact
+  quake(e) {
+    const S = BOSS.slam, R = e.rage ? S.Rrage : S.R, g = this.g;
+    this.emit('ring', e.x, e.y + 0.06, e.z, 0xffb04a, R * 1.15, 0.5, true);
+    this.emit('ring', e.x, e.y + 0.1, e.z, 0xffffff, R * 0.6, 0.3, true);
+    this.emit('emit', e.x, e.y + 0.1, e.z, 40, { color: [0xc8a070, 0xa88050, 0x8a8090, 0xffe27a], speed: 5, up: 3, size: 0.12, life: 0.8, grav: 7 });
+    this.emit('sfx', 'quake');
+    this.emit('shake', 0.55);
+    g.hitstop = Math.max(g.hitstop, 0.06);
+    for (const d of this.f) {
+      if (d.state === 'dead' || d.team === e.team) continue;
+      const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
+      if (dist > R + 0.3 * ((d.size ?? 1) - 1)) continue;
+      // en l'air (saut) ou en pleine roulade : l'onde passe dessous
+      if (d.y - this.groundY(d) > 0.3 || (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36)) {
+        this.emit('pop', 'ESQUIVE', d.x, d.y + 1.8, d.z, 'miss'); this.emit('sfx', 'dodge'); continue;
+      }
+      const nx = dist > 0.05 ? dx / dist : sin(e.yaw), nz = dist > 0.05 ? dz / dist : cos(e.yaw);
+      if (d.state === 'block') {
+        d.guard -= S.guard * wpnOf(d).guard; d.guardT = 0;
+        d.vx = nx * 3; d.vz = nz * 3;
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(e, d, S.dmg, 0, 0.5, d.x, d.y + 0.6, d.z);
+      if (d.state !== 'dead') { d.vx = nx * S.knock; d.vz = nz * S.knock; }
+    }
+  }
+  // la charge renverse ceux qu'elle traverse (une fois chacun : spHit, un bit par combattant)
+  chargeHits(e) {
+    const C = BOSS.charge;
+    for (const d of this.f) {
+      if (d.state === 'dead' || d.team === e.team || (e.spHit & (1 << (d.idx & 31)))) continue;
+      const dx = d.x - e.x, dz = d.z - e.z;
+      if (hypot(dx, dz) > C.hitR * (e.size + (d.size ?? 1)) || Math.abs(d.y - e.y) > 1) continue;
+      if (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36) continue;
+      e.spHit |= 1 << (d.idx & 31);
+      // projeté sur le côté de la trajectoire
+      const side = dx * e.spZ - dz * e.spX >= 0 ? 1 : -1;
+      const kx = e.spX * 0.8 + e.spZ * side * 0.6, kz = e.spZ * 0.8 - e.spX * side * 0.6;
+      if (d.state === 'block' && sin(d.yaw) * e.spX + cos(d.yaw) * e.spZ < -0.2) {
+        d.guard -= C.guard * wpnOf(d).guard; d.guardT = 0;
+        d.vx = kx * 4; d.vz = kz * 4;
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        this.emit('shake', 0.15);
+        if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(e, d, C.dmg, 0, 0.55, d.x, d.y + 1, d.z);
+      if (d.state !== 'dead') { d.vx = kx * C.knock; d.vz = kz * C.knock; }
+    }
+  }
+  // la charge va-t-elle heurter un mur ou un obstacle ?
+  chargeWall(e) {
+    const x = e.x + e.spX * 0.35, z = e.z + e.spZ * 0.35, R = ROOM_R - BODY - 0.05;
+    if (Math.abs(x) > R || Math.abs(z) > R) return true;
+    for (const o of this.room.obs) if (hypot(o.x - x, o.z - z) < o.r + BODY) return true;
+    for (const s of this.room.surf) if (inRect(s, x, z) && heightAt(s, x, z) - e.y > STEP) return true;
+    return false;
   }
 
   // pics d'un piège
   trapHit(f) {
+    if (f.god) return;
     const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor)));
     f.trapT = 1.0;
     f.hp = Math.max(0, f.hp - dmg);
@@ -499,6 +722,7 @@ export class DungeonSim extends Sim {
     this.emit('emit', f.x, 0.3, f.z, 12, { color: [0xffffff, 0xff6a4a, 0xc0c0c8], speed: 2, up: 4, size: 0.08, life: 0.5, grav: 9 });
     if (f.hp <= 0) { this.die(f); this.onKO(null, f); return; }
     g.hitstop = Math.max(g.hitstop, 0.05);
+    if (f.sp) return;                         // le boss ne s'arrête pas pour si peu
     if (f.state !== 'air') { this.setState(f, 'hit', 0.35); this.play(f, 'idle', { fade: 0.05 }); }
     f.vy = 4.5; f.y += 0.01;                  // petit bond de douleur
   }
@@ -534,13 +758,14 @@ export class DungeonSim extends Sim {
       // le coffre apparaît au centre, ou à côté si un héros s'y trouve
       if (this.heroes.some((p) => hypot(p.x, p.z) < 1.5)) g.chestX = this.f[0].x > 0 ? -1.5 : 1.5;
       g.slow = 0.35; g.slowT = 0.7;
-      this.emit('announce', this.room.boss ? 'CHEF VAINCU !' : 'SALLE NETTOYÉE', '', 1.5);
+      this.emit('announce', this.room.boss ? FOES[this.room.bossId || 'boss'].name.toUpperCase() + ' VAINCU !' : 'SALLE NETTOYÉE', '', 1.5);
       this.emit('sfx', 'cheer', 0.6);
       this.emit('clear');
     }
   }
 
   updateFighter(i, canAct) {
+    if (this.f[i].sp) this.special(this.f[i], canAct);
     super.updateFighter(i, canAct);
     const f = this.f[i];
     // bénédiction « Second souffle » : récupération d'endurance supplémentaire
@@ -577,6 +802,50 @@ export class DungeonSim extends Sim {
     att.hitDone = hit;
   }
 
+  // ---------------- outils de débogage (hors ligne seulement : ils modifient l'état directement) ----------------
+  // va directement à la salle n (0 : salle d'armes) ; les héros tombés se relèvent
+  debugGoto(n) {
+    n = Math.max(0, Math.floor(n));
+    for (const p of this.heroes) if (p.state === 'dead') { p.hp = Math.round(p.maxHp * 0.4); this.toIdle(p); }
+    if (n === 0) { this.startHub(); return; }
+    this.g.room = n - 1;
+    this.newRoom();
+  }
+  // élimine tous les ennemis (la salle est nettoyée : coffre et porte)
+  debugKill() {
+    const g = this.g;
+    if (g.phase === 'intro') { g.phase = 'fight'; g.t = 0; }
+    for (const e of this.f) if (e.team === 1 && e.state !== 'dead') { e.hp = 0; if (e.sp) e.sp = ''; this.die(e); this.onKO(null, e); }
+  }
+  debugHeal() { for (const p of this.heroes) { if (p.state === 'dead') this.toIdle(p); p.hp = p.maxHp; p.guard = 100; p.sta = 100; } }
+  debugGod(on) { for (const p of this.heroes) p.god = !!on; }
+  // un ennemi de type id apparaît près du héros 1
+  debugSpawn(id) {
+    if (!FOES[id] || (this.g.phase !== 'fight' && this.g.phase !== 'intro')) return null;
+    const p = this.f[0], a = this.rng.next() * Math.PI * 2;
+    return this.addFoe(id, p.x + sin(a) * 3, p.z + cos(a) * 3);
+  }
+  // téléporte le héros h au point (x, z)
+  debugTp(h, x, z) {
+    const p = this.f[h];
+    if (!p) return;
+    const lim = ROOM_R - BODY;
+    Object.assign(p, { x: clamp(x, -lim, lim), z: clamp(z, -lim, lim), vx: 0, vz: 0, vy: 0 });
+    p.y = this.groundY(p);
+    this.bound(p);
+    this.emit('ring', p.x, p.y + 0.05, p.z, 0x8fd8ff, 1.4, 0.4, true);
+  }
+  // le boss de la salle lance tout de suite une attaque spéciale ('slam', 'charge'), ou enrage ('rage')
+  debugBoss(kind) {
+    const e = this.f.find((o) => o.sp !== undefined && o.state !== 'dead');
+    if (e && this.g.phase === 'intro') { this.g.phase = 'fight'; this.g.t = 0; }
+    if (!e || this.g.phase !== 'fight') return false;
+    if (kind === 'rage') { e.hp = Math.min(e.hp, Math.floor(e.maxHp * BOSS.rage)); if (!e.rage) this.startSpecial(e, 'roar'); return true; }
+    if (e.sp || !this.target(e.idx)) return false;
+    this.startSpecial(e, kind);
+    return true;
+  }
+
   // ---------------- une image ----------------
   // in0, in1 : entrées des héros 0 et 1 ({ mx, mz, blk, press }) ; les ennemis sont joués par leurs IA
   step(in0 = NEUTRAL, in1 = NEUTRAL) {
@@ -603,7 +872,9 @@ export class DungeonSim extends Sim {
       if (ph === 'hub' && p.shop) { this.shopStep(p, src); return NEUTRAL; }
       return readPick(src) >= 0 || readShop(src) >= 0 ? NEUTRAL : src;
     };
-    const srcs = f.map((e, i) => (i < np ? hin(i ? in1 : in0, e) : (ph === 'fight' && e.state !== 'dead' && this.ais[i] ? this.ais[i].update(adt) : NEUTRAL)));
+    // attaques spéciales des boss ; pendant l'une d'elles, le boss n'écoute plus son IA
+    if (ph === 'fight') for (let i = np; i < f.length; i++) if (f[i].sp !== undefined) this.bossThink(f[i], adt);
+    const srcs = f.map((e, i) => (i < np ? hin(i ? in1 : in0, e) : (ph === 'fight' && e.state !== 'dead' && !e.sp && this.ais[i] ? this.ais[i].update(adt) : NEUTRAL)));
     for (let p = 0; p < f.length; p++) {
       const src = srcs[p], inp = this.inp[p];
       inp.mx = src.mx / 127; inp.mz = src.mz / 127; inp.blk = !!src.blk;

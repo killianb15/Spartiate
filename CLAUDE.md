@@ -7,11 +7,13 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Lancer / tester
 - Jeu : `python serveur.py` (port 8123) → http://localhost:8123 ; `?dungeon` lance le donjon directement,
   `&debug` expose `window.spartiate.sim` / `.views` dans la console. Ouvrir index.html en fichier ne marche pas.
-- Tests : `node --test tests/` (tous doivent passer ; ~80 tests). `tests/test_server.py` pour le serveur.
+- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~90 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
 - Après une modif de `game.js`, l'utilisateur doit faire **Ctrl+F5** (cache).
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
-  (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs).
+  (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
+  scénarios tome, staff, shop, biomes, boss). Chromium headless est lent (quelques images/s) : pour une capture
+  précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
 
@@ -48,9 +50,39 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Les fighters ont un **camp** `team` (0 héros + chiens, 1 ennemis) : `target`, `foeOf`, `foesLeft`, les
   frappes et `onKO` raisonnent par camp ; `isHero(f)` (idx < np) reste pour ce qui concerne les joueurs.
   Les chiens disparaissent à la salle suivante (f = héros + ennemis de la nouvelle salle).
-- Ennemis (`FOES`) : grunt/guard/elite/archer/boss + zombie (salle ≥ 4, sans tirage aléatoire en plus).
+- Ennemis (`FOES`) : grunt/guard/elite/archer + zombie (salle ≥ 4, sans tirage aléatoire en plus).
+- **Boss** (`boss: true` dans FOES, une salle sur 5, `bossOf(n)` : chef orc salles 5, 15… ; colosse 10, 20…).
+  `room.bossId`. **Colosse d'airain** (`colosse` : robot ×1,9, marteau, `moves`) : attaques spéciales réglées
+  par `BOSS`, état `'special'` + `f.sp` ('slam' saut écrasant, 'charge', 'roar' = rage à 50 % PV qui appelle
+  des zombies `adds`). Seuls les ennemis à `moves` ont les champs `sp, spT, spA, spX, spZ, spHit, spCd, rage`
+  (`sp !== undefined` les repère). `bossThink` décide (rng de la sim), `special` avance avant `updateFighter`,
+  pendant une spéciale il encaisse sans broncher (`armorHit`). Charge dans un mur/obstacle = sonné.
+  Affichage : `bossTele` (zones au sol déduites de l'état), `bossHud` + `#bossBar` (grande barre en haut,
+  pas de petite barre au-dessus des boss), teinte bronze et lueur de rage dans `makeView`/`FighterView`.
+- **Outil de débogage** (F2, hors ligne) : `#dbg` dans index.html, `setupDebug`/`dbgGoto` dans game.js,
+  méthodes `debugGoto/Kill/Heal/God/Spawn/Tp/Boss` de DungeonSim (testées dans tests/boss.test.js).
+  `dng.room = -1` force la reconstruction de la salle.
 - Vues : `makeView`/`extraViews` créent les vues au fil des invocations sans reconstruire la salle ;
   `heroViews` remplace la vue d'un héros qui change de perso/arme.
+
+## Performances de l'affichage (game.js) : règles à respecter
+- Changer de salle/arène passe par `clearWorld()` : tout ce qui est dans `world` est **libéré** (géométries,
+  matériaux, textures, carte d'ombre du soleil, ciel), sauf ce qui est marqué `keep(...)` (`KEEP`) : modèles
+  chargés (marqués au chargement) et formes/matériaux partagés déclarés au niveau du module. Un nouvel objet
+  partagé entre salles doit être passé à `keep()`, sinon il sera détruit à la salle suivante.
+- `FighterView.dispose()` libère aussi ses matériaux clonés, son squelette (texture des os) et sa barre de vie.
+- Lumières : leur nombre fait partie des shaders (un nombre nouveau = tout recompiler) ; `padLights()` complète
+  au multiple de 4 en fin de construction. Une lumière qui apparaît en cours de jeu doit exister dès la
+  construction, éteinte (comme celle du coffre).
+- Dalles plates et immobiles : `PT()` au lieu de `P()` (regroupées en InstancedMesh par `flushTiles()`,
+  sans ombre projetée). `inst()` ne fait pas projeter d'ombre aux modèles `*floor*` ni à la lave.
+- Anneaux (`ring`) : réserve réutilisée, ne pas recréer de matériau par effet. Particules : retrait par échange.
+- HUD : écrire via `setTxt` / `setW` / `setCls` (seulement quand la valeur change).
+- Mesurer : avec `?debug`, `spartiate.renderer.info` (memory.geometries/textures, programs.length,
+  render.calls) et `spartiate.debugGoto(n)` ; ces compteurs doivent rester stables d'une salle à l'autre.
+- Piste restante : murs générés des biomes très détaillés (basalt-wall ≈ 3000 triangles, ruin-wall-broken
+  ≈ 2600, contre une centaine pour un mur Kenney) : la forge dépasse 180 000 triangles. À simplifier dans
+  tools/blender/biomes.py.
 
 ## Affichage des armes (game.js)
 - `heldWeapon(key, s, back)` : arme dans la main droite (repère du bras, direction `SWORD_DIR`).

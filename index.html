@@ -209,6 +209,69 @@
   .kpanel .btns { display: flex; gap: 12px; justify-content: center; }
   .kpanel .btns button { padding: 10px 22px; font-size: 18px; }
 
+  /* ---------- Barre de vie du boss ---------- */
+  #bossBar { position: fixed; top: 98px; left: 50%; width: min(640px, calc(100vw - 32px)); transform: translateX(-50%);
+    z-index: 6; pointer-events: none; text-align: center; --bb-a: #ff4a2a; --bb-b: #8e1408; }
+  #bossBar.enter { animation: bbIn .9s cubic-bezier(.2,1.4,.4,1) both; }
+  #bossBar.hit .bb-frame { animation: bbHit .22s ease-out; }
+  #bossBar.gone { animation: bbOut 1.6s ease-in .6s forwards; }
+  @keyframes bbIn { 0% { opacity: 0; transform: translateX(-50%) translateY(-24px) scaleX(.4); } 100% { opacity: 1; transform: translateX(-50%); } }
+  @keyframes bbOut { to { opacity: 0; transform: translateX(-50%) translateY(-14px); } }
+  @keyframes bbHit { 0% { transform: translate(0, 0); } 25% { transform: translate(-3px, 1px); } 50% { transform: translate(3px, -1px); } 75% { transform: translate(-2px, 0); } 100% { transform: none; } }
+  .bb-name { display: inline-flex; align-items: center; gap: 12px; font-family: Cinzel, serif; font-weight: 900;
+    font-size: clamp(17px, 2.6vw, 24px); letter-spacing: .2em; text-transform: uppercase; line-height: 1.1;
+    background: linear-gradient(180deg, #fff3c4 10%, #f1c66d 55%, #b0761e 90%); -webkit-background-clip: text; background-clip: text;
+    color: transparent; filter: drop-shadow(0 2px 0 #2a1406) drop-shadow(0 0 10px rgba(0,0,0,.7)); }
+  .bb-name i { width: 9px; height: 9px; transform: rotate(45deg); background: linear-gradient(135deg, #ffe7a0, #a8701c);
+    box-shadow: 0 0 6px rgba(255,190,80,.7); flex: none; }
+  .bb-name i:first-child { box-shadow: -18px 18px 0 -2px transparent, 0 0 6px rgba(255,190,80,.7); }
+  .bb-frame { position: relative; margin: 5px 14px 0; padding: 3px; border-radius: 3px;
+    background: linear-gradient(180deg, #f6d68a, #a8701c 45%, #5a3410 55%, #c58f34);
+    box-shadow: 0 0 0 1px #1b0f05, 0 4px 14px rgba(0,0,0,.65), 0 0 22px rgba(255,90,40,.18); }
+  .bb-frame::before, .bb-frame::after { content: ''; position: absolute; top: 50%; width: 20px; height: 20px; margin-top: -10px;
+    transform: rotate(45deg); background: linear-gradient(135deg, #fff0b8, #c58f34 50%, #5a3410);
+    box-shadow: 0 0 0 1px #1b0f05, 0 0 8px rgba(255,170,60,.5); }
+  .bb-frame::before { left: -12px; } .bb-frame::after { right: -12px; }
+  .bb-bar { position: relative; height: 18px; overflow: hidden; border-radius: 2px; background: #1a0705;
+    box-shadow: inset 0 2px 5px rgba(0,0,0,.9); }
+  .bb-trail, .bb-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 100%; }
+  .bb-trail { background: linear-gradient(180deg, #fff6d8, #ffd27a); transition: width .7s ease .35s; }
+  .bb-fill { background: linear-gradient(180deg, #ff9a7a 0%, var(--bb-a) 30%, var(--bb-b) 100%); transition: width .08s linear;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,.25), 2px 0 6px rgba(255,120,60,.6); }
+  .bb-fill::after { content: ''; position: absolute; inset: 0;
+    background: repeating-linear-gradient(115deg, rgba(255,255,255,.09) 0 6px, transparent 6px 14px); }
+  .bb-shine { position: absolute; left: 0; right: 0; top: 0; height: 45%; background: linear-gradient(180deg, rgba(255,255,255,.28), transparent); }
+  .bb-mark { position: absolute; left: 50%; top: -1px; bottom: -1px; width: 2px; margin-left: -1px; background: rgba(255,230,170,.75);
+    box-shadow: 0 0 4px #000; }
+  #bbHp { position: absolute; inset: 0; font-weight: 700; font-size: 14px; line-height: 18px; letter-spacing: .08em; color: #fff3d6;
+    text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+  .bb-sub { margin-top: 5px; font-family: Cinzel, serif; font-weight: 800; font-size: 12px; letter-spacing: .3em; text-transform: uppercase;
+    color: #c9a46a; text-shadow: 0 1px 3px #000; }
+  /* enragé : la barre s'embrase */
+  #bossBar.rage { --bb-a: #ffb02e; --bb-b: #c01a06; }
+  #bossBar.rage .bb-fill { background: linear-gradient(90deg, #c01a06, #ff6a1c, #ffb02e, #ff6a1c, #c01a06); background-size: 200% 100%;
+    animation: bbFire .9s linear infinite; }
+  #bossBar.rage .bb-frame { box-shadow: 0 0 0 1px #1b0f05, 0 4px 14px rgba(0,0,0,.65), 0 0 26px rgba(255,90,20,.75); animation: bbGlow .5s ease-in-out infinite alternate; }
+  #bossBar.rage .bb-sub::after { content: ' · enragé'; color: #ff8a4a; }
+  @keyframes bbFire { to { background-position: -200% 0; } }
+  @keyframes bbGlow { to { box-shadow: 0 0 0 1px #1b0f05, 0 4px 14px rgba(0,0,0,.65), 0 0 38px rgba(255,120,30,.95); } }
+
+  /* ---------- Outil de débogage (F2) ---------- */
+  #dbg { position: fixed; right: 12px; top: 140px; z-index: 30; width: 300px; max-width: calc(100vw - 32px); padding: 10px 12px;
+    background: rgba(10,8,14,.9); border: 1px solid #5a6aa0; border-radius: 10px; font-size: 15px; color: #dfe4ff;
+    box-shadow: 0 6px 20px rgba(0,0,0,.6); }
+  #dbg h4 { margin: 0 0 6px; font-family: Cinzel, serif; font-size: 14px; letter-spacing: .2em; color: #9fb4ff; }
+  #dbg h4 small { float: right; font-family: 'Barlow Condensed'; letter-spacing: 0; color: #7a84a8; }
+  #dbg .lbl { margin: 8px 0 3px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: #7a84a8; }
+  #dbg .grid { display: flex; flex-wrap: wrap; gap: 4px; }
+  #dbg button { padding: 3px 8px; border-radius: 5px; border: 1px solid #3c4670; background: #1c2138; font-size: 14px; }
+  #dbg button:hover { border-color: #9fb4ff; background: #283056; }
+  #dbg button.on { background: #3a5a2a; border-color: #8fe36a; }
+  #dbg input { width: 56px; padding: 2px 6px; border-radius: 5px; border: 1px solid #3c4670; background: #0c0f1c; color: inherit; font: inherit; }
+  #dbg.off .grid, #dbg.off .row { opacity: .4; pointer-events: none; }
+  #dbg .row { display: flex; gap: 4px; align-items: center; }
+  #dbgInfo { margin-top: 8px; font-size: 13px; color: #aab4d8; min-height: 1em; }
+
   @media (max-width: 720px) {
     #menu { padding: 18px 16px; background: rgba(14,9,5,.9); }
     #menu h1 { font-size: 36px; }
@@ -323,6 +386,25 @@
   <div id="shopDesc"></div>
   <div id="shopList"></div>
   <div id="shopKeys"></div>
+</div>
+<div id="bossBar" class="hidden">
+  <div class="bb-name"><i></i><span id="bbName"></span><i></i></div>
+  <div class="bb-frame"><div class="bb-bar">
+    <div class="bb-trail" id="bbTrail"></div><div class="bb-fill" id="bbFill"></div><div class="bb-shine"></div>
+    <i class="bb-mark" id="bbMark"></i><span id="bbHp"></span>
+  </div></div>
+  <div class="bb-sub" id="bbSub"></div>
+</div>
+<div id="dbg" class="hidden">
+  <h4>DÉBOGAGE <small>F2 pour fermer</small></h4>
+  <div class="row"><span>Salle n°</span><input id="dbgRoom" type="number" min="0" value="10"><button id="dbgGo">Y aller</button></div>
+  <div class="lbl">Aller à</div><div class="grid" id="dbgRooms"></div>
+  <div class="lbl">Héros</div>
+  <div class="grid"><button id="dbgHeal">Soigner</button><button id="dbgGod">Invincible</button><button id="dbgTp">Clic = téléporter</button><button id="dbgKill">Tuer les ennemis</button></div>
+  <div class="lbl">Faire apparaître</div><div class="grid" id="dbgFoes"></div>
+  <div class="lbl">Colosse</div>
+  <div class="grid"><button data-boss="slam">Saut écrasant</button><button data-boss="charge">Charge</button><button data-boss="rage">Rage (50 % PV)</button></div>
+  <div id="dbgInfo"></div>
 </div>
 <div id="announce"></div>
 <div id="biome"></div>

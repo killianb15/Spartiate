@@ -6,7 +6,7 @@ const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, HEROES, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, BOONS, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -64,8 +64,47 @@ const G = {};
 function inst(key, s = S) {
   const o = SkeletonUtils.clone(G[key].scene);
   o.scale.setScalar(s);
-  o.traverse((m) => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+  // les dalles de sol et de lave, à plat, ne projettent d'ombre sur rien : autant de moins à dessiner
+  const cast = !key.includes('floor') && key !== 'b_lava';
+  o.traverse((m) => { if (m.isMesh) { m.castShadow = cast; m.receiveShadow = true; } });
   return o;
+}
+
+// ---------- Mémoire du GPU ----------
+// Ressources partagées (modèles chargés, formes et matériaux communs) : jamais libérées. Tout le reste
+// de ce qui est construit pour une salle ou une arène (sol, ciel, braseros, étiquettes, carte d'ombre
+// du soleil…) est libéré quand on en change : sans cela, chaque salle laissait ses tampons et textures
+// sur la carte graphique (fuite qui grossit tout au long d'une partie).
+const KEEP = new WeakSet();
+function keep(...xs) { for (const x of xs.flat()) KEEP.add(x); }
+function texturesOf(m, out) { for (const k in m) { const v = m[k]; if (v && v.isTexture && !KEEP.has(v)) out.add(v); } }
+// libère ce que contient root (sauf les ressources partagées)
+function disposeTree(root) {
+  const geos = new Set(), mats = new Set(), texs = new Set();
+  root.traverse((o) => {
+    if (o.geometry && !KEEP.has(o.geometry)) geos.add(o.geometry);
+    if (o.material) for (const m of [].concat(o.material)) if (!KEEP.has(m)) mats.add(m);
+    if (o.isLight || o.isInstancedMesh) o.dispose();       // carte d'ombre du soleil, tampons d'instances
+    if (o.isSkinnedMesh) o.skeleton.dispose();             // texture des os (une par personnage animé)
+  });
+  for (const m of mats) { texturesOf(m, texs); m.dispose(); }
+  for (const g of geos) g.dispose();
+  for (const t of texs) t.dispose();
+}
+// on change de salle ou d'arène : on vide le monde et on libère ce qui lui appartenait
+function clearWorld() {
+  disposeTree(world);
+  world.clear();
+  if (scene.background?.isTexture && !KEEP.has(scene.background)) scene.background.dispose();
+  scene.background = null;
+}
+// Le nombre de lumières fait partie des shaders de three.js : chaque nouveau nombre les fait tous
+// recompiler (saccade en entrant dans la salle). On complète donc par des lumières éteintes jusqu'au
+// multiple de 4 suivant : quelques variantes seulement, compilées une fois pour toutes.
+function padLights() {
+  let n = 0;
+  world.traverseVisible((o) => { if (o.isPointLight) n++; });   // (une lumière masquée ne compte pas)
+  for (let k = n; k < Math.max(4, Math.ceil(n / 4) * 4); k++) { const l = new THREE.PointLight(0x000000, 0, 1); l.position.y = -50; world.add(l); }
 }
 
 const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc', archer: 'Archer', knight: 'Chevalier', zombie: 'Zombie', robot: 'Automate' };
@@ -157,6 +196,10 @@ const sfx = {
   whine: () => tone(900, 0.4, { type: 'triangle', vol: 0.08, to: 420 }),
   tick: () => tone(880, 0.05, { type: 'triangle', vol: 0.06 }),
   coin: () => { tone(1320, 0.12, { type: 'square', vol: 0.05 }); tone(1760, 0.2, { type: 'square', vol: 0.05, delay: 0.07 }); },
+  // colosse : retombée du saut, rugissement de rage, jet de vapeur avant la charge
+  quake: () => { noise(1.1, { freq: 140, type: 'lowpass', vol: 1 }); tone(48, 0.9, { type: 'sawtooth', vol: 0.25, to: 22 }); noise(0.3, { freq: 900, type: 'lowpass', vol: 0.4 }); },
+  roar: () => { tone(80, 1.3, { type: 'sawtooth', vol: 0.2, to: 55, attack: 0.15 }); tone(122, 1.1, { type: 'square', vol: 0.06, to: 70, attack: 0.15 }); noise(1.2, { freq: 420, q: 0.7, vol: 0.35, attack: 0.2 }); },
+  steam: () => { noise(0.6, { freq: 4200, to: 2000, q: 0.8, vol: 0.16, attack: 0.05 }); tone(70, 0.35, { type: 'square', vol: 0.08 }); },
 };
 
 // =====================================================================
@@ -170,29 +213,33 @@ pMesh.count = 0;
 scene.add(pMesh);
 const parts = [];
 const dummy = new THREE.Object3D();
+const pCol = new THREE.Color();
+let pOld = 0;              // réserve pleine : la prochaine particule remplace celle-ci (tour à tour)
 
 // o.dir : direction privilégiée {x, z}
 function emit(x, y, z, n, o = {}) {
   const colors = Array.isArray(o.color) ? o.color : [o.color ?? 0xffffff];
   for (let i = 0; i < n; i++) {
-    if (parts.length >= PMAX) parts.shift();
     const sp = o.speed ?? 3, a = Math.random() * TAU, life = (o.life ?? 0.6) * rand(0.6, 1);
     const dx = o.dir ? o.dir.x * sp * 0.8 : 0, dz = o.dir ? o.dir.z * sp * 0.8 : 0;
-    parts.push({
+    const p = {
       x: x + rand(-1, 1) * (o.spread ?? 0), y: y + rand(-1, 1) * (o.spread ?? 0), z: z + rand(-1, 1) * (o.spread ?? 0),
       vx: Math.cos(a) * sp * rand(0.2, 1) + dx,
       vy: (o.up ?? 2) * rand(0.4, 1.2),
       vz: Math.sin(a) * sp * rand(0.2, 1) + dz,
       life, max: life, size: (o.size ?? 0.08) * rand(0.6, 1.3), grav: o.grav ?? 9, drag: o.drag ?? 0,
-      col: new THREE.Color(pick(colors)), rot: rand(0, 6), spin: rand(-8, 8),
-    });
+      col: pick(colors), rot: rand(0, 6), spin: rand(-8, 8),
+    };
+    if (parts.length < PMAX) parts.push(p);
+    else { parts[pOld] = p; pOld = (pOld + 1) % PMAX; }
   }
 }
 function updateParticles(dt) {
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     p.life -= dt;
-    if (p.life <= 0) { parts.splice(i, 1); continue; }
+    // retrait par échange avec la dernière (l'ordre n'a pas d'importance)
+    if (p.life <= 0) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
     p.vy -= p.grav * dt;
     const dr = Math.exp(-p.drag * dt);
     p.vx *= dr; p.vz *= dr; if (p.grav < 3) p.vy *= dr;
@@ -206,7 +253,7 @@ function updateParticles(dt) {
     dummy.scale.setScalar(p.size * Math.min(1, (p.life / p.max) * 2.5));
     dummy.updateMatrix();
     pMesh.setMatrixAt(i, dummy.matrix);
-    pMesh.setColorAt(i, p.col);
+    pMesh.setColorAt(i, pCol.setHex(p.col));
   }
   pMesh.count = parts.length;
   pMesh.instanceMatrix.needsUpdate = true;
@@ -214,22 +261,31 @@ function updateParticles(dt) {
 }
 
 const ringGeo = new THREE.RingGeometry(0.82, 1, 48);
-const rings = [];
+const rings = [];          // anneaux en cours
+const ringPool = [];       // anneaux libres, réutilisés (pas de matériau créé puis détruit à chaque coup)
 // anneau d'onde de choc ; face à la caméra sauf s'il est posé au sol
 function ring(x, y, z, color, maxS = 1.6, life = 0.35, flat = false, opacity = 1) {
-  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
+  let m = ringPool.pop();
+  if (!m) {
+    m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
+    scene.add(m);
+  }
+  m.visible = true;
+  m.material.color.set(color);
+  m.material.opacity = opacity;
   m.position.set(x, y, z);
-  if (flat) m.rotation.x = -Math.PI / 2;
+  if (flat) m.quaternion.setFromAxisAngle(AXIS_X, -Math.PI / 2);
   else m.quaternion.copy(camera.quaternion);
-  scene.add(m);
+  m.scale.setScalar(0.1);
   rings.push({ m, t: 0, life, maxS, op: opacity });
 }
+const AXIS_X = new THREE.Vector3(1, 0, 0);
 function updateRings(dt) {
   for (let i = rings.length - 1; i >= 0; i--) {
     const r = rings[i];
     r.t += dt;
     const k = r.t / r.life;
-    if (k >= 1) { scene.remove(r.m); r.m.material.dispose(); rings.splice(i, 1); continue; }
+    if (k >= 1) { r.m.visible = false; ringPool.push(r.m); rings[i] = rings[rings.length - 1]; rings.pop(); continue; }
     r.m.scale.setScalar(0.1 + r.maxS * (1 - (1 - k) * (1 - k)));
     r.m.material.opacity = (1 - k) * r.op;
   }
@@ -274,6 +330,30 @@ function P(key, x, y, z, ry = 0, s = S, parent = world) {
   parent.add(o);
   return o;
 }
+// Dalles plates et immobiles (sol, lave…) : au lieu d'un objet par dalle, elles sont regroupées par
+// modèle en une seule InstancedMesh (un appel de dessin par modèle au lieu d'un par dalle) ; posées
+// au ras du sol, elles ne projettent pas d'ombre. flushTiles() les crée en fin de construction.
+const tileBatch = new Map();
+const mTile = new THREE.Matrix4(), qTile = new THREE.Quaternion(), sTile = new THREE.Vector3(), UP = new THREE.Vector3(0, 1, 0);
+function PT(key, x, y, z, ry = 0, s = S) {
+  if (!tileBatch.has(key)) tileBatch.set(key, []);
+  qTile.setFromAxisAngle(UP, ry);
+  tileBatch.get(key).push(new THREE.Matrix4().compose(v1.set(x, y, z), qTile, sTile.setScalar(s)));
+}
+function flushTiles() {
+  for (const [key, list] of tileBatch) {
+    const root = G[key].scene;
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      if (!o.isMesh) return;
+      const im = new THREE.InstancedMesh(o.geometry, o.material, list.length);
+      list.forEach((m, i) => im.setMatrixAt(i, mTile.multiplyMatrices(m, o.matrixWorld)));
+      im.receiveShadow = true;
+      world.add(im);
+    });
+  }
+  tileBatch.clear();
+}
 // objet posé sur un cercle de rayon r à l'angle a, tourné vers le centre
 function PR(key, r, a, y = 0, s = S, turn = 0) {
   return P(key, Math.sin(a) * r, y, Math.cos(a) * r, a + Math.PI + turn, s);
@@ -313,7 +393,7 @@ function tiles(a, b, chance, R, square = false) {
   for (let x = -10.5; x <= 10.51; x += S)
     for (let z = -10.5; z <= 10.51; z += S) {
       if (square ? (Math.abs(x) > R || Math.abs(z) > R) : Math.hypot(x, z) > R + 0.8) continue;
-      P(Math.random() < chance ? b : a, x, 0, z, ((Math.random() * 4) | 0) * Math.PI / 2);
+      PT(Math.random() < chance ? b : a, x, 0, z, ((Math.random() * 4) | 0) * Math.PI / 2);
     }
 }
 function sway(o, amp, freq, axis = 'z') {
@@ -372,6 +452,7 @@ function fire(parent, x, y, z, s = 1, lightI = 9) {
 }
 const ironMat = new THREE.MeshStandardMaterial({ color: 0x3a3230, metalness: 0.6, roughness: 0.5 });
 const woodMat = new THREE.MeshStandardMaterial({ color: 0x6b4426, roughness: 0.9 });
+keep(flameGeo, flameMats, ironMat, woodMat);
 function brazier(x, z, baseKey = 'a_columnD', baseS = 1.1, lightI = 10) {
   const h = (baseKey === 'd_barrel' ? 0.48 : 0.72) * baseS;
   P(baseKey, x, 0, z, 0, baseS);
@@ -898,13 +979,15 @@ const ARENAS = {
 };
 
 function buildArena(id) {
-  world.clear();
+  clearWorld();
   updaters = [];
   for (const id of ['talk', 'shop']) $(id).classList.add('hidden');   // marchand (salle d'armes)
   crowd = null;
   arenaHooks = {};
   scene.fog = null;
   ARENAS[id].build();
+  flushTiles();
+  padLights();
   curArena = id;
 }
 
@@ -956,6 +1039,7 @@ function swingPose(sf, wpn) {
 const ringFoot = new THREE.RingGeometry(0.42, 0.56, 36).rotateX(-Math.PI / 2);
 const starGeo = new THREE.OctahedronGeometry(0.075);
 const starMat = new THREE.MeshBasicMaterial({ color: 0xffe14a, toneMapped: false });
+keep(ringFoot, starGeo, starMat);
 
 // Vue d'un combattant : modèle 3D, animations et effets visuels. Tout ce qui touche au
 // gameplay est dans sim.js ; ici on ne fait que LIRE l'état de la simulation (sf).
@@ -1059,6 +1143,8 @@ class FighterView {
     this.stars.visible = false;
     this.root.add(this.stars);
     this.flashCol = new THREE.Color(1, 1, 1);
+    this.glowCol = new THREE.Color(1, 0.3, 0.05);    // lueur permanente (rage du colosse) ajoutée au flash
+    this.glow = 0;
     this.cur = null;
     this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0;
     this.seenReset = -1; this.seenAnim = '';
@@ -1066,7 +1152,13 @@ class FighterView {
     this.rx = this.ry = this.rz = 0;       // position affichée
     this.snapPos = true;
   }
-  dispose() { scene.remove(this.root, this.ring); }
+  // retire la vue et libère ce qui lui est propre (matériaux clonés, squelette, barre de vie, anneau)
+  dispose() {
+    scene.remove(this.root, this.ring);
+    this.mixer.stopAllAction();
+    this.mixer.uncacheRoot(this.model);
+    disposeTree(this.root); disposeTree(this.ring);
+  }
   setSize(k) { this.root.scale.setScalar(k); this.ring.scale.setScalar(k); }
   // petite barre de vie au-dessus de la tête (ennemis du donjon)
   addHpBar(color) {
@@ -1168,6 +1260,15 @@ class FighterView {
       this.hpBar.quaternion.copy(camera.quaternion);
       this.hpFill.scale.x = Math.max(0.001, sf.hp / sf.maxHp);
     }
+    // colosse : il rougeoie en préparant une attaque spéciale, et brûle une fois enragé
+    if (sf.sp !== undefined && sf.state !== 'dead') {
+      const wind = sf.sp && sf.sp !== 'roar' && sf.spA === 0 ? 0.45 + 0.35 * Math.sin(T * 28) : 0;
+      this.glow = Math.max(wind, sf.rage ? 0.09 + 0.05 * Math.sin(T * 5) : 0);
+      if (sf.rage && Math.random() < 0.35) {
+        const s = sf.size ?? 1;
+        emit(this.rx + rand(-0.4, 0.4) * s, this.ry + rand(0.4, 1.4) * s, this.rz + rand(-0.4, 0.4) * s, 1, { color: [0xff9a2e, 0xffe27a, 0xff4a1c], speed: 0.4, up: 1.8, size: 0.06, life: 0.6, grav: -1.5 });
+      }
+    } else this.glow = 0;
   }
 
   // arme dans l'axe du coup (voir swingPose)
@@ -1219,7 +1320,10 @@ class FighterView {
     if (this.sword) this.swing(sf);
 
     this.flash = Math.max(0, this.flash - dt * 4);
-    for (const m of this.mats) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
+    for (const m of this.mats) {
+      m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
+      if (this.glow > 0) { m.emissive.r += this.glowCol.r * this.glow; m.emissive.g += this.glowCol.g * this.glow; m.emissive.b += this.glowCol.b * this.glow; }
+    }
     this.shieldGlow = Math.max(0, this.shieldGlow - dt * 3);
     const bg = st === 'block' ? 0.12 : 0;
     for (const m of this.shieldMats) m.emissive.setRGB(0.5 * this.shieldGlow + bg * 0.4, 0.8 * this.shieldGlow + bg * 0.7, this.shieldGlow + bg);
@@ -1256,7 +1360,7 @@ class DogView {
     this.px = this.py = this.pz = 0; this.rx = this.ry = this.rz = 0;
     this.snapPos = true; this.seenReset = -1;
   }
-  dispose() { scene.remove(this.root, this.ring); }
+  dispose() { scene.remove(this.root, this.ring); disposeTree(this.root); disposeTree(this.ring); }
   setSize(k) { this.root.scale.setScalar(k); this.ring.scale.setScalar(k); }
   capture(sf) { this.px = sf.x; this.py = sf.y; this.pz = sf.z; }
   fx(kind) {
@@ -1346,9 +1450,12 @@ function fireballView() {
   scene.add(g);
   return g;
 }
+const NONE = [], arrowList = [], fireList = [];
 function syncArrows(alpha) {
-  const all = game.phase === 'menu' ? [] : sim.pr;
-  const list = all.filter((a) => a.k !== 1), fire = all.filter((a) => a.k === 1);
+  const all = game.phase === 'menu' ? NONE : sim.pr;
+  arrowList.length = fireList.length = 0;
+  for (const a of all) (a.k === 1 ? fireList : arrowList).push(a);
+  const list = arrowList, fire = fireList;
   while (fireViews.length < fire.length) fireViews.push(fireballView());
   fireViews.forEach((o, i) => {
     const a = fire[i];
@@ -1483,6 +1590,8 @@ addEventListener('keydown', (e) => {
   if (b && !game.paused) for (const [pl, act] of b) { if (act in PRESS) pending[pl] |= PRESS[act]; else tapped[pl].add(act); }
 });
 addEventListener('keyup', (e) => down.delete(e.code));
+// F2 : panneau de débogage du donjon (hors ligne)
+addEventListener('keydown', (e) => { if (e.code === 'F2') { e.preventDefault(); toggleDebug(); } });
 addEventListener('blur', () => down.clear());
 
 // déplacements relatifs à la caméra : ← → le long de l'écran, ↑ ↓ en profondeur (pas de côté)
@@ -1698,19 +1807,19 @@ function updateHud() {
   sim.f.forEach((f, i) => {
     const n = i + 1;
     const hp = Math.max(0, f.hp);
-    $('h' + n).style.width = hp + '%';
-    $('h' + n).classList.toggle('low', hp < 30);
-    $('t' + n).style.width = hp + '%';
-    $('g' + n).style.width = Math.max(0, f.guard) + '%';
-    $('g' + n).classList.toggle('low', f.guard < 30);
-    $('s' + n).style.width = Math.max(0, f.sta) + '%';
-    $('s' + n).classList.toggle('low', f.sta < STA.tired);
-    $('s' + n).classList.toggle('fail', f.staFail > 0);
-    [...$('w' + n).children].forEach((pip, k) => pip.classList.toggle('on', game.wins[i] > k));
+    setW('h' + n, hp);
+    setCls('h' + n, 'low', hp < 30);
+    setW('t' + n, hp);
+    setW('g' + n, Math.max(0, f.guard));
+    setCls('g' + n, 'low', f.guard < 30);
+    setW('s' + n, Math.max(0, f.sta));
+    setCls('s' + n, 'low', f.sta < STA.tired);
+    setCls('s' + n, 'fail', f.staFail > 0);
+    if (uiTxt['w' + n] !== game.wins[i]) { uiTxt['w' + n] = game.wins[i]; [...$('w' + n).children].forEach((pip, k) => pip.classList.toggle('on', game.wins[i] > k)); }
   });
   const tm = Math.ceil(game.timer);
-  $('timer').textContent = tm;
-  $('timer').classList.toggle('low', tm <= 10);
+  setTxt('timer', String(tm));
+  setCls('timer', 'low', tm <= 10);
 }
 
 // =====================================================================
@@ -1886,7 +1995,7 @@ function outsideDecor(kind, D) {
       for (let z = -R; z <= R + 0.01; z += TILE) {
         if (!out(x, z) || !(x > D + 0.2 || z > D + 0.2)) continue;
         const rim = Math.max(x, z) < D + TILE + 0.2;           // une rangée de dalles le long du muret
-        P(rim || Math.random() < 0.2 ? 'b_basalt-floor' : 'b_lava', x, 0, z, rot4());
+        PT(rim || Math.random() < 0.2 ? 'b_basalt-floor' : 'b_lava', x, 0, z, rot4());
       }
     for (const [x, z] of [[D + 3, -3], [D + 3, 3], [-3, D + 3], [3, D + 3], [D + 3, D + 3]]) {
       const l = new THREE.PointLight(0xff5a1a, 7, 11, 1.4);
@@ -1956,7 +2065,7 @@ const rot4 = () => ((Math.random() * 4) | 0) * Math.PI / 2;
 
 // n : numéro de la salle. Chaque biome s'assombrit un peu au fil de sa tranche ; salle du boss en rouge.
 function buildDungeonRoom(room, n) {
-  world.clear();
+  clearWorld();
   updaters = [];
   for (const id of ['talk', 'shop']) $(id).classList.add('hidden');   // marchand (salle d'armes)
   crowd = null;
@@ -1996,7 +2105,7 @@ function buildDungeonRoom(room, n) {
   const D = ROOM_R + TILE / 2;      // centre des blocs de mur
   for (let x = -ROOM_T; x <= ROOM_T + 0.01; x += TILE)
     for (let z = -ROOM_T; z <= ROOM_T + 0.01; z += TILE)
-      P(floorKey(), x, 0, z, rot4());
+      PT(floorKey(), x, 0, z, rot4());
 
   const exitId = room.exit === 'z' ? '-z' : '-x', entryId = room.exit === 'z' ? '+z' : '+x';
   for (const sd of SIDES) {
@@ -2055,7 +2164,7 @@ function buildDungeonRoom(room, n) {
       for (let z = s.z0 + TILE / 2; z < s.z1; z += TILE) {
         if (!s.ramp) {
           P(B.block[0], x, 0, z, rot4()).scale.y = PLAT_H / B.block[1];
-          P(floorKey(), x, PLAT_H + 0.003, z, rot4());
+          PT(floorKey(), x, PLAT_H + 0.003, z, rot4());
         } else {
           // le modèle d'escalier monte vers son -z local : on le tourne vers le haut de la rampe
           const dir = Math.sign(s.to - s.from), dx = s.ramp === 'x' ? dir : 0, dz = s.ramp === 'z' ? dir : 0;
@@ -2128,6 +2237,8 @@ function buildDungeonRoom(room, n) {
   // pour que son apparition ne force pas la recompilation des shaders
   const glow = new THREE.PointLight(0xffd34a, 0, 4, 1.5);
   world.add(glow);
+  flushTiles();
+  padLights();                       // toutes les lumières de la salle sont posées
   dng.spawnChest = () => {
     const cx = sim.g.chestX, cz = sim.g.chestZ;
     const ch = P('d_chest', cx, 0, cz, ISO, S * 1.2);
@@ -2177,6 +2288,7 @@ function label(text, sub, x, y, z, w = 1.5) {
 }
 const padGeo = new THREE.CircleGeometry(PAD_R, 32).rotateX(-Math.PI / 2);
 const padRing = new THREE.RingGeometry(PAD_R - 0.06, PAD_R, 40).rotateX(-Math.PI / 2);
+keep(padGeo, padRing);
 function buildHub(room) {
   const pads = room.pads.map((pd) => {
     const hero = pd.t === 'hero';
@@ -2435,7 +2547,9 @@ function makeView(i) {
   } else {
     v.setSize(e.size);
     v.ring.material.color.set(e.boss ? 0xff3020 : 0xb03a2a);
-    v.addHpBar(e.boss ? 0xff6a30 : 0xe0452f);
+    if (!e.boss) v.addHpBar(0xe0452f);          // les boss ont leur grande barre en haut de l'écran
+    // le colosse : un automate géant coulé dans le bronze
+    if (e.foe === 'colosse') for (const m of v.mats) m.color.setRGB(1.3, 0.82, 0.42);
   }
   return v;
 }
@@ -2511,6 +2625,90 @@ function dungeonSync() {
     }
   });
   rewardSync();
+  bossTele();
+}
+
+// ---------- Colosse : zones dangereuses au sol (déduites de l'état de la simulation) ----------
+// saut : disque rouge sur la zone d'impact, qui se remplit jusqu'à la retombée ;
+// charge : couloir fléché dans la direction de la charge, pendant qu'il gratte le sol
+const tele = (() => {
+  const mat = (c, o) => new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o, depthWrite: false, toneMapped: false });
+  const disk = new THREE.Mesh(new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2), mat(0xff3a10, 0.22));
+  const fill = new THREE.Mesh(new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2), mat(0xffa040, 0.42));
+  const edge = new THREE.Mesh(new THREE.RingGeometry(0.93, 1, 64).rotateX(-Math.PI / 2), mat(0xffb04a, 0.9));
+  // chevrons dessinés une fois sur une texture qui défile
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = 'rgba(255,60,20,0.35)'; x.fillRect(0, 0, 64, 64);
+  x.strokeStyle = 'rgba(255,200,90,0.95)'; x.lineWidth = 9; x.lineJoin = 'round';
+  x.beginPath(); x.moveTo(10, 22); x.lineTo(32, 44); x.lineTo(54, 22); x.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  const laneMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false });
+  const lane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2).translate(0, 0, 0.5), laneMat);
+  for (const m of [disk, fill, edge, lane]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
+  return { disk, fill, edge, lane, tex };
+})();
+function bossTele() {
+  const e = sim.f.find((o) => o.sp && o.state !== 'dead' && o.team === 1);
+  const slam = e?.sp === 'slam' && e.spA < 2, charge = e?.sp === 'charge' && e.spA === 0;
+  tele.disk.visible = tele.fill.visible = tele.edge.visible = slam;
+  tele.lane.visible = charge;
+  if (slam) {
+    const S = BOSS.slam, R = e.rage ? S.Rrage : S.R, wind = e.rage ? S.windRage : S.wind;
+    const k = e.spA === 0 ? e.spT / (wind + 2 * S.vy / 24) : (wind + e.spT) / (wind + 2 * S.vy / 24);
+    const y = sim.groundY({ x: e.spX, z: e.spZ }) + 0.04;
+    for (const m of [tele.disk, tele.fill, tele.edge]) m.position.set(e.spX, y, e.spZ);
+    tele.disk.scale.setScalar(R);
+    tele.edge.scale.setScalar(R);
+    tele.fill.scale.setScalar(Math.max(0.01, R * Math.min(1, k)));
+    tele.edge.material.opacity = 0.6 + 0.4 * Math.sin(clockT * 20);
+  }
+  if (charge) {
+    // jusqu'au mur, dans la direction (figée en fin de préparation)
+    const R = ROOM_R - 0.45, tx = e.spX ? ((e.spX > 0 ? R : -R) - e.x) / e.spX : 1e9, tz = e.spZ ? ((e.spZ > 0 ? R : -R) - e.z) / e.spZ : 1e9;
+    const len = Math.max(0.5, Math.min(tx, tz)), w = 2 * BOSS.charge.hitR * (e.size + 1);
+    tele.lane.position.set(e.x, e.y + 0.05, e.z);
+    tele.lane.rotation.y = Math.atan2(e.spX, e.spZ);
+    tele.lane.scale.set(w, 1, len);
+    tele.tex.repeat.set(1, len / w);
+    tele.tex.offset.y = -clockT * 2.2;
+    tele.lane.material.opacity = 0.55 + 0.35 * Math.sin(clockT * 18);
+  }
+}
+
+// ---------- Barre de vie du boss (en haut de l'écran) ----------
+const bossUi = { id: -1, room: -1, hp: 0, gone: false, rage: false };
+function bossHud() {
+  const g = sim.g, e = g.room > 0 && sim.room.boss ? sim.f.find((o) => o.boss && o.team === 1) : null;
+  const bar = $('bossBar');
+  if (!e || g.phase === 'menu') { if (bossUi.id >= 0) { bossUi.id = -1; bar.className = 'hidden'; } return; }
+  if (bossUi.id !== e.idx || bossUi.room !== g.room) {
+    // nouvelle salle de boss : la barre arrive
+    Object.assign(bossUi, { id: e.idx, room: g.room, hp: e.hp, gone: false, rage: false });
+    $('bbName').textContent = FOES[e.foe].name;
+    $('bbSub').textContent = e.foe === 'colosse' ? `Gardien d'airain · salle ${g.room}` : `Seigneur de guerre · salle ${g.room}`;
+    $('bbMark').classList.toggle('hidden', e.sp === undefined);
+    bar.className = '';
+    void bar.offsetWidth;
+    bar.className = 'enter';
+  }
+  const k = Math.max(0, e.hp / e.maxHp) * 100;
+  setW('bbFill', k);
+  setW('bbTrail', k);
+  setTxt('bbHp', `${Math.ceil(Math.max(0, e.hp))} / ${e.maxHp}`);
+  if (e.hp < bossUi.hp) {
+    // secousse à chaque coup
+    bar.classList.remove('hit');
+    void bar.offsetWidth;
+    bar.classList.add('hit');
+  }
+  bossUi.hp = e.hp;
+  const rage = !!e.rage;
+  if (rage !== bossUi.rage) { bossUi.rage = rage; bar.classList.toggle('rage', rage); }
+  const gone = e.state === 'dead';
+  if (gone !== bossUi.gone) { bossUi.gone = gone; bar.classList.toggle('gone', gone); }
 }
 
 // salle vide derrière le menu
@@ -2635,18 +2833,24 @@ function rewardSync() {
 
 const uiTxt = {};
 function setTxt(id, v) { if (uiTxt[id] !== v) { uiTxt[id] = v; $(id).textContent = v; } }
+// largeur (en %) et classe d'un élément du HUD, écrites seulement quand elles changent (à chaque image sinon,
+// le navigateur recalcule les styles de la page pour rien)
+const uiW = {}, uiC = {};
+function setW(id, pct) { const v = Math.round(pct * 10) / 10; if (uiW[id] !== v) { uiW[id] = v; $(id).style.width = v + '%'; } }
+function setCls(id, cls, on) { const k = id + '.' + cls; if (uiC[k] !== on) { uiC[k] = on; $(id).classList.toggle(cls, on); } }
 function dungeonHud() {
   const g = sim.g;
+  bossHud();
   sim.heroes.forEach((p, i) => {
     const n = i + 1, hp = Math.max(0, p.hp / p.maxHp * 100);
-    $('h' + n).style.width = hp + '%';
-    $('h' + n).classList.toggle('low', hp < 30);
-    $('t' + n).style.width = hp + '%';
-    $('g' + n).style.width = Math.max(0, p.guard) + '%';
-    $('g' + n).classList.toggle('low', p.guard < 30);
-    $('s' + n).style.width = Math.max(0, p.sta) + '%';
-    $('s' + n).classList.toggle('low', p.sta < STA.tired);
-    $('s' + n).classList.toggle('fail', p.staFail > 0);
+    setW('h' + n, hp);
+    setCls('h' + n, 'low', hp < 30);
+    setW('t' + n, hp);
+    setW('g' + n, Math.max(0, p.guard));
+    setCls('g' + n, 'low', p.guard < 30);
+    setW('s' + n, Math.max(0, p.sta));
+    setCls('s' + n, 'low', p.sta < STA.tired);
+    setCls('s' + n, 'fail', p.staFail > 0);
     const who = g.np > 1 ? `J${n} · ` : '';
     const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
     setTxt('n' + n, who + what + ' · ' + (p.state === 'dead' ? 'À TERRE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`));
@@ -2714,7 +2918,7 @@ function refreshMenu() {
   if (dg) {
     const rec = dungeonRecord();
     $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
-      `<div class="row" style="margin-top:8px"><b>Donjon :</b> tout commence dans la <b>salle d'armes</b> : marche sur la dalle devant une statue pour prendre ce héros (chacun a un petit talent), va voir le <b>vieux marchand</b> pour choisir ton arme (glaive, lance, pavois, hache, marteau, sceptre de feu, grimoire ou arc), puis passe la porte. Traverse ensuite les salles une à une. Élimine tous les ennemis pour ouvrir la porte du fond, ouvre le <b>coffre</b> pour choisir une bénédiction (soin, force, vitalité…), puis franchis la porte. Plus bas, des <b>estrades</b> (monte par l'escalier ou en sautant : d'en haut, on frappe sans être touché au sol) et des <b>pièges à pics</b> (la poussière annonce leur sortie). Un <b>chef orc</b> garde chaque 5<sup>e</sup> salle. Tu te tournes tout seul vers l'ennemi le plus proche · <b>À deux</b> : un héros tombé se relève à la salle suivante, la partie s'arrête quand les deux tombent · Échap = pause` +
+      `<div class="row" style="margin-top:8px"><b>Donjon :</b> tout commence dans la <b>salle d'armes</b> : marche sur la dalle devant une statue pour prendre ce héros (chacun a un petit talent), va voir le <b>vieux marchand</b> pour choisir ton arme (glaive, lance, pavois, hache, marteau, sceptre de feu, grimoire ou arc), puis passe la porte. Traverse ensuite les salles une à une. Élimine tous les ennemis pour ouvrir la porte du fond, ouvre le <b>coffre</b> pour choisir une bénédiction (soin, force, vitalité…), puis franchis la porte. Plus bas, des <b>estrades</b> (monte par l'escalier ou en sautant : d'en haut, on frappe sans être touché au sol) et des <b>pièges à pics</b> (la poussière annonce leur sortie). Un <b>boss</b> garde chaque 5<sup>e</sup> salle : le <b>chef orc</b>, puis le <b>colosse d'airain</b> (son sol rougit avant qu'il retombe : saute ou roule ; s'il charge contre un mur, il reste sonné). Tu te tournes tout seul vers l'ennemi le plus proche · <b>À deux</b> : un héros tombé se relève à la salle suivante, la partie s'arrête quand les deux tombent · Échap = pause` +
       (rec ? `<br><b>Record :</b> salle ${rec}` : '') + '</div>';
     return;
   }
@@ -2965,6 +3169,8 @@ async function boot() {
       G[k] = g;
       // pièces lumineuses des décors (cristaux, lave, lanternes) : couleur de la palette, sans ombrage
       g.scene.traverse((o) => { if (o.isMesh && o.name.startsWith('glow')) o.material = new THREE.MeshBasicMaterial({ map: o.material.map, toneMapped: false }); });
+      // modèles chargés : partagés par toutes les copies, jamais libérés
+      g.scene.traverse((o) => { if (o.geometry) keep(o.geometry); if (o.material) for (const m of [].concat(o.material)) { keep(m); const t = new Set(); texturesOf(m, t); keep([...t]); } });
       $('lp').style.width = (++done / keys.length * 100) + '%';
     })));
   } catch (err) {
@@ -2977,19 +3183,88 @@ async function boot() {
     return;
   }
   setupMenu();
+  setupDebug();
   buildArena(cfg.arena);
   game.loading = false;
   $('loading').classList.add('hidden');
   toMenu();
   if (new URLSearchParams(location.search).has('dungeon')) startDungeon();
   // ?debug : accès à la simulation depuis la console (tests dans le navigateur)
-  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; } };
+  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; }, renderer, scene, debugGoto: dbgGoto };
   else if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
   const warm = +new URLSearchParams(location.search).get('sim');
   for (let i = 0; i < warm * 60; i++) step(DT);
 }
 requestAnimationFrame(frame);
 boot();
+
+// =====================================================================
+//  Outil de débogage du donjon (F2) : aller à une salle, tuer, soigner, invincibilité, faire apparaître
+//  des ennemis, déclencher les attaques du boss, téléporter le héros d'un clic. Hors ligne seulement :
+//  il modifie la simulation directement (en ligne, l'autre joueur ne le verrait pas).
+// =====================================================================
+const dbg = { open: false, god: false, tp: false };
+const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [-1, 'Salle suivante']];
+function setupDebug() {
+  $('dbgRooms').innerHTML = DBG_ROOMS.map(([n, t]) => `<button data-room="${n}">${esc(t)}</button>`).join('');
+  $('dbgFoes').innerHTML = Object.keys(FOES).filter((id) => id !== 'dog').map((id) => `<button data-foe="${id}">${esc(FOES[id].name)}</button>`).join('');
+  $('dbg').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button');
+    if (!b) return;
+    b.blur();      // sinon Espace (saut) rappuierait sur le bouton
+    if (b.dataset.room !== undefined) { const n = +b.dataset.room; dbgGoto(n < 0 ? sim.g.room + 1 : n); }
+    else if (b.dataset.foe) { if (!dbgSim()?.debugSpawn(b.dataset.foe)) dbgMsg('Apparition possible seulement pendant un combat.'); }
+    else if (b.dataset.boss) { if (!dbgSim()?.debugBoss(b.dataset.boss)) dbgMsg('Pas de colosse prêt dans cette salle.'); }
+    else if (b.id === 'dbgGo') dbgGoto(+$('dbgRoom').value || 0);
+    else if (b.id === 'dbgKill') dbgSim()?.debugKill();
+    else if (b.id === 'dbgHeal') dbgSim()?.debugHeal();
+    else if (b.id === 'dbgGod') { dbg.god = !dbg.god; dbgSim()?.debugGod(dbg.god); }
+    else if (b.id === 'dbgTp') dbg.tp = !dbg.tp;
+    dbgRefresh();
+  });
+  $('dbgRoom').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { dbgGoto(+$('dbgRoom').value || 0); $('dbgRoom').blur(); } });
+  // clic sur le sol : le héros y est téléporté
+  renderer.domElement.addEventListener('pointerdown', (ev) => {
+    const s = dbg.open && dbg.tp && dbgSim();
+    if (!s) return;
+    const ndc = new THREE.Vector2(ev.clientX / innerWidth * 2 - 1, -(ev.clientY / innerHeight) * 2 + 1);
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+    if (hit) { s.debugTp(localHeroes()[0] ?? 0, hit.x, hit.z); F[localHeroes()[0] ?? 0].snapPos = true; }
+  });
+}
+// la simulation du donjon, si l'outil peut y toucher
+function dbgSim() { return sim instanceof DungeonSim && !rb && !net.live && game.phase !== 'menu' ? sim : null; }
+function dbgMsg(t) { $('dbgInfo').textContent = t; dbg.msgT = 2.5; }
+function dbgGoto(n) {
+  const s = dbgSim();
+  if (!s) return;
+  s.debugGoto(n);
+  if (dbg.god) s.debugGod(true);
+  dng.room = -1;                  // reconstruire la salle, même si c'est la même
+  $('result').classList.add('hidden');
+  $('reward').classList.add('hidden');
+  $('help').classList.remove('hidden');
+  acc = 0;
+}
+function toggleDebug() {
+  dbg.open = !dbg.open;
+  $('dbg').classList.toggle('hidden', !dbg.open);
+  dbgRefresh();
+}
+function dbgRefresh() {
+  if (!dbg.open) return;
+  const s = dbgSim();
+  $('dbgGod').classList.toggle('on', dbg.god);
+  $('dbgTp').classList.toggle('on', dbg.tp);
+  $('dbg').classList.toggle('off', !s);
+  if (dbg.msgT > 0) return;
+  if (!s) { $('dbgInfo').textContent = net.live ? 'Indisponible en ligne.' : 'Lance une partie de donjon.'; return; }
+  const e = s.f.find((o) => o.boss && o.team === 1 && o.state !== 'dead');
+  $('dbgInfo').textContent = `salle ${s.g.room} · ${s.g.phase} · ${s.foesLeft} ennemi(s)` + (e ? ` · boss ${Math.ceil(e.hp)}/${e.maxHp}${e.sp ? ' · ' + e.sp : ''}` : '');
+}
+setInterval(() => { if (dbg.msgT > 0) dbg.msgT -= 0.25; dbgRefresh(); }, 250);
 
 // Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
 if (new URLSearchParams(location.search).has('debug')) {
