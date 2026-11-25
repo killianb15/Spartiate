@@ -6,7 +6,7 @@ const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, BOONS, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -26,7 +26,8 @@ const q2 = new THREE.Quaternion();
 
 // En ligne : les deux navigateurs font tourner la même simulation (sim.js) et s'échangent
 // leurs touches ; rollback.js corrige les prédictions. Voir net.js pour le transport.
-const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null };
+// hall : salon ouvert depuis la salle d'armes (listé sur le serveur) ; halls : salons des autres, à rejoindre
+const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [], hall: false, halls: [] };
 
 // =====================================================================
 //  Modèles
@@ -39,8 +40,9 @@ const FILES = {
   bow: 'assets/weapons/weapon-bow.glb',   // l'arc de l'archère, généré par tools/blender/archer.py
   spear: D + 'weapon-spear.glb', tower: D + 'shield-rectangle.glb',
   axe: 'assets/weapons/weapon-axe.glb', hammer: 'assets/weapons/weapon-hammer.glb',   // générés par tools/blender/weapons.py
-  staff: 'assets/weapons/weapon-staff.glb', tome: 'assets/weapons/weapon-tome.glb',
+  staff: 'assets/weapons/weapon-staff.glb', tome: 'assets/weapons/weapon-tome.glb', glove: 'assets/weapons/weapon-glove.glb',
   dog: 'assets/summons/dog.glb',   // chien invoqué par le grimoire, généré par tools/blender/dog.py
+  cerbere: 'assets/summons/cerbere.glb',   // boss à trois têtes, généré par tools/blender/cerbere.py
   merchant: 'assets/npc/merchant.glb', stall: 'assets/npc/stall.glb',   // marchand d'armes et son étal (tools/blender/merchant.py)
   soldier: A + 'character-soldier.glb', human: D + 'character-human.glb', orc: D + 'character-orc.glb',
   archer: AR + 'archer.glb', arrow: AR + 'arrow.glb',   // générés par tools/archer-asset.html
@@ -199,6 +201,8 @@ const sfx = {
   // colosse : retombée du saut, rugissement de rage, jet de vapeur avant la charge
   quake: () => { noise(1.1, { freq: 140, type: 'lowpass', vol: 1 }); tone(48, 0.9, { type: 'sawtooth', vol: 0.25, to: 22 }); noise(0.3, { freq: 900, type: 'lowpass', vol: 0.4 }); },
   roar: () => { tone(80, 1.3, { type: 'sawtooth', vol: 0.2, to: 55, attack: 0.15 }); tone(122, 1.1, { type: 'square', vol: 0.06, to: 70, attack: 0.15 }); noise(1.2, { freq: 420, q: 0.7, vol: 0.35, attack: 0.2 }); },
+  growl: () => { tone(70, 0.9, { type: 'sawtooth', vol: 0.16, to: 52, attack: 0.1 }); tone(105, 0.8, { type: 'sawtooth', vol: 0.1, to: 80, attack: 0.1, delay: 0.08 }); noise(0.8, { freq: 300, q: 0.8, vol: 0.25, attack: 0.15 }); },
+  flame: () => { noise(1.5, { freq: 700, to: 300, q: 0.6, vol: 0.4, attack: 0.08 }); noise(1.2, { freq: 2600, q: 0.7, vol: 0.12, attack: 0.1 }); tone(60, 0.8, { type: 'sawtooth', vol: 0.08 }); },
   steam: () => { noise(0.6, { freq: 4200, to: 2000, q: 0.8, vol: 0.16, attack: 0.05 }); tone(70, 0.35, { type: 'square', vol: 0.08 }); },
 };
 
@@ -1072,10 +1076,27 @@ function glowNode(obj, name, color) {
   if (n) n.traverse((o) => { if (o.isMesh) o.material = new THREE.MeshBasicMaterial({ color: color.clone(), toneMapped: false }); });
   return n;
 }
+// Gants de boxe (tools/blender/gloves.py) : le modèle est le gant gauche (jointures vers l'avant,
+// manchette vers le bas, pouce vers le milieu du corps) ; miroir (x → -x) pour la main droite.
+function gloveModel(right, s) {
+  const g = inst('glove', s);
+  if (right) g.scale.x = -s;
+  return g;
+}
 function equipModel(v, kind, wpn) {
   const builtIn = v.model.getObjectByName('bow');    // l'archère a son arc dans le modèle
   if (builtIn) builtIn.visible = wpn === 'bow';
-  v.sword = null;
+  v.sword = v.glove = null;
+  if (wpn === 'gloves') {
+    // un gant à chaque main, redressés à chaque image ; le gauche joue le rôle du bouclier (lueur au blocage)
+    v.shield = gloveModel(false, 1.05);
+    v.shield.position.set(0.28, 0, 0.03);
+    v.armL.add(v.shield);
+    v.glove = gloveModel(true, 1.05);
+    v.glove.position.set(-0.28, 0, 0.03);
+    v.armR.add(v.glove);
+    return;
+  }
   if (wpn === 'tome') {
     // grimoire dans la main gauche, tenu comme un bouclier (reste droit, brille à la parade)
     v.shield = inst('tome', 1.0);
@@ -1317,6 +1338,7 @@ class FighterView {
     this.armL.getWorldQuaternion(q1);
     this.model.getWorldQuaternion(q2);
     this.shield.quaternion.copy(q1.invert().multiply(q2));
+    if (this.glove) { this.armR.getWorldQuaternion(q1); this.glove.quaternion.copy(q1.invert().multiply(q2)); }
     if (this.sword) this.swing(sf);
 
     this.flash = Math.max(0, this.flash - dt * 4);
@@ -1338,21 +1360,47 @@ class FighterView {
 // ---------- Chien invoqué : pièces articulées animées ici (pas de squelette) ----------
 // Même interface que FighterView (capture, render, fx, dispose, setSize, addHpBar).
 const DOG_S = 1.6;            // même échelle que les personnages
+const hellGlow = new THREE.Color(1, 0.28, 0.08);    // yeux de Cerbère, pierre des chiens des enfers
+// flamme de Cerbère : cône ouvert, pointe sur la gueule, ouverture vers +z (longueur 1, mise à l'échelle)
+const jetGeo = new THREE.ConeGeometry(0.5, 1, 12, 1, true).translate(0, -0.5, 0).rotateX(-Math.PI / 2);
+const jetCoreGeo = new THREE.ConeGeometry(0.22, 0.75, 10, 1, true).translate(0, -0.375, 0).rotateX(-Math.PI / 2);
+const jetMat = new THREE.MeshBasicMaterial({ color: 0xff6a1c, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+const jetCoreMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, toneMapped: false });
+keep(jetGeo, jetCoreGeo, jetMat, jetCoreMat);
+// key : 'dog' (chien du grimoire, ou chien des enfers dans le camp ennemi) ou 'cerbere' (trois têtes,
+// tools/blender/cerbere.py) ; glow : couleur de la pierre du collier ou des yeux
 class DogView {
-  constructor(idx) {
+  constructor(idx, key = 'dog', glow = runeColor) {
     this.idx = idx;
-    this.kind = 'dog'; this.wpn = 'bite';
+    this.kind = key === 'cerbere' ? 'cerbere' : 'dog'; this.wpn = key === 'cerbere' ? 'fangs' : 'bite';
     this.root = new THREE.Group();
     scene.add(this.root);
-    this.model = inst('dog', DOG_S);
+    this.model = inst(key, DOG_S);
     this.root.add(this.model);
     const n = (k) => this.model.getObjectByName(k);
-    this.body = n('body'); this.head = n('head'); this.tail = n('tail');
+    this.body = n('body'); this.tail = n('tail');
+    this.heads = key === 'cerbere' ? ['head-l', 'head-c', 'head-r'].map(n) : [n('head')];
     this.legs = ['leg-fl', 'leg-br', 'leg-fr', 'leg-bl'].map(n);      // diagonales qui avancent ensemble
     this.bodyY = this.body.position.y;
     this.mats = [];
     this.model.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); this.mats.push(o.material); } });
-    this.gem = glowNode(this.model, 'glow', runeColor);
+    this.glowCol = glow;
+    if (key === 'cerbere') {
+      // gerbes de flammes (une par gueule) pendant le souffle de feu, tournées avec le corps
+      this.fireG = new THREE.Group();
+      this.root.add(this.fireG);
+      this.jets = [-0.32, 0, 0.32].map((a) => {
+        const j = new THREE.Group();
+        j.position.set(Math.sin(a) * 0.52, 0.42, Math.cos(a) * 0.52);
+        j.rotation.y = a;
+        j.add(new THREE.Mesh(jetGeo, jetMat), new THREE.Mesh(jetCoreGeo, jetCoreMat));
+        this.fireG.add(j);
+        return j;
+      });
+      this.fireG.visible = false;
+      this.fireK = 0;
+    }
+    this.gems = (key === 'cerbere' ? ['eyes-l', 'eyes-c', 'eyes-r'] : ['glow']).map((k) => glowNode(this.model, k, glow)).filter(Boolean);
     this.ring = new THREE.Mesh(ringFoot, new THREE.MeshBasicMaterial({ color: 0xa070ff, transparent: true, opacity: 0.6, depthWrite: false, toneMapped: false }));
     scene.add(this.ring);
     this.flash = 0; this.flinch = 0; this.vyaw = 0; this.phase = 0; this.spawn = 0; this.deadT = 0;
@@ -1380,9 +1428,9 @@ class DogView {
     this.spawn = Math.min(1, this.spawn + dt * 3.5);
     const grow = this.spawn < 1 ? Math.sin(this.spawn * Math.PI * 0.5) * (1 + 0.25 * Math.sin(this.spawn * Math.PI)) : 1;
     this.model.scale.setScalar(DOG_S * Math.max(0.01, grow));
-    // trot : vitesse au sol
-    const sp = Math.hypot(sf.vx, sf.vz);
-    const moving = (st === 'walk' || st === 'idle') && sp > 0.3;
+    // trot : vitesse au sol (Cerbère court aussi pendant sa charge)
+    const sp = Math.hypot(sf.vx, sf.vz), spc = st === 'special' ? sf.sp : '';
+    const moving = (st === 'walk' || st === 'idle' || (spc === 'charge' && sf.spA === 1)) && sp > 0.3;
     this.phase += dt * (moving ? 6 + sp * 2.2 : 0);
     const swing = moving ? Math.sin(this.phase) * Math.min(0.7, 0.25 + sp * 0.12) : 0;
     this.legs.forEach((l, k) => { l.rotation.x = (k < 2 ? swing : -swing); });
@@ -1400,6 +1448,11 @@ class DogView {
     else if (st === 'air') { this.legs.forEach((l, k) => { l.rotation.x = k < 2 ? -0.6 : 0.6; }); }
     else if (st === 'roll') roll = Math.min(1, t / (ROLL.dur * 0.85)) * TAU;
     else if (st === 'stun') roll = Math.sin(T * 9) * 0.15;
+    else if (spc === 'slam') {
+      // bond : tassé pour sauter, pattes tendues en l'air, aplati à l'atterrissage
+      if (sf.spA === 0) { bob = -0.05; pitch = -0.12; } else if (sf.spA === 1) this.legs.forEach((l, k) => { l.rotation.x = k < 2 ? -0.7 : 0.7; });
+      else bob = -0.04;
+    } else if (spc === 'charge' && sf.spA === 0) { pitch = 0.12; this.legs[0].rotation.x = Math.sin(T * 18) * 0.6; }   // il gratte le sol
     if (this.flinch > 0) { pitch -= 0.3 * this.flinch; this.flinch = Math.max(0, this.flinch - dt * 4); }
     // chute
     if (st === 'dead') {
@@ -1416,12 +1469,33 @@ class DogView {
     }
     this.body.position.y = this.bodyY + bob;
     this.body.position.z = lunge;
-    this.head.rotation.x = headX + (moving ? Math.sin(this.phase * 2) * 0.05 : Math.sin(T * 2) * 0.04);
+    // têtes : celle qui mord plonge (Cerbère : une tête par coup de l'enchaînement), les autres vivent leur vie ;
+    // souffle de feu : elles se dressent puis crachent ; rugissement : tête levée
+    const biter = this.heads.length > 1 ? (Math.max(1, sf.combo) - 1) % 3 : 0;
+    this.heads.forEach((h, k) => {
+      let x = (k === biter ? headX : headX * 0.25) + (moving ? Math.sin(this.phase * 2 + k) * 0.05 : Math.sin(T * 2 + k * 1.7) * 0.05);
+      if (spc === 'fire') x = sf.spA === 0 ? -0.5 : 0.18 + Math.sin(T * 30 + k) * 0.04;
+      else if (spc === 'roar') x = -0.7;
+      h.rotation.x = x;
+      if (this.heads.length > 1) h.rotation.y = Math.sin(T * 1.3 + k * 2.1) * 0.12;
+    });
     this.tail.rotation.z = Math.sin(T * (st === 'idle' || st === 'walk' ? 14 : 5)) * 0.5;
     this.root.position.set(this.rx, this.ry, this.rz);
     this.flash = Math.max(0, this.flash - dt * 4);
     for (const m of this.mats) if (m.emissive) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
-    if (this.gem) this.gem.traverse((o) => { if (o.isMesh) o.material.color.copy(runeColor).multiplyScalar(1 + 0.6 * Math.sin(T * 5)); });
+    if (this.fireG) {
+      const on = spc === 'fire' && sf.spA === 1;
+      this.fireK = on ? Math.min(1, this.fireK + dt * 7) : Math.max(0, this.fireK - dt * 5);
+      this.fireG.visible = this.fireK > 0.01;
+      this.fireG.rotation.y = this.vyaw;
+      this.jets.forEach((j, k) => {
+        const f = 1 + 0.12 * Math.sin(T * 40 + k * 2.3);
+        j.scale.set(f, f, this.fireK * (0.9 + 0.1 * Math.sin(T * 23 + k)) * BOSS.fire.R / FOES.cerbere.size);
+      });
+    }
+    // les yeux de Cerbère flambent quand il prépare une attaque ou qu'il est enragé
+    const hot = spc && sf.spA === 0 ? 2.2 + Math.sin(T * 28) : sf.rage ? 1.6 : 0;
+    for (const gm of this.gems) gm.traverse((o) => { if (o.isMesh) o.material.color.copy(this.glowCol).multiplyScalar(1 + hot + 0.6 * Math.sin(T * 5)); });
     if (this.hpBar) {
       this.hpBar.visible = st !== 'dead';
       this.hpBar.quaternion.copy(camera.quaternion);
@@ -1579,8 +1653,8 @@ addEventListener('keydown', (e) => {
     if (k) { e.preventDefault(); pickBoon(k[0], k[1]); }
     if (e.code !== 'Escape') return;
   }
-  // chez le marchand : touches 1 à 8 = prendre directement cette arme
-  const dg = /^Digit([1-8])$/.exec(e.code), sh = localShopper();
+  // chez le marchand : touches 1 à 9 = prendre directement cette arme
+  const dg = /^Digit([1-9])$/.exec(e.code), sh = localShopper();
   if (dg && sh >= 0 && !game.paused) { e.preventDefault(); shopReq[sh] = +dg[1] - 1; return; }
   if (bindings.has(e.code) || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   if (e.code === 'Escape') { togglePause(); return; }
@@ -1708,7 +1782,8 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   makeFighters(m.p1, m.p2);
   ai = m.mode === 'solo' ? new AI(sim, 1, +cfg.diff, seed ^ 0x9e3779b9) : null;
   ai0 = DEMO && !net.live ? new AI(sim, 0, 2, seed ^ 0x85ebca6b) : null;
-  const tags = { solo: [' (Toi)', ' (IA)'], duo: [' (J1)', ' (J2)'], online: net.me ? [' (Hôte)', ' (Toi)'] : [' (Toi)', ' (Invité)'] }[m.mode];
+  const tag = (i, other) => ` (${i === net.me ? myName() || 'Toi' : net.peerName || other})`;
+  const tags = { solo: [` (${myName() || 'Toi'})`, ' (IA)'], duo: [' (J1)', ' (J2)'], online: [tag(0, 'Hôte'), tag(1, 'Invité')] }[m.mode];
   $('n1').textContent = CHARS[m.p1] + tags[0];
   $('n2').textContent = CHARS[m.p2] + tags[1];
   $('fade').classList.remove('on');
@@ -1726,6 +1801,7 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
 }
 
 function endMatch() {
+  $('resDefis').innerHTML = '';
   if (match?.game === 'dungeon') { endDungeon(); return; }
   const [a, b] = game.wins;
   const n1 = CHARS[match.p1], n2 = CHARS[match.p2];
@@ -1744,7 +1820,8 @@ function endMatch() {
 
 // remote : c'est l'adversaire qui a quitté le combat, inutile de le prévenir
 function toMenu(remote = false) {
-  if (net.live && !remote) netSend({ t: 'menu' });
+  if (match?.game === 'dungeon' && !remote && net.ws) { if (net.live) netInfo('Partie en ligne quittée.'); netClose(); }
+  else if (net.live && !remote) netSend({ t: 'menu' });
   net.live = false;
   rb = null;
   sim.g.phase = 'menu';
@@ -1920,6 +1997,7 @@ function step(rdt) {
   const g = sim.g, alpha = Math.min(1, acc / DT);
   const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
   if (sim instanceof DungeonSim && game.phase !== 'menu') dungeonSync();
+  lobbySync();
   syncArrows(alpha);
   F.forEach((f, i) => sim.f[i] && f.render(sim.f[i], animDt, clockT, alpha));
   for (const u of updaters) u(rdt, clockT);
@@ -1985,8 +2063,10 @@ function wallLantern(x, z, ry, lightI) {
 }
 // au-delà des murs : jardin (ruines) ou champ de lave (forge). On voit surtout les côtés bas (+x, +z) ;
 // derrière les murs du fond, seulement ce qui dépasse (arbres), au-delà du couloir de la sortie.
-function outsideDecor(kind, D) {
+function outsideDecor(kind, D, exit = 'z') {
   const far = D + TILE * 3;
+  // couloir derrière la porte de sortie (mur -z ou -x) : on n'y met rien
+  const corridor = (x, z) => (exit === 'z' ? Math.abs(x) < TILE * 1.6 && z < -D + 0.2 : Math.abs(z) < TILE * 1.6 && x < -D + 0.2);
   const out = (x, z) => Math.max(Math.abs(x), Math.abs(z)) > D + 0.2;
   const seen = (x, z) => (x > D + 0.2 || z > D + 0.2) || Math.min(x, z) < -far;     // côtés bas, ou derrière le couloir
   if (kind === 'lava') {
@@ -2011,6 +2091,66 @@ function outsideDecor(kind, D) {
       const a = rand(0, 1) < 0.5, u = rand(D + TILE * 1.6, D + TILE * 4.5), v = rand(-D, D + TILE * 4);
       emit(a ? u : v, 0.0, a ? v : u, 3, { color: [0xff9a2e, 0xffe27a], speed: 0.6, up: 2.2, size: 0.06, life: 0.6, grav: 6 });
     });
+  } else if (kind === 'meadow') {
+    // prairie : herbe et fleurs au pied des murs (deux rangées de dalles : ~500 triangles chacune), puis
+    // le sol vert et des touffes instanciées ; arbres, buissons et rochers, collines au loin
+    const R = D + TILE * 2;
+    for (let x = -R; x <= R + 0.01; x += TILE)
+      for (let z = -R; z <= R + 0.01; z += TILE) {
+        if (!out(x, z) || corridor(x, z)) continue;
+        PT(Math.random() < 0.2 ? 'b_grass-floor-flowers' : 'b_grass-floor', x, 0, z, rot4());
+      }
+    let trees = 0;
+    const spot = (r0, r1) => {
+      for (let tries = 0; tries < 20; tries++) {
+        const x = rand(-r1, r1), z = rand(-r1, r1), m = Math.max(Math.abs(x), Math.abs(z));
+        if (m > r0 && !corridor(x, z) && !(exit === 'z' ? Math.abs(x) < 3 && z < -D : Math.abs(z) < 3 && x < -D)) return [x, z];
+      }
+      return null;
+    };
+    for (let i = 0; i < 40 && trees < 26; i++) {
+      const p = spot(D + 1.8, D + 12);
+      if (!p || !seen(p[0], p[1])) continue;
+      trees++;
+      sway(P('a_tree', p[0], 0, p[1], rand(0, TAU), S * rand(1.0, 1.7)), 0.03, rand(1, 1.6));
+    }
+    for (let i = 0; i < 16; i++) { const p = spot(D + 0.9, D + 9); if (p) P('b_bush', p[0], 0, p[1], rand(0, TAU), S * rand(0.8, 1.35)); }
+    for (let i = 0; i < 8; i++) { const p = spot(D + 1.2, D + 9); if (p) P('d_rocks', p[0], 0, p[1], rand(0, TAU), S * rand(0.7, 1.1)); }
+    const hillMat = new THREE.MeshStandardMaterial({ color: 0x5f8a4a, flatShading: true, roughness: 1 });
+    for (let i = 0; i < 16; i++) {
+      const a = i / 16 * TAU + rand(-0.1, 0.1), r = rand(30, 40);
+      const h = new THREE.Mesh(new THREE.ConeGeometry(rand(7, 11), rand(4, 9), 5), hillMat);
+      h.position.set(Math.sin(a) * r, 0, Math.cos(a) * r);
+      world.add(h);
+    }
+    // touffes d'herbe qui ondulent (une seule forme instanciée)
+    const NT = 900, tufts = [];
+    const tuft = new THREE.InstancedMesh(new THREE.ConeGeometry(0.05, 0.28, 4), new THREE.MeshStandardMaterial({ color: 0x7fa64a }), NT);
+    for (let i = 0; i < NT; i++) { const p = spot(D + 0.3, D + 14) ?? [D + 2, D + 2]; tufts.push([p[0], p[1], rand(0, 6)]); }
+    world.add(tuft);
+    updaters.push((dt, t) => {
+      tufts.forEach(([x, z, ph], i) => {
+        dummy.position.set(x, 0.12, z);
+        dummy.rotation.set(0, ph, Math.sin(t * 2 + ph + x * 0.3) * 0.25);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        tuft.setMatrixAt(i, dummy.matrix);
+      });
+      tuft.instanceMatrix.needsUpdate = true;
+    });
+    // fleurs des prés (immobiles, une forme instanciée, couleurs variées)
+    const NF = 260, flowers = new THREE.InstancedMesh(new THREE.OctahedronGeometry(0.07, 0), new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.8 }), NF);
+    const fc = [0xfff1a0, 0xffffff, 0xff9ac8, 0xc8a0ff, 0xffc04a].map((c) => new THREE.Color(c));
+    for (let i = 0; i < NF; i++) {
+      const p = spot(D + 0.4, D + 12) ?? [D + 2, D + 2];
+      dummy.position.set(p[0], 0.1, p[1]);
+      dummy.rotation.set(0, rand(0, TAU), 0);
+      dummy.scale.setScalar(rand(0.7, 1.3));
+      dummy.updateMatrix();
+      flowers.setMatrixAt(i, dummy.matrix);
+      flowers.setColorAt(i, fc[(Math.random() * fc.length) | 0]);
+    }
+    world.add(flowers);
   } else if (kind === 'garden') {
     for (let i = 0; i < 26; i++) {
       const x = rand(-D - 8, D + 8), z = rand(-D - 8, D + 8);
@@ -2020,6 +2160,21 @@ function outsideDecor(kind, D) {
       else if (r < 0.85) P('b_bush', x, 0, z, rand(0, TAU), S * rand(0.8, 1.3));
       else P('a_columnD', x, 0, z, rot4(), S * rand(0.9, 1.2));
     }
+  }
+}
+// antre de Cerbère : flammes aux quatre colonnes, brasiers dans les coins, ossements au sol
+function lairDecor() {
+  for (const [x, z] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) fire(world, x, 1.55, z, 0.8, 4);
+  for (const [x, z] of [[5.6, 5.6]]) brazier(x, z, 'a_columnD', 1.1, 6);
+  const bone = new THREE.MeshStandardMaterial({ color: 0xd8cdb0, roughness: 0.9 });
+  const shaft = new THREE.CylinderGeometry(0.035, 0.035, 0.42, 6).rotateZ(Math.PI / 2), knob = new THREE.SphereGeometry(0.06, 6, 4);
+  for (let i = 0; i < 14; i++) {
+    const a = rand(0, TAU), r = rand(4.2, 6.2), g = new THREE.Group();
+    g.add(new THREE.Mesh(shaft, bone));
+    for (const s of [-1, 1]) for (const d of [-0.04, 0.04]) { const k = new THREE.Mesh(knob, bone); k.position.set(s * 0.21, 0, d); g.add(k); }
+    g.position.set(Math.sin(a) * r, 0.05, Math.cos(a) * r);
+    g.rotation.y = rand(0, TAU);
+    world.add(g);
   }
 }
 // ---------- Biomes (un par tranche de 5 salles, voir biomeOf dans dungeon.js) ----------
@@ -2061,6 +2216,19 @@ const BIOME = {
     motes: { color: 0xff8a3a, up: 0.45, size: 0.06 }, glowObs: { rocks: 0xff6a2a, column: 0xff6a2a }, outside: 'lava',
   },
 };
+// salle d'armes : murs des cryptes, mais en plein air, au milieu d'une prairie (verdure au-delà des murs)
+BIOME.hub = {
+  ...BIOME.crypt, name: "LA SALLE D'ARMES",
+  skyTex: [[0, '#4f93dc'], [0.6, '#a9d3ef'], [1, '#efe6c6']], skyTexEnd: [[0, '#4f93dc'], [0.6, '#a9d3ef'], [1, '#efe6c6']],
+  bg: [0xefe6c6, 0xefe6c6], sky: [0xfff4e0, 0xfff4e0], gnd: [0x5a7040, 0x5a7040], hi: [1.45, 1.45], sun: [0xfff0d0, 0xfff0d0], si: [2.1, 2.1],
+  ground: [0x5e8a48, 0x5e8a48], fog: [36, 90], lantern: 0.5, motes: { color: 0xe8f0a0, up: 0.03, size: 0.04 }, outside: 'meadow',
+};
+// antre de Cerbère (salle dédiée, room.lair) : basalte, lave tout autour, lueurs rouges
+BIOME.lair = {
+  ...BIOME.forge, name: "L'ANTRE DE CERBÈRE",
+  bg: [0x1a0404, 0x1a0404], sky: [0xff7050, 0xff7050], gnd: [0x701008, 0x701008], hi: [0.9, 0.9], sun: [0xff6040, 0xff6040], si: [1.0, 1.0],
+  ground: [0x0e0302, 0x0e0302], fog: [20, 40], lantern: 0.9, motes: { color: 0xff5a20, up: 0.6, size: 0.07 },
+};
 const rot4 = () => ((Math.random() * 4) | 0) * Math.PI / 2;
 
 // n : numéro de la salle. Chaque biome s'assombrit un peu au fil de sa tranche ; salle du boss en rouge.
@@ -2073,8 +2241,8 @@ function buildDungeonRoom(room, n) {
   curArena = 'dungeon';
   Object.assign(dng, { gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] });
   const boss = room.boss;
-  const B = BIOME[biomeOf(n)];
-  dng.biome = biomeOf(n);
+  dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : biomeOf(n);
+  const B = BIOME[dng.biome];
   const k = clamp(((Math.max(n, 1) - 1) % 5) / 4, 0, 1) * (boss ? 1 : 0.85);   // 0 : début de la tranche … 1 : salle du boss
   const red = boss ? 0.45 : 0;                                                   // teinte rouge de la salle du boss
   const col = ([a, b], tint) => new THREE.Color(a).lerp(new THREE.Color(b), k).lerp(new THREE.Color(tint ?? 0x000000), tint === undefined ? 0 : red);
@@ -2156,7 +2324,7 @@ function buildDungeonRoom(room, n) {
   piece(B.wall, D, -D, 0);
   piece(B.wall, -D, D, 0);
   piece(B.low, D, D, 0);
-  if (B.outside) outsideDecor(B.outside, D);
+  if (B.outside) outsideDecor(B.outside, D, room.exit);
 
   // estrades (blocs surmontés de dalles) et escaliers
   for (const s of room.surf) {
@@ -2192,6 +2360,7 @@ function buildDungeonRoom(room, n) {
     if (glow) { const l = new THREE.PointLight(glow, 2.5, 4, 1.6); l.position.set(o.x, 0.9, o.z); world.add(l); }
   }
   if (boss) for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) brazier(x, z, B.brazier, B.brazier === 'd_barrel' ? 1.3 : 1.1, 6);
+  if (room.lair) lairDecor();
   if (room.hub) buildHub(room);
 
   // pièges à pics : l'animation suit l'état des pics dans la simulation
@@ -2290,9 +2459,12 @@ const padGeo = new THREE.CircleGeometry(PAD_R, 32).rotateX(-Math.PI / 2);
 const padRing = new THREE.RingGeometry(PAD_R - 0.06, PAD_R, 40).rotateX(-Math.PI / 2);
 keep(padGeo, padRing);
 function buildHub(room) {
+  // héros verrouillés pour le joueur de cette machine : statue grise et figée, dalle éteinte
+  const me = localHeroes()[0] ?? 0;
+  const lockedFor = (id) => sim instanceof DungeonSim && !sim.canPick(me, id);
   const pads = room.pads.map((pd) => {
-    const hero = pd.t === 'hero';
-    const col = hero ? 0xffc04a : 0x6fc3ff;
+    const hero = pd.t === 'hero', locked = hero && lockedFor(pd.id);
+    const col = locked ? 0x8a8a90 : hero ? 0xffc04a : 0x6fc3ff;
     // dalle lumineuse
     const disc = new THREE.Mesh(padGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.18, depthWrite: false, toneMapped: false }));
     disc.position.set(pd.x, 0.012, pd.z);
@@ -2305,6 +2477,8 @@ function buildHub(room) {
     const base = P('d_wall', st.x, 0, st.z, 0, 0.62);
     base.scale.y = 0.2;
     const show = inst(pd.id, 1.6);
+    // verrouillé : statue de pierre (gris uni, sans la palette)
+    if (locked) show.traverse((o) => { if (o.isMesh) { o.material = o.material.clone(); o.material.map = null; o.material.color.setHex(0x8a8580); } });
     show.position.set(st.x, 0.25, st.z);
     show.rotation.y = Math.PI / 2;
     const bow = show.getObjectByName('bow');
@@ -2316,8 +2490,9 @@ function buildHub(room) {
     const clip = clipOf(pd.id, 'emote-yes');
     let yes = null;
     if (clip) { yes = mixer.clipAction(clip); yes.setLoop(THREE.LoopOnce, 1); }
-    label(HEROES[pd.id].name, HEROES[pd.id].desc, st.x + 0.2, 2.15, st.z, 1.25);
-    return { pd, disc, rim, show, mixer, yes, sel: false };
+    const prev = HEROES[HERO_IDS[HERO_IDS.indexOf(pd.id) - 1]];
+    label((locked ? '🔒 ' : '') + HEROES[pd.id].name, locked ? `Défi du ${prev?.name ?? ''} requis` : HEROES[pd.id].desc, st.x + 0.2, 2.15, st.z, 1.25);
+    return { pd, disc, rim, show, mixer: locked ? null : mixer, yes, sel: false, locked };
   });
   buildMerchant();
   // tapis au centre de la salle
@@ -2340,8 +2515,8 @@ function buildHub(room) {
       if (sel && !p.sel && p.yes) p.yes.reset().play();
       p.sel = sel;
       // la dalle du marchand pulse doucement pour attirer l'œil
-      p.disc.material.opacity = sel ? 0.45 + 0.12 * Math.sin(t * 4) : p.pd.t === 'shop' ? 0.2 + 0.1 * Math.sin(t * 2.5) : 0.14;
-      p.rim.material.opacity = sel ? 1 : 0.55;
+      p.disc.material.opacity = sel ? 0.45 + 0.12 * Math.sin(t * 4) : p.pd.t === 'shop' ? 0.2 + 0.1 * Math.sin(t * 2.5) : p.locked ? 0.06 : 0.14;
+      p.rim.material.opacity = sel ? 1 : p.locked ? 0.3 : 0.55;
       if (p.mixer) p.mixer.update(dt);
     }
   });
@@ -2360,10 +2535,11 @@ const SHOP_LINES = {
   hammer: 'Le marteau : un seul coup, mais quel coup !',
   staff: 'Le sceptre de feu… attention à ma barbe !',
   tome: 'Ce grimoire appelle des chiens fidèles. Ouaf !',
+  gloves: 'Des gants de boxe ! Tu prendras des coups, mais tu tiendras debout.',
   bow: 'Un arc, pour frapper de loin. Malin, ça.',
 };
-const SHOP_SHORT = { sword: 'Glaive', spear: 'Lance', tower: 'Pavois', axe: 'Hache', hammer: 'Marteau', staff: 'Sceptre', tome: 'Grimoire', bow: 'Arc' };
-const shopReq = [-1, -1];            // arme choisie à l'écran (clic, touches 1 à 8), envoyée comme entrée
+const SHOP_SHORT = { sword: 'Glaive', spear: 'Lance', tower: 'Pavois', axe: 'Hache', hammer: 'Marteau', staff: 'Sceptre', tome: 'Grimoire', gloves: 'Gants', bow: 'Arc' };
+const shopReq = [-1, -1];            // arme choisie à l'écran (clic, touches 1 à 9), envoyée comme entrée
 const shopUi = { key: '', say: '', sayT: 0, last: [{ shop: 0, wpn: '' }, { shop: 0, wpn: '' }] };
 // héros joué sur cette machine qui est dans la boutique (-1 sinon) : la caméra se place derrière lui
 function localShopper() {
@@ -2374,6 +2550,10 @@ function say(text, dur) { shopUi.say = text; shopUi.sayT = dur; }
 // arme seule, telle qu'exposée au-dessus du comptoir
 function weaponShow(id) {
   const g = new THREE.Group();
+  if (id === 'gloves') {
+    for (const r of [false, true]) { const gl = gloveModel(r, 1.5); gl.position.set(r ? -0.13 : 0.13, 0.05, 0); g.add(gl); }
+    return g;
+  }
   const key = { spear: 'spear', axe: 'axe', hammer: 'hammer', staff: 'staff', tome: 'tome' }[id] ?? 'sword';
   const main = id === 'bow' ? bowGroup() : inst(key, id === 'spear' ? 1.6 : 1.3);
   if (id === 'bow') { main.getObjectByName('nocked').visible = true; main.scale.setScalar(1.5); }
@@ -2533,10 +2713,19 @@ function dungeonViews() {
 // vue du combattant i du donjon : héros, ennemi ou chien invoqué
 function makeView(i) {
   const e = sim.f[i], np = sim.g.np;
-  if (e.kind === 'dog') {
-    const v = new DogView(i);
+  if (e.kind === 'cerbere') {
+    const v = new DogView(i, 'cerbere', hellGlow);
     v.setSize(e.size);
-    v.addHpBar(0xb98aff);
+    v.ring.material.color.set(0xff3020);      // pas de petite barre : grande barre de boss en haut
+    return v;
+  }
+  if (e.kind === 'dog') {
+    // chien du grimoire (violet), ou chien des enfers (pelage brûlé, yeux rouges) dans le camp ennemi
+    const hell = e.team === 1;
+    const v = new DogView(i, 'dog', hell ? hellGlow : runeColor);
+    v.setSize(e.size);
+    if (hell) { for (const m of v.mats) m.color.setRGB(0.85, 0.42, 0.36); v.ring.material.color.set(0xe0452f); }
+    v.addHpBar(hell ? 0xe0452f : 0xb98aff);
     v.hpBar.position.y = 1.05;
     return v;
   }
@@ -2586,13 +2775,16 @@ function saveHeroes() {
 
 // la salle affichée rattrape celle de la simulation
 function dungeonRoom() {
-  if (dng.room === 0 && sim.g.room === 1) saveHeroes();
+  if (dng.room === 0 && sim.g.room === 1) {
+    saveHeroes();
+    if (!net.live && net.ws) netClose();   // on ne se rejoint que dans la salle d'armes
+  }
   buildDungeonRoom(sim.room, sim.g.room);
   // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
   const n = sim.g.room;
-  if (n > 1 && dng.room >= 0 && biomeOf(n) !== biomeOf(n - 1)) {
+  if (n > 1 && dng.room >= 0 && (sim.room.lair || biomeOf(n) !== biomeOf(n - 1))) {
     const b = $('biome');
-    b.textContent = BIOME[biomeOf(n)].name;
+    b.textContent = BIOME[sim.room.lair ? 'lair' : biomeOf(n)].name;
     b.className = '';
     void b.offsetWidth;
     b.className = 'show';
@@ -2647,14 +2839,24 @@ const tele = (() => {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   const laneMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false });
   const lane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2).translate(0, 0, 0.5), laneMat);
-  for (const m of [disk, fill, edge, lane]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
-  return { disk, fill, edge, lane, tex };
+  // cône du souffle de feu (centré sur +z avant rotation, rayon 1)
+  const cone = new THREE.Mesh(new THREE.CircleGeometry(1, 32, -Math.PI / 2 - BOSS.fire.half, 2 * BOSS.fire.half).rotateX(-Math.PI / 2), mat(0xffb030, 0.4));
+  for (const m of [disk, fill, edge, lane, cone]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
+  return { disk, fill, edge, lane, tex, cone };
 })();
 function bossTele() {
   const e = sim.f.find((o) => o.sp && o.state !== 'dead' && o.team === 1);
   const slam = e?.sp === 'slam' && e.spA < 2, charge = e?.sp === 'charge' && e.spA === 0;
   tele.disk.visible = tele.fill.visible = tele.edge.visible = slam;
   tele.lane.visible = charge;
+  tele.cone.visible = e?.sp === 'fire';
+  if (tele.cone.visible) {
+    // préparation : le cône clignote ; pendant le souffle : il vacille comme une flamme
+    tele.cone.position.set(e.x, e.y + 0.05, e.z);
+    tele.cone.rotation.y = e.yaw;
+    tele.cone.scale.setScalar(BOSS.fire.R * (e.size / FOES.cerbere.size));
+    tele.cone.material.opacity = e.spA === 0 ? 0.4 + 0.25 * Math.sin(clockT * 20) : 0.3 + 0.08 * Math.sin(clockT * 37);
+  }
   if (slam) {
     const S = BOSS.slam, R = e.rage ? S.Rrage : S.R, wind = e.rage ? S.windRage : S.wind;
     const k = e.spA === 0 ? e.spT / (wind + 2 * S.vy / 24) : (wind + e.spT) / (wind + 2 * S.vy / 24);
@@ -2688,7 +2890,7 @@ function bossHud() {
     // nouvelle salle de boss : la barre arrive
     Object.assign(bossUi, { id: e.idx, room: g.room, hp: e.hp, gone: false, rage: false });
     $('bbName').textContent = FOES[e.foe].name;
-    $('bbSub').textContent = e.foe === 'colosse' ? `Gardien d'airain · salle ${g.room}` : `Seigneur de guerre · salle ${g.room}`;
+    $('bbSub').textContent = `${{ colosse: "Gardien d'airain", cerbere: 'Gardien des enfers' }[e.foe] ?? 'Seigneur de guerre'} · salle ${g.room}`;
     $('bbMark').classList.toggle('hidden', e.sp === undefined);
     bar.className = '';
     void bar.offsetWidth;
@@ -2741,7 +2943,10 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   $('againBtn').textContent = 'Recommencer';
   setupBindings(m.mode, net.live ? net.me : 0);
   const seed = (m.seed ?? Math.random() * 4294967296) >>> 0;
-  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2]);
+  // héros débloqués : en ligne, ceux de chaque joueur ; à deux sur un clavier, ceux du compte connecté
+  const mine = unlockedHeroes();
+  const unlocks = m.mode === 'online' ? [cleanUnlocked(m.u1), cleanUnlocked(m.u2)] : [mine, mine];
+  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np));
   F.forEach((v) => v.dispose());
   F = [];
   ai = ai0 = null;
@@ -2763,6 +2968,8 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
 
 function endDungeon() {
   const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
+  const me = sim.f[localHeroes()[0] ?? 0];     // à deux sur un clavier : le compte suit le joueur 1
+  accountRun(g.room, me.kills, me.kind, me.wpn);
   const guest = net.live && net.role === 'guest';
   if (best) try { localStorage.setItem(DNG_REC, String(g.room)); } catch (e) { /* ignoré */ }
   $('resTitle').textContent = g.np > 1 ? 'VAINCUS…' : 'VAINCU…';
@@ -2851,7 +3058,8 @@ function dungeonHud() {
     setW('s' + n, Math.max(0, p.sta));
     setCls('s' + n, 'low', p.sta < STA.tired);
     setCls('s' + n, 'fail', p.staFail > 0);
-    const who = g.np > 1 ? `J${n} · ` : '';
+    const nm = net.live ? (i === net.me ? myName() : net.peerName) : g.np === 1 ? myName() : '';
+    const who = nm ? `${nm} · ` : g.np > 1 ? `J${n} · ` : '';
     const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
     setTxt('n' + n, who + what + ' · ' + (p.state === 'dead' ? 'À TERRE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`));
   });
@@ -2900,6 +3108,14 @@ function saveCfg() { try { localStorage.setItem('spartiate-cfg', JSON.stringify(
 function refreshMenu() {
   document.querySelectorAll('.seg').forEach((seg) => {
     seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.val === String(cfg[seg.dataset.key])));
+  });
+  // personnages verrouillés (joueurs humains seulement : l'IA prend qui elle veut)
+  const un = unlockedHeroes();
+  document.querySelectorAll('[data-key="p1"] button, [data-key="p2"] button').forEach((b) => {
+    const human = b.parentElement.dataset.key === 'p1' || cfg.mode === 'duo';
+    const lock = human && !un.includes(b.dataset.val);
+    b.disabled = lock;
+    b.title = lock ? `Verrouillé : réussis un défi du ${HEROES[HERO_IDS[HERO_IDS.indexOf(b.dataset.val) - 1]]?.name ?? ''}` : '';
   });
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.val === cfg.arena));
   const online = cfg.mode === 'online', dg = cfg.game === 'dungeon';
@@ -3004,7 +3220,7 @@ function setupMenu() {
         cfg[key] = b.dataset.val;
         saveCfg();
         if (key === 'mode' && cfg.mode !== 'online' && net.ws) { netClose(); netInfo('Partie en ligne quittée.'); }
-        if (key === 'p1') netSend({ t: 'hello', kind: cfg.p1 });
+        if (key === 'p1') netSend({ t: 'hello', ...myHero() });
         refreshMenu();
         if (key === 'game') menuScene();
         else if (cfg.game === 'dungeon') { if (key === 'p1') dungeonPreview(); }
@@ -3044,7 +3260,7 @@ function netSend(m) { if (net.ws?.readyState === 1) net.ws.send(JSON.stringify(m
 function netClose() {
   const ws = net.ws;
   net.link?.close();
-  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null });
+  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [], hall: false, halls: [] });
   rb = null;
   if (ws) ws.close();
 }
@@ -3063,7 +3279,7 @@ function netConnect(first) {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   net.ws = ws;
   let opened = false;
-  ws.onopen = () => { opened = true; ws.send(JSON.stringify(first)); };
+  ws.onopen = () => { opened = true; lobby.down = false; ws.send(JSON.stringify(first)); };
   ws.onmessage = (e) => {
     if (net.ws !== ws) return;
     let m;
@@ -3071,6 +3287,7 @@ function netConnect(first) {
     if (m && typeof m === 'object') netMsg(m);
   };
   ws.onclose = () => {
+    lobby.down = !opened;
     if (net.ws !== ws) return;
     const wasLive = net.live;
     netClose();
@@ -3097,7 +3314,7 @@ function refreshGo() {
 }
 function netStart() {
   if (net.role !== 'host' || !net.peer) return;
-  const m = { mode: 'online', game: cfg.game, p1: cfg.p1, p2: net.peerKind || 'soldier', w1: cfg.w1 || '', arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
+  const m = { mode: 'online', game: cfg.game, p1: cfg.p1, p2: net.peerKind || 'soldier', w1: cfg.w1 || '', w2: net.peerWpn || '', u1: unlockedHeroes(), u2: net.peerUnlocked, arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
   netSend({ t: 'start', ...m });
   if (m.game === 'dungeon') startDungeon(m); else startMatch(m);
 }
@@ -3106,28 +3323,37 @@ function netMsg(m) {
   if (m.t === 'rtc') { net.link?.signal(m); return; }
   switch (m.t) {
     case 'created':
-      Object.assign(net, { role: 'host', me: 0, code: String(m.code ?? ''), urls: Array.isArray(m.urls) ? m.urls.map(String) : [] });
+      Object.assign(net, { role: 'host', me: 0, code: String(m.code ?? ''), hall: !!m.hall, urls: Array.isArray(m.urls) ? m.urls.map(String) : [] });
       netInfo(hostInfo() + '<br>En attente d’un adversaire…');
       break;
+    case 'rooms':
+      net.halls = (Array.isArray(m.rooms) ? m.rooms : []).filter((r) => r && /^[A-Z]{4}$/.test(r.code) && HEROES[r.kind])
+        .map((r) => ({ code: r.code, kind: r.kind, wpn: WEAPON_IDS.includes(r.wpn) ? r.wpn : '', name: cleanName(r.name) }));
+      break;
     case 'joined':
-      Object.assign(net, { role: 'guest', me: 1, code: String(m.code ?? ''), peer: true });
-      netSend({ t: 'hello', kind: cfg.p1 });
+      Object.assign(net, { role: 'guest', me: 1, code: String(m.code ?? ''), peer: true, hall: false });
+      lobby.msg = `Connecté au salon ${net.code} : la partie va commencer…`;
+      netSend({ t: 'hello', ...myHero() });
       netLink();
       netInfo(`Connecté à la partie <b>${esc(m.code)}</b> ! L’hôte choisit l’arène et lance le combat.`);
       break;
     case 'peer':
       net.peer = true;
-      netSend({ t: 'hello', kind: cfg.p1 });
+      netSend({ t: 'hello', ...myHero() });
       netLink();
       netInfo(`Un adversaire a rejoint la partie <b>${esc(net.code)}</b> ! Choisis l’arène puis clique sur COMBATTRE.`);
       break;
     case 'hello':
       net.peerKind = CHARS[m.kind] ? m.kind : 'soldier';
+      net.peerWpn = WEAPON_IDS.includes(m.wpn) ? m.wpn : null;
+      net.peerName = cleanName(m.name);
+      net.peerUnlocked = cleanUnlocked(m.unlocked);
       if (game.phase === 'menu') menuFighters();
+      if (net.role === 'host' && net.hall && inHall()) hallStart();   // un équipier entre dans notre salon
       break;
     case 'start':
       if (net.role !== 'guest' || !CHARS[m.p1] || !CHARS[m.p2]) break;
-      if (m.game === 'dungeon') startDungeon({ mode: 'online', p1: m.p1, p2: m.p2, w1: m.w1, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
+      if (m.game === 'dungeon') startDungeon({ mode: 'online', p1: m.p1, p2: m.p2, w1: m.w1, w2: m.w2, u1: cleanUnlocked(m.u1), u2: cleanUnlocked(m.u2), seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
       else if (ARENAS[m.arena]) startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
       break;
     case 'menu':
@@ -3135,11 +3361,13 @@ function netMsg(m) {
       toMenu(true);
       netInfo('L’adversaire est revenu au menu.' + (net.role === 'host' ? ' Clique sur COMBATTRE pour relancer.' : ''));
       break;
-    case 'bye':
-      if (net.live) toMenu(true);
+    case 'bye': {
+      // donjon : on repart seul dans la salle d'armes, avec son héros et son arme (l'hôte garde son salon)
+      const dg = net.live && match?.game === 'dungeon', mine = dg && sim.f[net.me];
+      if (net.live && !dg) toMenu(true);
       net.link?.close(); net.link = null;
       if (net.role === 'host') {
-        Object.assign(net, { peer: false, peerKind: null });
+        Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [] });
         if (game.phase === 'menu') menuFighters();
         netInfo('L’adversaire a quitté la partie.<br>' + hostInfo());
       } else {
@@ -3147,10 +3375,16 @@ function netMsg(m) {
         if (game.phase === 'menu') menuFighters();
         netInfo('L’hôte a fermé la partie.');
       }
+      if (dg) {
+        startDungeon({ mode: 'solo', p1: mine.kind, w1: mine.wpn, p2: cfg.p2, w2: cfg.w2 });
+        lobby.msg = net.role === 'host' ? 'Ton équipier est parti. Ton salon reste ouvert.' : 'Ton équipier a quitté la partie.';
+      }
       break;
+    }
     case 'error':
       netClose();
       netInfo(esc(m.msg));
+      lobby.msg = String(m.msg ?? '');
       break;
   }
   refreshMenu();
@@ -3159,6 +3393,229 @@ function netMsg(m) {
 // =====================================================================
 //  Démarrage
 // =====================================================================
+// =====================================================================
+//  Compte du joueur (facultatif) : serveur.py relaie /api/* vers l'API des comptes (api/, en Rust),
+//  seule à parler à la base. Le jeton de session reste dans ce navigateur ; le profil (pseudo, record,
+//  statistiques) et le classement viennent du serveur. Sans l'API, le bloc « Compte » est masqué.
+// =====================================================================
+const ACCOUNT_KEY = 'spartiate-jeton';
+// ready : profil chargé (ou absent pour de bon) : on peut appliquer les verrous du menu
+const compte = { dispo: false, ready: false, jeton: '', profil: null, top: null, defis: null, msg: '' };
+try { compte.jeton = localStorage.getItem(ACCOUNT_KEY) || ''; } catch (e) { /* ignoré */ }
+const myName = () => compte.profil?.pseudo ?? '';
+// héros débloqués : ceux du compte ; sans compte, le premier seulement
+const cleanUnlocked = (u) => [FIRST_HERO, ...(Array.isArray(u) ? u.filter((k) => HEROES[k] && k !== FIRST_HERO) : [])];
+const unlockedHeroes = () => cleanUnlocked(compte.profil?.debloques);
+// remet le premier héros à la place d'un héros verrouillé choisi dans le menu ; vrai si changé
+function clampHeroes() {
+  const un = unlockedHeroes();
+  let changed = false;
+  for (const k of ['p1', 'p2']) {
+    if ((k === 'p1' || cfg.mode === 'duo') && !un.includes(cfg[k])) { cfg[k] = FIRST_HERO; changed = true; }
+  }
+  if (changed) saveCfg();
+  return changed;
+}
+// pseudo reçu d'un autre joueur : seulement ce qu'un pseudo peut contenir
+const cleanName = (n) => (typeof n === 'string' && /^[0-9A-Za-zÀ-ÖØ-öø-ÿ_-]{3,16}$/.test(n) ? n : '');
+async function api(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (compte.jeton) headers.Authorization = 'Bearer ' + compte.jeton;
+  try {
+    const r = await fetch(path, { method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined });
+    const data = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: { erreur: 'Serveur injoignable.' } };
+  }
+}
+function setJeton(j) {
+  compte.jeton = j;
+  try { if (j) localStorage.setItem(ACCOUNT_KEY, j); else localStorage.removeItem(ACCOUNT_KEY); } catch (e) { /* ignoré */ }
+}
+function sessionLost() { setJeton(''); compte.profil = null; compte.msg = 'Session expirée : reconnecte-toi.'; }
+async function setupAccount() {
+  $('acLogin').onclick = () => accountLogin(false);
+  $('acNew').onclick = () => accountLogin(true);
+  $('acMdp').onkeydown = (e) => { if (e.key === 'Enter') accountLogin(false); };
+  $('acOut').onclick = accountLogout;
+  $('acTop').onclick = accountTop;
+  $('acDefis').onclick = accountChallenges;
+  compte.dispo = !!(await api('/api/etat')).data.comptes;
+  if (compte.dispo && compte.jeton) {
+    const r = await api('/api/profil');
+    if (r.ok) compte.profil = r.data.profil;
+    else if (r.status === 401) sessionLost();
+  }
+  compte.ready = true;
+  accountRender();
+}
+async function accountLogin(create) {
+  const pseudo = $('acPseudo').value.trim(), mdp = $('acMdp').value;
+  if (!pseudo || !mdp) { compte.msg = 'Entre ton pseudo et ton mot de passe.'; accountRender(); return; }
+  compte.msg = create ? 'Création du compte…' : 'Connexion…';
+  accountRender();
+  const r = await api(create ? '/api/inscription' : '/api/connexion', { pseudo, mdp });
+  if (r.ok) { setJeton(r.data.jeton); compte.profil = r.data.profil; compte.msg = ''; $('acMdp').value = ''; }
+  else compte.msg = r.data.erreur || 'Erreur.';
+  accountRender();
+}
+async function accountLogout() {
+  await api('/api/deconnexion', {});
+  setJeton('');
+  compte.profil = compte.top = compte.defis = null;
+  compte.msg = '';
+  accountRender();
+}
+async function accountTop() {
+  compte.defis = null;
+  if (compte.top) { compte.top = null; accountRender(); return; }
+  const r = await api('/api/classement');
+  compte.top = r.ok ? r.data.classement : null;
+  compte.msg = r.ok ? '' : r.data.erreur || 'Erreur.';
+  accountRender();
+}
+// Défis des héros (définis et comptés par le serveur : api/src/defis.rs), regroupés par héros
+async function accountChallenges() {
+  compte.top = null;
+  if (compte.defis) { compte.defis = null; accountRender(); return; }
+  const r = await api('/api/defis');
+  compte.defis = r.ok ? r.data.defis : null;
+  compte.msg = r.ok ? '' : r.data.erreur || 'Erreur.';
+  accountRender();
+}
+function challengesHTML(list) {
+  const by = new Map();
+  for (const d of list) { if (!by.has(d.heros)) by.set(d.heros, []); by.get(d.heros).push(d); }
+  const un = unlockedHeroes();
+  return [...by].map(([h, ds]) => `<div class="dh${un.includes(h) ? '' : ' locked'}"><b>${un.includes(h) ? '' : '🔒 '}${esc(HEROES[h]?.name ?? h)}</b> `
+    + `<span>${un.includes(h) ? `${ds.filter((d) => d.reussi).length} / ${ds.length}` : `débloqué par un défi du ${esc(HEROES[HERO_IDS[HERO_IDS.indexOf(h) - 1]]?.name ?? '')}`}</span></div>`
+    + ds.map((d) => `<div class="df${d.reussi ? ' ok' : ''}"><span class="dn">${d.reussi ? '✔ ' : ''}${esc(d.nom)}</span>`
+      + `<span class="dd">${esc(d.desc)}</span><span class="dp"><i style="width:${Math.round(100 * d.progres / d.objectif)}%"></i></span>`
+      + `<span class="dv">${d.progres} / ${d.objectif}</span></div>`).join('')).join('');
+}
+// fin d'un donjon (mort) : le serveur met à jour le record, les statistiques et les défis du héros
+async function accountRun(room, kills, kind, wpn) {
+  if (!compte.profil || room < 1) return;
+  const r = await api('/api/partie', { salle: room, ennemis: kills, heros: kind, arme: wpn, en_ligne: net.live });
+  if (r.ok) {
+    const before = unlockedHeroes();
+    compte.profil = r.data.profil;
+    compte.defis = null;
+    const nv = Array.isArray(r.data.nouveaux) ? r.data.nouveaux : [];
+    const heroes = unlockedHeroes().filter((k) => !before.includes(k));
+    $('resDefis').innerHTML = nv.map((d) => `<div>🏆 Défi accompli : <b>${esc(d.nom)}</b> (${esc(HEROES[d.heros]?.name ?? d.heros)}) · ${esc(d.desc)}</div>`).join('')
+      + heroes.map((k) => `<div class="unlock">🔓 Nouveau héros débloqué : <b>${esc(HEROES[k].name)}</b></div>`).join('');
+    if (nv.length) sfx.cheer?.(1);
+  } else if (r.status === 401) sessionLost();
+  accountRender();
+}
+function accountRender() {
+  const p = compte.profil;
+  $('acctSec').classList.toggle('hidden', !compte.dispo);
+  $('acctOut').classList.toggle('hidden', !!p);
+  $('acctIn').classList.toggle('hidden', !p);
+  if (p) {
+    $('acProfil').innerHTML = `<b>${esc(p.pseudo)}</b> · record : salle <b>${p.record}</b> · ${p.parties} partie${p.parties > 1 ? 's' : ''} · `
+      + `${p.ennemis} ennemi${p.ennemis > 1 ? 's' : ''} · ${p.boss} boss`;
+  }
+  $('acTop').textContent = compte.top ? 'Fermer le classement' : 'Classement';
+  $('acDefis').textContent = compte.defis ? 'Fermer les défis' : 'Défis';
+  $('acDefisList').classList.toggle('hidden', !compte.defis);
+  if (compte.defis) $('acDefisList').innerHTML = challengesHTML(compte.defis);
+  $('acTopList').classList.toggle('hidden', !compte.top);
+  if (compte.top) {
+    $('acTopList').innerHTML = compte.top.length
+      ? '<ol>' + compte.top.map((x) => `<li${x.pseudo === myName() ? ' class="me"' : ''}><b>${esc(x.pseudo)}</b> · salle ${x.record} · ${x.ennemis} ennemis</li>`).join('') + '</ol>'
+      : '<i>Personne au classement pour l’instant.</i>';
+  }
+  $('acMsg').textContent = compte.msg;
+  lobby.key = '';     // le pseudo apparaît dans le panneau des salons
+  if (compte.ready && clampHeroes() && game.phase === 'menu') menuScene();
+  refreshMenu();      // héros verrouillés du menu
+}
+
+// =====================================================================
+//  Salons de la salle d'armes : seul dans la salle d'armes, on ouvre son salon (listé sur le serveur)
+//  ou on rejoint celui d'un autre, dans la liste ou par son code. Dès qu'un équipier entre, les deux
+//  navigateurs relancent la salle d'armes en ligne, à deux (même graine), chacun avec son héros et son
+//  arme. Quand l'équipier part, chacun repart seul dans sa salle d'armes (l'hôte garde son salon).
+// =====================================================================
+// wait : heure limite de la réponse à « ouvrir mon salon » (un serveur d'avant les salons ne répond rien)
+const lobby = { next: 0, key: '', msg: '', down: false, wait: 0 };
+const inHall = () => sim instanceof DungeonSim && game.phase === 'hub' && !net.live && match?.mode === 'solo';
+// héros et arme de ce joueur : ceux de la salle d'armes en cours, sinon ceux du menu
+function myHero() {
+  const p = game.phase !== 'menu' && sim instanceof DungeonSim ? sim.f[localHeroes()[0] ?? 0] : null;
+  return { ...(p ? { kind: p.kind, wpn: p.wpn } : { kind: cfg.p1, wpn: cfg.w1 || '' }), name: myName(), unlocked: unlockedHeroes() };
+}
+function lobbyWs(m) { if (net.ws?.readyState === 1) netSend(m); else netConnect(m); }
+function hallStart() {
+  const me = myHero();
+  const m = { mode: 'online', game: 'dungeon', p1: me.kind, w1: me.wpn, p2: net.peerKind || 'soldier', w2: net.peerWpn || '',
+    u1: unlockedHeroes(), u2: net.peerUnlocked, seed: (Math.random() * 4294967296) >>> 0 };
+  netSend({ t: 'start', ...m });
+  startDungeon(m);
+}
+function setupLobby() {
+  $('lbMine').onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    b.blur();                         // sinon Espace (saut) le recliquerait
+    lobby.msg = '';
+    if (b.dataset.act === 'open') { lobbyWs({ t: 'open', ...myHero(), token: compte.jeton }); lobby.wait = performance.now() + 4000; lobby.msg = 'Ouverture du salon…'; }
+    else if (b.dataset.act === 'close') { netSend({ t: 'close' }); Object.assign(net, { role: null, code: '', hall: false, peer: false }); }
+    lobbyRender();
+  };
+  $('lbList').onclick = (e) => {
+    const b = e.target.closest('button[data-code]');
+    if (b) { b.blur(); lobby.msg = 'Connexion…'; lobbyWs({ t: 'join', code: b.dataset.code }); lobbyRender(); }
+  };
+  const joinCode = () => {
+    const code = $('lbCode').value.trim().toUpperCase();
+    if (!/^[A-Z]{4}$/.test(code)) { lobby.msg = 'Un code fait 4 lettres.'; lobbyRender(); return; }
+    $('lbCode').value = '';
+    $('lbCode').blur();
+    lobby.msg = 'Connexion…';
+    lobbyWs({ t: 'join', code });
+    lobbyRender();
+  };
+  $('lbJoin').onclick = joinCode;
+  $('lbCode').onkeydown = (e) => { if (e.key === 'Enter') joinCode(); };
+}
+// à chaque image : panneau visible dans la salle d'armes (seul) ; liste des salons redemandée toutes
+// les 2 s (temps réel : le temps de jeu peut ralentir)
+function lobbySync() {
+  const on = inHall();
+  setCls('lobby', 'hidden', !on);
+  if (!on) { lobby.next = 0; return; }
+  const now = performance.now();
+  if (lobby.wait && net.hall) { lobby.wait = 0; lobby.msg = ''; }
+  else if (lobby.wait && now > lobby.wait) {
+    lobby.wait = 0;
+    lobby.msg = lobby.down ? '' : 'Le serveur ne répond pas : il date sans doute d’avant les salons. Ferme et relance jouer.bat.';
+  }
+  if (now >= lobby.next) {
+    lobby.next = now + (lobby.down ? 10000 : 2000);    // serveur injoignable : on réessaie moins souvent
+    if (!net.ws) netConnect({ t: 'list' });
+    else if (net.ws.readyState === 1 && !net.peer) netSend({ t: 'list' });
+  }
+  lobbyRender();
+}
+function lobbyRender() {
+  const key = JSON.stringify([net.role, net.code, net.hall, net.halls, lobby.msg, lobby.down, myName()]);
+  if (key === lobby.key) return;
+  lobby.key = key;
+  const who = (r) => `${r.name ? `<b>${esc(r.name)}</b> · ` : ''}${esc(HEROES[r.kind].name)}${r.wpn ? ' · ' + esc(WEAPONS[r.wpn].name) : ''}`;
+  $('lbMine').innerHTML = net.role === 'host' && net.hall
+    ? `Ton salon <span class="code">${esc(net.code)}</span> est ouvert : un ami peut le rejoindre depuis sa salle d'armes.<button data-act="close">Fermer</button>`
+    : net.role === 'guest' ? '' : '<button class="main" data-act="open">Ouvrir mon salon</button>';
+  $('lbList').innerHTML = lobby.down ? '<i>Serveur de jeu injoignable : lance le jeu avec jouer.bat (Windows) ou jouer.sh (Linux).</i>'
+    : net.halls.length ? net.halls.map((r) => `<button data-code="${esc(r.code)}"><span>${who(r)}</span><b>${esc(r.code)}</b></button>`).join('')
+      : '<i>Aucun autre salon ouvert pour l’instant.</i>';
+  setTxt('lbMsg', lobby.msg);
+}
+
 async function boot() {
   try { layout = await navigator.keyboard?.getLayoutMap?.(); } catch (e) { layout = null; }
   const loader = new GLTFLoader();
@@ -3183,6 +3640,8 @@ async function boot() {
     return;
   }
   setupMenu();
+  setupLobby();
+  setupAccount();
   setupDebug();
   buildArena(cfg.arena);
   game.loading = false;
@@ -3190,7 +3649,7 @@ async function boot() {
   toMenu();
   if (new URLSearchParams(location.search).has('dungeon')) startDungeon();
   // ?debug : accès à la simulation depuis la console (tests dans le navigateur)
-  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; }, renderer, scene, debugGoto: dbgGoto };
+  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; }, renderer, scene, camera, debugGoto: dbgGoto };
   else if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
   const warm = +new URLSearchParams(location.search).get('sim');
   for (let i = 0; i < warm * 60; i++) step(DT);
@@ -3204,7 +3663,7 @@ boot();
 //  il modifie la simulation directement (en ligne, l'autre joueur ne le verrait pas).
 // =====================================================================
 const dbg = { open: false, god: false, tp: false };
-const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [-1, 'Salle suivante']];
+const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [15, 'Antre de Cerbère'], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [-1, 'Salle suivante']];
 function setupDebug() {
   $('dbgRooms').innerHTML = DBG_ROOMS.map(([n, t]) => `<button data-room="${n}">${esc(t)}</button>`).join('');
   $('dbgFoes').innerHTML = Object.keys(FOES).filter((id) => id !== 'dog').map((id) => `<button data-foe="${id}">${esc(FOES[id].name)}</button>`).join('');
@@ -3214,7 +3673,7 @@ function setupDebug() {
     b.blur();      // sinon Espace (saut) rappuierait sur le bouton
     if (b.dataset.room !== undefined) { const n = +b.dataset.room; dbgGoto(n < 0 ? sim.g.room + 1 : n); }
     else if (b.dataset.foe) { if (!dbgSim()?.debugSpawn(b.dataset.foe)) dbgMsg('Apparition possible seulement pendant un combat.'); }
-    else if (b.dataset.boss) { if (!dbgSim()?.debugBoss(b.dataset.boss)) dbgMsg('Pas de colosse prêt dans cette salle.'); }
+    else if (b.dataset.boss) { if (!dbgSim()?.debugBoss(b.dataset.boss)) dbgMsg('Pas de boss prêt pour cette attaque dans cette salle.'); }
     else if (b.id === 'dbgGo') dbgGoto(+$('dbgRoom').value || 0);
     else if (b.id === 'dbgKill') dbgSim()?.debugKill();
     else if (b.id === 'dbgHeal') dbgSim()?.debugHeal();

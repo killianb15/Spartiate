@@ -327,3 +327,63 @@ test('sceptre : la boule de feu explose contre un mur', () => {
   assert.equal(s.pr.length, 0);
   assert.ok(s.ev.some((e) => e[0] === 'sfx' && e[1] === 'boom'));
 });
+
+test('gants de boxe : petits coups, meilleure garde, dégâts subis réduits (cumulés avec l\'armure)', () => {
+  const g = WEAPONS.gloves;
+  assert.ok(g.dmg < WEAPONS.sword.dmg && g.reach < WEAPONS.sword.reach);
+  // la garde : les gants perdent moins que le pavois au même coup
+  const guardLoss = (w) => {
+    const s = duel('sword', w, 1.3);
+    s.step({ ...NEUTRAL, press: PRESS.atk }, { ...NEUTRAL, blk: true });
+    for (let k = 0; k < 30; k++) s.step(NEUTRAL, { ...NEUTRAL, blk: true });
+    return 100 - s.f[1].guard;
+  };
+  const gl = guardLoss('gloves');
+  assert.ok(gl > 0 && gl < guardLoss('tower'), `${gl}`);
+  // achat chez le marchand : armure du chevalier (15 %) et des gants (20 %) cumulées
+  const s = hub();
+  const k = pad('hero', 'knight');
+  assert.ok(walkTo(s, 0, k.x, k.z));
+  buy(s, 0, 'gloves');
+  assert.equal(s.f[0].wpn, 'gloves');
+  assert.ok(Math.abs(s.f[0].armor - (1 - 0.85 * 0.8)) < 1e-9);
+  assert.equal(s.f[0].arch, false);
+  // on les repose : l'armure redevient celle du chevalier seul
+  buy(s, 0, 'sword');
+  assert.equal(s.f[0].armor, 0.15);
+});
+
+test('gants de boxe : prise directe (touche 9) et coups encaissés réduits', () => {
+  const s = hub();
+  walkTo(s, 0, SHOP.x, SHOP.z + 1.2);
+  assert.ok(walkTo(s, 0, SHOP.x, SHOP.z));
+  s.step(shopInput(WEAPON_IDS.indexOf('gloves')));
+  assert.equal(s.f[0].wpn, 'gloves');
+  assert.equal(WEAPON_IDS.indexOf('gloves'), 7, 'touche 8 du marchand');
+  const p = s.f[0], before = p.hp;
+  const foe = { pow: 1, armor: 0, leech: 0, x: 1, z: 0, y: 0, yaw: 0, idx: 9 };
+  s.damage(foe, p, 10, 0, 0.3, 0, 1, 0);
+  assert.equal(p.hp, before - 8);
+});
+
+test('héros verrouillés : seul le Gladiateur au départ, les dalles verrouillées ne changent rien', () => {
+  const s = new DungeonSim(5, ['archer', 'knight'], [], [['human'], ['human', 'orc']]);
+  s.startHub(); s.ev.length = 0;
+  assert.equal(s.f[0].kind, 'soldier', 'héros verrouillé au lancement : Gladiateur');
+  assert.equal(s.f[1].kind, 'soldier');
+  const orc = pad('hero', 'orc'), human = pad('hero', 'human'), soldier = pad('hero', 'soldier');
+  assert.ok(walkTo(s, 0, orc.x, orc.z));
+  assert.equal(s.f[0].kind, 'soldier', 'Orc verrouillé pour le joueur 1');
+  assert.ok(s.ev.some((e) => e[0] === 'pop' && e[1] === 'VERROUILLÉ'));
+  assert.ok(walkTo(s, 1, orc.x + 0.01, orc.z));
+  assert.equal(s.f[1].kind, 'orc', 'débloqué pour le joueur 2');
+  assert.ok(walkTo(s, 0, human.x, human.z));
+  assert.equal(s.f[0].kind, 'human');
+  assert.ok(walkTo(s, 0, soldier.x, soldier.z));
+  assert.equal(s.f[0].kind, 'soldier', 'le Gladiateur est toujours jouable');
+  // sans liste (tests, outils) : tout est permis
+  const t = hub();
+  const k = pad('hero', 'robot');
+  assert.ok(walkTo(t, 0, k.x, k.z));
+  assert.equal(t.f[0].kind, 'robot');
+});

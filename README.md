@@ -32,6 +32,32 @@ Options :
 - **Fedora** : `sudo dnf install python3`
 - **Arch** : `sudo pacman -S python`
 
+## Comptes joueurs (facultatif)
+
+Un compte (pseudo + mot de passe) garde ton **record et tes statistiques** de donjon, affiche ton
+**pseudo en ligne** (salons, équipier) et te place au **classement**. Sans lui, tout le jeu marche pareil.
+
+Il faut **Docker** ; une seule fois, sur le PC qui lance le serveur :
+
+1. copier `.env.exemple` en `.env` et y mettre un mot de passe aléatoire
+   (`python -c "import secrets; print(secrets.token_hex(24))"`) ;
+2. `docker compose up -d --build` (la 1re fois, compile l'API : quelques minutes) ;
+3. lancer le jeu comme d'habitude (`jouer.bat`) : la fenêtre indique « Comptes joueurs : activés ».
+
+Architecture et sécurité :
+
+- **API en Rust** (`api/` : axum + sqlx), seule à parler à la base ; mots de passe hachés en
+  **Argon2id**, jetons de session aléatoires dont seule l'empreinte SHA-256 est stockée, essais de
+  connexion limités par adresse, corps de requête limités à 4 Ko, requêtes SQL paramétrées ;
+- **PostgreSQL** sur un réseau Docker interne, **sans aucun port publié** : inaccessible depuis le
+  PC comme depuis Internet ; l'API n'écoute que sur `127.0.0.1:8124` ;
+- `serveur.py` relaie seulement les routes prévues (`/api/inscription`, `connexion`, `deconnexion`,
+  `profil`, `partie`, `classement`) ; il ne sert jamais les fichiers cachés (`.env`, `.git`…).
+- Derrière nginx (VPS) : `SPARTIATE_PROXY=1` (déjà dans `deploy/spartiate.service`) pour lire
+  l'adresse du joueur dans `X-Real-IP`.
+- Tests : `cargo test` dans `api/`, et `python tests/test_comptes.py` (pile Docker de test séparée,
+  détruite à la fin).
+
 ## Touches
 
 Bouton **Configurer les touches** dans le menu (ou **Touches** dans le menu pause) :

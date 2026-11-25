@@ -12,10 +12,37 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
   (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
-  scénarios tome, staff, shop, biomes, boss). Chromium headless est lent (quelques images/s) : pour une capture
+  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere). Chromium headless est lent (quelques images/s) : pour une capture
   précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
+
+## Comptes joueurs (api/, Rust)
+- `api/` : axum + sqlx (PostgreSQL), migrations dans `api/migrations/` (jamais modifier une migration
+  passée : en ajouter une, ex. amis/guildes). Routes : sante (interne), inscription, connexion,
+  deconnexion, profil, partie (fin de donjon), classement. Argon2id, jetons (empreinte SHA-256 en base),
+  freins par adresse (`FREIN_CONNEXION/INSCRIPTION`, adresse = `X-Real-IP` posé par serveur.py).
+- `docker-compose.yml` : db sans port publié sur réseau `internal`, api sur 127.0.0.1:8124 (lecture seule,
+  cap_drop ALL). Mot de passe dans `.env` (ignoré par git ; modèle `.env.exemple`).
+- `serveur.py` reste en bibliothèque standard : il relaie `API_ROUTES` vers `SPARTIATE_API`, répond
+  `/api/etat`, met le pseudo vérifié (`pseudo_of(token)`) dans les salons, ne sert pas les fichiers cachés.
+  `SPARTIATE_PROXY=1` (VPS derrière nginx) : adresse du joueur lue dans X-Real-IP.
+- game.js : `compte`, `api()`, `setupAccount`, `accountRun` (appelé par `endDungeon`), `myName()`,
+  `net.peerName` (pseudo de l'équipier, reçu dans `hello`). Bloc `#acctSec` du menu, masqué sans API.
+- **Défis des héros** : définis et comptés côté serveur (`api/src/defis.rs` : `DEFIS`, 4 par héros, mesures
+  Ennemis/Salles/Record/Boss/Arme/EnLigne/Parties ; identifiants stables gardés dans `defis_reussis`).
+  La sim compte les victimes de chaque héros (`p.kills`, chiens compris, remis à zéro par `start`/`startHub`) ;
+  `endDungeon` envoie `{salle, ennemis: kills, heros, arme}` à /api/partie qui renvoie `nouveaux` (annoncés
+  dans `#resDefis`). Panneau « Défis » du menu (`accountChallenges`, `challengesHTML`). Garder `HEROS`/`ARMES`
+  de defis.rs alignés sur HEROES/WEAPONS. Scénario navigateur : `browser-test.mjs compte` (sur l'API de test).
+- **Héros verrouillés** : seul `FIRST_HERO` (Gladiateur) au départ ; chaîne = ordre de `HERO_IDS` / `HEROS`
+  (defis.rs `debloques` : un défi réussi du héros précédent débloque le suivant, renvoyé dans le profil). Sans
+  compte : Gladiateur seulement. La sim reçoit les listes (`new DungeonSim(seed, kinds, wpns, unlocked)`,
+  `canPick(i, kind)`, pas de l'état ; null = tout permis pour les tests) ; en ligne elles passent dans
+  `hello`/`start` (`u1`, `u2`). Affichage : statues de pierre + 🔒 (`buildHub`), boutons du menu de l'arène
+  désactivés (`refreshMenu`), `clampHeroes()` remet le Gladiateur à la place d'un choix verrouillé.
+- Tests : `cargo test` (api/) ; `python tests/test_comptes.py` (pile `docker compose -p spartiate-test`,
+  API de test sur 8125, détruite à la fin ; vide la base via `docker compose exec db psql`).
 
 ## Architecture
 - `sim.js` : simulation pure et **déterministe** (pas de Three.js/DOM/son, pas de `Math.random`, pas de
@@ -36,22 +63,32 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   = anti-répétition ; 7 = attendre qu'on relâche la direction tenue en arrivant). Dans `step`, l'entrée
   d'un héros en boutique passe par `shopStep` puis devient NEUTRAL : ← → (mx) font défiler, attaque/saut
   achète, reculer (mz > 0) / bloquer / roulade s'en va ; `shopInput(n)` (mx = 110 + n) prend l'arme n
-  directement (clic, touches 1 à 8). Affichage (`buildMerchant`, `shopSync`) : la caméra passe derrière
+  directement (clic, touches 1 à 9). Affichage (`buildMerchant`, `shopSync`) : la caméra passe derrière
   le héros local en boutique (`camAng = 0`, donc les flèches suivent l'écran), bulle `#talk`, panneau
   `#shop`, carrousel d'armes sur le comptoir, réactions du marchand déduites de l'état (pas d'événements).
+- **Salons** (game.js, `lobby*`, `hallStart`, panneau `#lobby` d'index.html) : seul dans la salle d'armes, on
+  ouvre son salon (`{t:'open', kind, wpn}` : listé par serveur.py, `rooms[code]['hall']`) ou on rejoint
+  celui d'un autre (liste `{t:'list'}` redemandée toutes les 2 s en temps réel, ou code). Quand l'invité
+  envoie `hello` (héros + arme), l'hôte relance la salle d'armes en ligne à deux (`start`, même graine).
+  Équipier parti (`bye`) : chacun repart seul dans sa salle d'armes (l'hôte garde son salon) ; quitter
+  pour le menu en donjon = quitter le salon ; franchir la porte seul ferme le salon. Testé par
+  `tests/test_server.py` et `node tools/lobby-test.mjs <dossier>` (deux contextes Chromium).
 - **Héros** (`HEROES` dans dungeon.js, avec un talent) : soldier (Gladiateur), human (Mirmillon), orc,
   archer (Archère), knight (Chevalier), zombie, robot (Automate). `equip(p, kind, wpn)` applique stats + talent.
 - **Armes** (`WEAPONS` dans sim.js, `wpnOf(f)`) : sword, spear, tower, axe, hammer, staff (sceptre de feu),
-  tome (grimoire), bow ; `bite` = crocs des chiens (`hidden`, pas proposée). Champs : reach, dmg, combo,
-  run, guard (coût du blocage), crush, bow (tir), fire (boule de feu), summon (invocation).
+  tome (grimoire), gloves (gants de boxe), bow ; `bite` = crocs des chiens (`hidden`, pas proposée). Champs : reach, dmg, combo,
+  run, guard (coût du blocage), crush, bow (tir), fire (boule de feu), summon (invocation),
+  tank (part des dégâts encaissée, cumulée avec l'armure du héros dans `equip`).
   `f.arch` = arme à distance. Défaut : `defaultWeapon(kind)` (archère → arc).
 - **Sceptre** : projectiles `sim.pr` avec `k: 1` (flèches `k: 0`), `explode()` = dégâts de zone (`FIRE`).
 - **Grimoire** : `summon()` ajoute un chien (`kind 'dog'`, `team 0`, `owner`) + son IA ; 2 max (`CAST.max`).
   Les fighters ont un **camp** `team` (0 héros + chiens, 1 ennemis) : `target`, `foeOf`, `foesLeft`, les
   frappes et `onKO` raisonnent par camp ; `isHero(f)` (idx < np) reste pour ce qui concerne les joueurs.
   Les chiens disparaissent à la salle suivante (f = héros + ennemis de la nouvelle salle).
-- Ennemis (`FOES`) : grunt/guard/elite/archer + zombie (salle ≥ 4, sans tirage aléatoire en plus).
-- **Boss** (`boss: true` dans FOES, une salle sur 5, `bossOf(n)` : chef orc salles 5, 15… ; colosse 10, 20…).
+- Ennemis (`FOES`) : grunt/guard/elite/archer + zombie (salle ≥ 4, sans tirage aléatoire en plus) ;
+  `hound` (chien des enfers, `kind 'dog'`, camp ennemi) = renfort de Cerbère.
+- **Boss** (`boss: true` dans FOES, une salle sur 5, `bossOf(n)` = `BOSS_ORDER` : chef orc 5, 20… ; colosse 10, 25… ;
+  Cerbère 15, 30…). `moves` = liste des attaques spéciales de chaque boss (colosse `['slam','charge']`).
   `room.bossId`. **Colosse d'airain** (`colosse` : robot ×1,9, marteau, `moves`) : attaques spéciales réglées
   par `BOSS`, état `'special'` + `f.sp` ('slam' saut écrasant, 'charge', 'roar' = rage à 50 % PV qui appelle
   des zombies `adds`). Seuls les ennemis à `moves` ont les champs `sp, spT, spA, spX, spZ, spHit, spCd, rage`
@@ -59,8 +96,19 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   pendant une spéciale il encaisse sans broncher (`armorHit`). Charge dans un mur/obstacle = sonné.
   Affichage : `bossTele` (zones au sol déduites de l'état), `bossHud` + `#bossBar` (grande barre en haut,
   pas de petite barre au-dessus des boss), teinte bronze et lueur de rage dans `makeView`/`FighterView`.
+- **Cerbère** (`cerbere` : `kind 'cerbere'`, taille 2.8, arme cachée `fangs` = 3 morsures, une par tête ;
+  moves `['fire','slam','charge']`, adds `hound`). `fire` (`BOSS.fire`) : wind puis souffle dans un cône (`half`,
+  `R`) en pivotant vers la cible, brûlure par `flames()` toutes les `tick` s (roulade/derrière/hors portée = rien,
+  blocage = garde). Sa salle (`room.lair = 'cerbere'`) : pas d'estrade ni de piège, 4 colonnes (il s'y assomme en
+  chargeant). Affichage : `DogView(i, 'cerbere', hellGlow)` (têtes `head-l/c/r`, yeux `eyes-*`, gerbes de flammes
+  `jets` d'après l'état), cône `tele.cone`, biome `BIOME.lair` + `lairDecor()` (os, flammes), bandeau à l'entrée.
+  Modèle : `tools/blender/cerbere.py` → `assets/summons/cerbere.glb`. Tests : `tests/cerbere.test.js`.
+- **Salle d'armes en plein air** : `BIOME.hub` (murs des cryptes, ciel de jour) et `outsideDecor('meadow')` :
+  2 rangées de dalles d'herbe seulement (≈ 400-950 triangles chacune !), puis sol vert, touffes et fleurs
+  instanciées, arbres (côtés vus par la caméra), buissons, rochers, collines.
 - **Outil de débogage** (F2, hors ligne) : `#dbg` dans index.html, `setupDebug`/`dbgGoto` dans game.js,
-  méthodes `debugGoto/Kill/Heal/God/Spawn/Tp/Boss` de DungeonSim (testées dans tests/boss.test.js).
+  méthodes `debugGoto/Kill/Heal/God/Spawn/Tp/Boss` de DungeonSim (testées dans tests/boss.test.js). Bouton
+  « Antre de Cerbère » (salle 15) ; `debugBoss(kind)` ne lance que les attaques de `moves` du boss présent.
   `dng.room = -1` force la reconstruction de la salle.
 - Vues : `makeView`/`extraViews` créent les vues au fil des invocations sans reconstruire la salle ;
   `heroViews` remplace la vue d'un héros qui change de perso/arme.
@@ -93,19 +141,25 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - Le « bouclier » (main gauche) est redressé à chaque image ; l'arc et le grimoire y prennent sa place.
   Les matériaux lumineux (`MeshBasicMaterial` : orbe, rune) n'ont pas d'`emissive` : ne pas leur appliquer
   les effets de flash/lueur.
+- **Gants de boxe** : un gant par main (`gloveModel` : `inst('glove')`, miroir x pour la droite), tous deux
+  redressés à chaque image ; le gauche tient lieu de bouclier (`v.shield`, lueur au blocage), le droit est
+  `v.glove` (pas de `v.sword` ni de `swing`). Modèle : `tools/blender/gloves.py` → `assets/weapons/weapon-glove.glb`.
+  Vérifier : `node tools/browser-test.mjs gloves <dossier>`.
 - Le chien n'a pas de squelette : `DogView` anime ses pièces (même interface que `FighterView`).
 
 ## Modèles 3D : Blender en ligne de commande
-- Blender 5.3 installé : `"C:\Program Files\Blender Foundation\Blender 5.3\blender.exe" -b --factory-startup -P tools/blender/<script>.py`
+- Blender 5.3 installé (winget `BlenderFoundation.Blender` 5.3.0, le 25/11/2026) : `"C:\Program Files\Blender Foundation\Blender 5.3\blender.exe" -b --factory-startup -P tools/blender/<script>.py`
   (passer des chemins **absolus** Windows aux scripts ; `cygpath -wa` depuis bash).
 - `tools/blender/kenney.py` : boîte à outils. Positions/rotations écrites dans le **repère du jeu** (+Y haut,
   radians, ordre XYZ, comme three.js). Couleurs par nom = cases de la palette Kenney (`colormap.png`,
   grille 16×16 de 32 px ; colonnes paires unies, impaires en dégradé). `kenney_character()` importe un
   perso Kenney complet, `recolor()` change ses familles de couleurs, `attach()` accroche une pièce à un os,
   `preview(..., yaw=, height=)` rend un PNG (Workbench) **à regarder systématiquement** avant de livrer.
-- Scripts : `weapons.py` (hache, marteau, sceptre `orb`, grimoire `rune` → `assets/weapons/`),
+- Scripts : `weapons.py` (hache, marteau, sceptre `orb`, grimoire `rune` → `assets/weapons/`), `gloves.py`
+  (gant de boxe `weapon-glove.glb` + aperçus glove/glove-front/gloves),
   `archer.py` (archère + `arrow.glb` + `weapon-bow.glb` : nœuds `bow` > `nocked`), `dog.py`
   (`assets/summons/dog.glb` : `dog` > `body` > head/tail/leg-fl/fr/bl/br/glow), `check_weapons.py`,
+  `cerbere.py` (Cerbère : pièces articulées comme `dog.py`, trois têtes `head-*` avec yeux `eyes-*`),
   `merchant.py` (vieux marchand : Kenney male-b chauve et barbu, barbe blanche ALLONGÉE en déplaçant ses
   sommets, robe violette, couronne de cheveux ; + étal `stall.glb` → `assets/npc/`).
   Aperçus dans `tools/blender/previews/`. Base de l'archère : `tools/blender/sources/character-female-f.glb`.

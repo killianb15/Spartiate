@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/spartiate
+Environment=SPARTIATE_PROXY=1
 ExecStart=/usr/bin/python3 -u serveur.py 8123 --no-browser
 Restart=always
 RestartSec=3

@@ -1,11 +1,15 @@
 """Serveur de Spartiate Arènes : sert les fichiers du jeu et relaie les parties
 en ligne (réseau local) entre l'hôte et l'invité via WebSocket.
-Aucune dépendance : seulement la bibliothèque standard de Python."""
+Aucune dépendance pour jouer : seulement la bibliothèque standard de Python.
+Comptes des joueurs (/api/...) : facultatifs, relayés vers l'API Rust (api/, docker-compose.yml),
+seule à parler à la base PostgreSQL. Sans elle, le jeu marche comme avant (comptes indisponibles)."""
 import base64
 import hashlib
+import http.client
 import json
 import os
 import random
+import re
 import socket
 import struct
 import sys
@@ -13,6 +17,7 @@ import threading
 import time
 import webbrowser
 from functools import partial
+from urllib.parse import unquote, urlsplit
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ARGS = [a for a in sys.argv[1:] if not a.startswith('-')]
@@ -30,7 +35,19 @@ RATE_BURST = 480        # rafale maximale tolérée (capacité du seau)
 RATE_ABUSE = 20         # au-delà de RATE_ABUSE x RATE_LIMIT messages ignorés en 1 s : connexion fermée
 conns = 0
 
-rooms = {}          # code -> {'host': Conn, 'guest': Conn | None}
+rooms = {}          # code -> {'host': Conn, 'guest': Conn | None, 'hall': dict | None}
+# 'hall' : salon ouvert depuis la salle d'armes du donjon, visible de tous (list) tant qu'il reste une place
+MAX_LIST = 30       # salons renvoyés par 'list'
+HALL_KEYS = {'kind': 16, 'wpn': 16}   # ce que l'hôte montre de lui (héros, arme) : longueur max
+MAX_BODY = 4096     # corps d'une requête /api (JSON)
+# API des comptes (Rust, 127.0.0.1 seulement) : on ne lui relaie que ces routes
+API = urlsplit(os.environ.get('SPARTIATE_API', 'http://127.0.0.1:8124'))
+API_ROUTES = {('GET', '/api/profil'), ('GET', '/api/classement'), ('GET', '/api/defis'), ('POST', '/api/inscription'),
+              ('POST', '/api/connexion'), ('POST', '/api/deconnexion'), ('POST', '/api/partie')}
+API_DOWN = 'Comptes indisponibles : le service des comptes ne répond pas (docker compose up -d).'
+TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
+# derrière un proxy de confiance (nginx du VPS) : l'adresse du joueur est dans X-Real-IP
+BEHIND_PROXY = os.environ.get('SPARTIATE_PROXY') == '1'
 lock = threading.Lock()
 
 
@@ -159,7 +176,7 @@ def leave(c):
         other.send_json(t='bye')
 
 
-def create(c):
+def create(c, hall=None):
     leave(c)
     with lock:
         if len(rooms) >= MAX_ROOMS:
@@ -168,10 +185,58 @@ def create(c):
         code = ''.join(random.choice(LETTERS) for _ in range(4))
         while code in rooms:
             code = ''.join(random.choice(LETTERS) for _ in range(4))
-        rooms[code] = {'host': c, 'guest': None}
+        rooms[code] = {'host': c, 'guest': None, 'hall': hall}
         c.room, c.is_host = code, True
-    c.send_json(t='created', code=code, urls=[f'http://{ip}:{PORT}' for ip in lan_ips()[:1]])
+    c.send_json(t='created', code=code, hall=hall is not None, urls=[f'http://{ip}:{PORT}' for ip in lan_ips()[:1]])
     print(f'  Partie créée : {code}', flush=True)
+
+
+def api_call(method, path, body=None, token='', ip=''):
+    """Requête à l'API des comptes : (code HTTP, objet JSON) ; (503, ...) si elle ne répond pas."""
+    headers = {'Content-Type': 'application/json'}
+    if token:
+        headers['Authorization'] = 'Bearer ' + token
+    if ip:
+        headers['X-Real-IP'] = ip
+    c = http.client.HTTPConnection(API.hostname, API.port or 80, timeout=8)
+    try:
+        c.request(method, path, body=body, headers=headers)
+        r = c.getresponse()
+        try:
+            obj = json.loads(r.read(1024 * 1024) or b'{}')
+        except ValueError:
+            obj = None
+        if not isinstance(obj, dict):
+            return 502, {'erreur': 'Réponse invalide du service des comptes.'}
+        return r.status, obj
+    except (OSError, http.client.HTTPException):
+        return 503, {'erreur': API_DOWN}
+    finally:
+        c.close()
+
+
+def pseudo_of(token):
+    """Pseudo du compte de ce jeton de session (vérifié par l'API), ou ''."""
+    if not isinstance(token, str) or not TOKEN_RE.match(token):
+        return ''
+    st, r = api_call('GET', '/api/profil', token=token)
+    p = r.get('profil') if st == 200 else None
+    return str(p.get('pseudo', ''))[:16] if isinstance(p, dict) else ''
+
+
+def hall_of(m):
+    """Description publique d'un salon (seulement des chaînes courtes) ; le pseudo vient du compte
+    (jeton de session vérifié par l'API), jamais de ce que le joueur écrit."""
+    h = {k: str(m.get(k, ''))[:n] for k, n in HALL_KEYS.items()}
+    h['name'] = pseudo_of(m.get('token'))
+    return h
+
+
+def list_halls(c):
+    with lock:
+        out = [{'code': code, **r['hall']} for code, r in rooms.items()
+               if r['hall'] is not None and r['guest'] is None and r['host'] is not c][:MAX_LIST]
+    c.send_json(t='rooms', rooms=out)
 
 
 def join(c, code):
@@ -194,6 +259,11 @@ def join(c, code):
     print(f'  Un joueur a rejoint la partie {code}', flush=True)
 
 
+def hidden(path):
+    """Chemin vers un fichier ou dossier caché (.git, .env…), même encodé (%2e)."""
+    return any(part.startswith('.') for part in unquote(path).replace('\\', '/').split('/'))
+
+
 class Handler(SimpleHTTPRequestHandler):
     extensions_map = {
         **SimpleHTTPRequestHandler.extensions_map,
@@ -209,10 +279,66 @@ class Handler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
-        if self.path.split('?')[0] == '/ws' and self.headers.get('Upgrade', '').lower() == 'websocket':
+        path = self.path.split('?')[0]
+        if path == '/ws' and self.headers.get('Upgrade', '').lower() == 'websocket':
             self.websocket()
+        elif path.startswith('/api/'):
+            self.api('GET', path)
+        elif hidden(path):
+            self.send_error(404)     # .git, .env… : jamais servis
         else:
             super().do_GET()
+
+    def do_HEAD(self):
+        if hidden(self.path.split('?')[0]):
+            self.send_error(404)
+        else:
+            super().do_HEAD()
+
+    def do_POST(self):
+        path = self.path.split('?')[0]
+        if path.startswith('/api/'):
+            self.api('POST', path)
+        else:
+            self.send_error(405)
+
+    # ---------- comptes des joueurs : relais vers l'API Rust ----------
+    def reply(self, status, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def client_ip(self):
+        if BEHIND_PROXY:
+            ip = self.headers.get('X-Real-IP', '').strip()
+            if re.match(r'^[0-9A-Fa-f:.]{2,45}$', ip):
+                return ip
+        return self.client_address[0]
+
+    def api(self, method, path):
+        if (method, path) == ('GET', '/api/etat'):
+            st, _ = api_call('GET', '/api/sante')
+            return self.reply(200, {'comptes': st == 200})
+        if (method, path) not in API_ROUTES:
+            return self.reply(404, {'erreur': 'Inconnu.'})
+        body = None
+        if method == 'POST':
+            try:
+                n = int(self.headers.get('Content-Length', '0'))
+            except ValueError:
+                n = -1
+            if not 0 <= n <= MAX_BODY:
+                self.close_connection = True
+                return self.reply(413, {'erreur': 'Requête trop grosse.'})
+            body = self.rfile.read(n)
+        auth = self.headers.get('Authorization', '')
+        token = auth[7:].strip() if auth.startswith('Bearer ') else ''
+        st, obj = api_call(method, path, body, token if TOKEN_RE.match(token) else '', self.client_ip())
+        self.reply(st, obj)
 
     def websocket(self):
         key = self.headers.get('Sec-WebSocket-Key', '')
@@ -246,6 +372,12 @@ class Handler(SimpleHTTPRequestHandler):
                     continue
                 if m.get('t') == 'create':
                     create(c)
+                elif m.get('t') == 'open':
+                    create(c, hall_of(m))
+                elif m.get('t') == 'list':
+                    list_halls(c)
+                elif m.get('t') == 'close':
+                    leave(c)
                 elif m.get('t') == 'join':
                     join(c, str(m.get('code', '')).strip().upper())
         except OSError:
@@ -299,6 +431,7 @@ def main():
         print(f'  Pour ton ami    : http://{ips[0]}:{PORT}   (même Wi-Fi / réseau)')
     if len(ips) > 1:
         print('  (autres adresses possibles : ' + ', '.join(ips[1:]) + ')')
+    print('  Comptes joueurs : ' + ('activés' if api_call('GET', '/api/sante')[0] == 200 else 'désactivés (docker compose up -d pour les activer)'))
     print('  Laisse cette fenêtre ouverte pendant que vous jouez.')
     print('  (Ctrl+C pour arrêter)')
     print('=' * 60, flush=True)

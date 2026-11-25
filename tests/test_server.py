@@ -231,6 +231,52 @@ class ServerTest(unittest.TestCase):
         g.send_json(**msgs[1])
         self.assertEqual(h.recv_json(), msgs[1])
 
+    def test_hall_listed_then_hidden_when_full(self):
+        h, x = self.client(), self.client()
+        h.send_json(t='open', kind='orc', wpn='gloves', extra='x' * 500)
+        m = h.recv_json()
+        self.assertEqual(m['t'], 'created')
+        self.assertTrue(m['hall'])
+        code = m['code']
+        x.send_json(t='list')
+        rooms = x.recv_json()
+        self.assertEqual(rooms['t'], 'rooms')
+        self.assertEqual(rooms['rooms'], [{'code': code, 'kind': 'orc', 'wpn': 'gloves', 'name': ''}])   # sans compte : pas de pseudo
+        # l'hôte ne se voit pas dans la liste
+        h.send_json(t='list')
+        self.assertEqual(h.recv_json()['rooms'], [])
+        # une partie créée depuis le menu n'est pas listée
+        p = self.client()
+        p.send_json(t='create')
+        self.assertFalse(p.recv_json()['hall'])
+        x.send_json(t='list')
+        self.assertEqual(len(x.recv_json()['rooms']), 1)
+        # on rejoint depuis la liste : le salon complet disparaît
+        x.send_json(t='join', code=code)
+        self.assertEqual(x.recv_json()['t'], 'joined')
+        self.assertEqual(h.recv_json()['t'], 'peer')
+        y = self.client()
+        y.send_json(t='list')
+        self.assertEqual(y.recv_json()['rooms'], [])
+        # l'invité repart : le salon est de nouveau proposé
+        x.close()
+        self.assertEqual(h.recv_json()['t'], 'bye')
+        y.send_json(t='list')
+        self.assertEqual([r['code'] for r in y.recv_json()['rooms']], [code])
+
+    def test_hall_close(self):
+        h, x = self.client(), self.client()
+        h.send_json(t='open', kind='knight', wpn='sword')
+        code = h.recv_json()['code']
+        h.send_json(t='close')
+        x.send_json(t='join', code=code)
+        self.assertEqual(x.recv_json()['t'], 'error')
+        x.send_json(t='list')
+        self.assertEqual(x.recv_json()['rooms'], [])
+        # le salon refermé, la connexion sert encore (rouvrir)
+        h.send_json(t='open', kind='knight', wpn='sword')
+        self.assertEqual(h.recv_json()['t'], 'created')
+
 
 if __name__ == '__main__':
     unittest.main()

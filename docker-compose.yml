@@ -1,0 +1,53 @@
+# Comptes des joueurs : base PostgreSQL + API Rust (api/).
+#   docker compose up -d --build     # démarre les deux (la 1re fois : compile l'API, quelques minutes)
+#   docker compose down              # arrête (les données restent dans le volume spartiate-db)
+#
+# Sécurité :
+#   - la base n'a AUCUN port publié et vit sur un réseau interne (internal: true) : seule l'API la joint,
+#     elle n'est accessible ni depuis ce PC, ni depuis Internet, et n'a pas d'accès sortant ;
+#   - l'API n'est publiée que sur 127.0.0.1 : seul serveur.py (même machine) la joint et relaie /api/* ;
+#   - mot de passe de la base dans .env (SPARTIATE_DB_PASSWORD, jamais commité : voir .env.exemple) ;
+#   - conteneurs en lecture seule, sans privilèges (cap_drop ALL, no-new-privileges).
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: spartiate
+      POSTGRES_USER: spartiate
+      POSTGRES_PASSWORD: ${SPARTIATE_DB_PASSWORD:?mettre SPARTIATE_DB_PASSWORD dans .env (voir .env.exemple)}
+    volumes:
+      - spartiate-db:/var/lib/postgresql/data
+    networks: [interne]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spartiate -d spartiate"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+
+  api:
+    build: ./api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://spartiate:${SPARTIATE_DB_PASSWORD}@db:5432/spartiate
+      FREIN_CONNEXION: ${FREIN_CONNEXION:-10}
+      FREIN_INSCRIPTION: ${FREIN_INSCRIPTION:-5}
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:${SPARTIATE_API_PORT:-8124}:8124"
+    networks: [interne, sortie]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  interne:
+    internal: true      # pas de sortie, pas de port publié : seulement db <-> api
+  sortie: {}            # réseau de l'API pour publier son port sur 127.0.0.1
+
+volumes:
+  spartiate-db:

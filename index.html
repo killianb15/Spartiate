@@ -72,6 +72,30 @@
     color: var(--ink); font: inherit; font-size: 20px; letter-spacing: .3em; text-transform: uppercase; text-align: center; }
   .netrow button { padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04); font-size: 18px; }
   .netrow button:hover { background: rgba(217,164,65,.12); }
+  #acProfil { font-size: 18px; color: var(--muted); margin-top: 4px; }
+  #acProfil b { color: var(--ink); }
+  #acTopList { margin-top: 8px; font-size: 17px; color: var(--muted); }
+  #acTopList ol { margin: 0; padding-left: 26px; }
+  #acTopList b { color: var(--ink); }
+  #acTopList li.me b { color: var(--bronze); }
+  #acDefisList { margin-top: 8px; max-height: 340px; overflow: auto; font-size: 16px; color: var(--muted); }
+  #acDefisList .dh { margin: 8px 0 2px; font-family: Cinzel, serif; font-size: 16px; color: var(--bronze); letter-spacing: .06em; }
+  #acDefisList .dh span { font-family: 'Barlow Condensed', sans-serif; color: var(--muted); margin-left: 6px; }
+  #acDefisList .df { display: grid; grid-template-columns: minmax(0, 1fr) 90px 64px; gap: 2px 8px; align-items: center; padding: 3px 0; }
+  #acDefisList .dn { color: var(--ink); font-weight: 600; }
+  #acDefisList .dd { grid-column: 1; grid-row: 2; font-size: 14px; }
+  #acDefisList .dp { grid-row: 1 / span 2; grid-column: 2; height: 8px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; }
+  #acDefisList .dp i { display: block; height: 100%; background: linear-gradient(90deg, #9b6418, #e3b04f); }
+  #acDefisList .dv { grid-row: 1 / span 2; grid-column: 3; text-align: right; font-size: 14px; }
+  #acDefisList .df.ok .dn { color: #8fe08a; }
+  #acDefisList .df.ok .dp i { background: #6fc36a; }
+  #resDefis { margin: -10px 0 18px; font-size: 20px; color: #f1c66d; }
+  #resDefis b { color: var(--ink); }
+  #resDefis .unlock { color: #8fe08a; }
+  #acDefisList .dh.locked b { color: var(--muted); }
+  .seg button:disabled { opacity: .35; cursor: not-allowed; }
+  #acMsg { margin-top: 6px; font-size: 16px; color: #8fd8ff; }
+  #acMsg:empty { display: none; }
   #netInfo { margin-top: 8px; font-size: 17px; color: var(--muted); line-height: 1.35; }
   #netInfo b { color: var(--ink); }
   #netInfo .code { font-family: Cinzel, serif; font-size: 30px; color: var(--bronze); letter-spacing: .15em; }
@@ -188,6 +212,27 @@
   #shopList button.mine { box-shadow: inset 0 -3px 0 #8fd8ff; }
   #shopKeys { font-size: 15px; color: var(--muted); margin-top: 6px; }
 
+  /* ---------- Salons de la salle d'armes ---------- */
+  #lobby { position: fixed; top: 14px; right: 16px; z-index: 6; width: min(290px, calc(100vw - 32px)); background: rgba(14,9,5,.82);
+    border: 2px solid var(--line); border-radius: 14px; padding: 10px 12px; font-size: 16px; color: var(--muted); }
+  #lobby .lb-title { font-family: Cinzel, serif; font-weight: 900; font-size: 17px; letter-spacing: .12em; color: var(--bronze); margin-bottom: 6px; }
+  #lobby button { padding: 4px 10px; border-radius: 8px; border: 2px solid var(--line); background: rgba(255,255,255,.06);
+    font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: 16px; color: var(--ink); }
+  #lobby button:hover { border-color: #f1c66d; }
+  #lobby button.main { width: 100%; border-color: #f1c66d; background: linear-gradient(180deg, #e3b04f, #9b6418); color: #1b0f05; }
+  #lbMine { line-height: 1.3; }
+  #lbMine .code { font-family: Cinzel, serif; font-weight: 900; font-size: 20px; color: var(--bronze); letter-spacing: .12em; }
+  #lbMine button:not(.main) { display: block; margin-top: 6px; }
+  #lbList { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; max-height: 180px; overflow: auto; }
+  #lbList button { display: flex; justify-content: space-between; gap: 8px; text-align: left; }
+  #lbList b { color: var(--bronze); letter-spacing: .1em; }
+  #lbList i { font-size: 15px; }
+  #lobby .lb-row { display: flex; gap: 6px; }
+  #lbCode { width: 80px; flex: 1; text-transform: uppercase; letter-spacing: .15em; font-size: 16px; padding: 4px 8px; border-radius: 8px;
+    border: 2px solid var(--line); background: rgba(0,0,0,.35); color: var(--ink); }
+  #lbMsg { margin-top: 6px; font-size: 15px; color: #8fd8ff; }
+  #lbMsg:empty { display: none; }
+
   /* ---------- Configuration des touches ---------- */
   #keysOv { z-index: 30; }
   .kpanel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px;
@@ -300,6 +345,21 @@
   <h1>SPARTIATE</h1>
   <div class="sub" id="menuSub">Les arènes des petits gladiateurs</div>
 
+  <div class="sec hidden" id="acctSec"><label>Compte</label>
+    <div id="acctOut">
+      <div class="netrow"><input id="acPseudo" maxlength="16" placeholder="Pseudo" autocomplete="username" spellcheck="false">
+        <input id="acMdp" type="password" maxlength="128" placeholder="Mot de passe" autocomplete="current-password"></div>
+      <div class="netrow"><button id="acLogin" style="flex:1">Se connecter</button><button id="acNew" style="flex:1">Créer un compte</button></div>
+    </div>
+    <div id="acctIn" class="hidden">
+      <div id="acProfil"></div>
+      <div class="netrow"><button id="acDefis" style="flex:1">Défis</button><button id="acTop" style="flex:1">Classement</button><button id="acOut" style="flex:1">Se déconnecter</button></div>
+    </div>
+    <div id="acTopList" class="hidden"></div>
+    <div id="acDefisList" class="hidden"></div>
+    <div id="acMsg"></div>
+  </div>
+
   <div class="sec"><label>Jeu</label>
     <div class="seg" data-key="game">
       <button data-val="arena">Combat en arène</button>
@@ -387,6 +447,13 @@
   <div id="shopList"></div>
   <div id="shopKeys"></div>
 </div>
+<div id="lobby" class="hidden">
+  <div class="lb-title">Salons</div>
+  <div id="lbMine"></div>
+  <div id="lbList"></div>
+  <div class="lb-row"><input id="lbCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false"><button id="lbJoin">Rejoindre</button></div>
+  <div id="lbMsg"></div>
+</div>
 <div id="bossBar" class="hidden">
   <div class="bb-name"><i></i><span id="bbName"></span><i></i></div>
   <div class="bb-frame"><div class="bb-bar">
@@ -402,8 +469,8 @@
   <div class="lbl">Héros</div>
   <div class="grid"><button id="dbgHeal">Soigner</button><button id="dbgGod">Invincible</button><button id="dbgTp">Clic = téléporter</button><button id="dbgKill">Tuer les ennemis</button></div>
   <div class="lbl">Faire apparaître</div><div class="grid" id="dbgFoes"></div>
-  <div class="lbl">Colosse</div>
-  <div class="grid"><button data-boss="slam">Saut écrasant</button><button data-boss="charge">Charge</button><button data-boss="rage">Rage (50 % PV)</button></div>
+  <div class="lbl">Boss (colosse, Cerbère)</div>
+  <div class="grid"><button data-boss="slam">Saut écrasant</button><button data-boss="charge">Charge</button><button data-boss="fire">Souffle de feu</button><button data-boss="rage">Rage (50 % PV)</button></div>
   <div id="dbgInfo"></div>
 </div>
 <div id="announce"></div>
@@ -425,6 +492,7 @@
 <div id="result" class="overlay hidden">
   <h2 id="resTitle">VICTOIRE</h2>
   <p id="resSub">2 – 1</p>
+  <div id="resDefis"></div>
   <div class="btns">
     <button class="main" id="againBtn">Revanche</button>
     <button id="menuBtn">Menu principal</button>

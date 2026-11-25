@@ -43,13 +43,18 @@ export const FOES = {
   zombie: { kind: 'zombie', name: 'Zombie', hp: 44, pow: 0.45, lv: 0, size: 1 },
   // chien invoqué par le grimoire : il se bat dans le camp des héros
   dog: { kind: 'dog', name: 'Chien', hp: 24, pow: 0.6, lv: 1, size: 0.8 },
-  // boss (boss : garde une salle sur 5, voir bossOf) ; moves : attaques spéciales (voir BOSS), adds : renforts
-  // appelés quand il enrage ; wpn : arme (sinon celle du personnage)
+  // chien des enfers : renfort de Cerbère (même corps que le chien du grimoire, dans le camp ennemi)
+  hound: { kind: 'dog', name: 'Chien des enfers', hp: 26, pow: 0.5, lv: 1, size: 0.9, wpn: 'bite' },
+  // boss (boss : garde une salle sur 5, voir bossOf) ; moves : ses attaques spéciales (voir BOSS), adds :
+  // renforts appelés quand il enrage ; wpn : arme (sinon celle du personnage)
   boss: { kind: 'orc', name: 'Chef orc', hp: 140, pow: 0.85, lv: 2, size: 1.4, boss: true },
-  colosse: { kind: 'robot', name: "Colosse d'airain", hp: 190, pow: 0.75, lv: 2, size: 1.9, boss: true, wpn: 'hammer', moves: true, adds: 'zombie' },
+  colosse: { kind: 'robot', name: "Colosse d'airain", hp: 190, pow: 0.75, lv: 2, size: 1.9, boss: true, wpn: 'hammer', moves: ['slam', 'charge'], adds: 'zombie' },
+  // Cerbère : chien géant à trois têtes, gardien des enfers, dans son antre (salle dédiée, room.lair)
+  cerbere: { kind: 'cerbere', name: 'Cerbère', hp: 230, pow: 0.7, lv: 2, size: 2.8, boss: true, wpn: 'fangs', moves: ['fire', 'slam', 'charge'], adds: 'hound' },
 };
-// boss de la salle n (une salle sur BOSS_EVERY) : le chef orc, puis le colosse, en alternance
-export const bossOf = (n) => (Math.floor(n / BOSS_EVERY) % 2 ? 'boss' : 'colosse');
+// boss de la salle n (une salle sur BOSS_EVERY) : chef orc, colosse, Cerbère, puis on recommence
+const BOSS_ORDER = ['boss', 'colosse', 'cerbere'];
+export const bossOf = (n) => BOSS_ORDER[(Math.max(1, Math.floor(n / BOSS_EVERY)) - 1) % BOSS_ORDER.length];
 
 // Attaques spéciales du colosse (state 'special', f.sp = 'slam' | 'charge' | 'roar') :
 //  - slam : il s'accroupit (wind), bondit et retombe sur la position visée (spX, spZ) : onde de choc de
@@ -57,13 +62,17 @@ export const bossOf = (n) => (Math.floor(n / BOSS_EVERY) % 2 ? 'boss' : 'colosse
 //    coûte de la garde ; il reste ensuite planté un instant (rest) ;
 //  - charge : il gratte le sol (wind) puis fonce tout droit (dur) ; s'il heurte un mur ou un obstacle, il
 //    reste sonné (stun) : c'est le moment de frapper ;
-//  - roar : à la moitié de ses PV (rage), il rugit, repousse tout le monde et appelle des renforts.
+//  - roar : à la moitié de ses PV (rage), il rugit, repousse tout le monde et appelle des renforts ;
+//  - fire (Cerbère) : les trois têtes se dressent (wind) puis crachent le feu dans un cône devant lui
+//    (dur) en pivotant lentement vers sa cible ; brûlure toutes les tick s. On l'évite en passant
+//    derrière ou sur le côté, en roulant ; bloquer face à lui coûte de la garde.
 // Pendant une attaque spéciale, il encaisse les coups sans broncher (pas d'interruption).
 export const BOSS = {
   cd: 4.2, cdRage: 2.8, first: 2.5, rage: 0.5, speedRage: 1.25,
   slam: { wind: 0.6, windRage: 0.42, vy: 10, R: 2.7, Rrage: 3.3, dmg: 22, knock: 6.5, guard: 45, rest: 0.75 },
   charge: { wind: 0.75, windRage: 0.5, dur: 0.9, speed: 10.5, dmg: 18, knock: 7, guard: 40, hitR: 0.6, stun: 1.7 },
   roar: { dur: 1.4, at: 0.45, R: 3.6, knock: 7.5 },
+  fire: { wind: 0.75, windRage: 0.5, dur: 1.6, R: 4.8, half: 0.62, turn: 1.0, turnRage: 1.5, tick: 0.2, dmg: 6, guard: 9, knock: 1.2 },
 };
 
 // Héros jouables, chacun avec un petit trait (appliqué par equip)
@@ -77,6 +86,9 @@ export const HEROES = {
   robot: { name: 'Automate', desc: '110 PV, −8 % de dégâts subis', apply: (p) => { p.maxHp = 110; p.armor = 0.08; } },
 };
 export const HERO_IDS = Object.keys(HEROES);
+// Héros jouables d'emblée ; les autres se débloquent dans l'ordre de HERO_IDS (un défi réussi avec un
+// héros débloque le suivant : calculé par le serveur des comptes, api/src/defis.rs).
+export const FIRST_HERO = 'soldier';
 export const WEAPON_IDS = Object.keys(WEAPONS).filter((k) => !WEAPONS[k].hidden);
 
 // Salle d'armes (avant la 1re salle) : on choisit son héros en marchant sur une dalle devant sa
@@ -95,8 +107,8 @@ export const padStand = (pd) => ({ x: -5.9, z: pd.z });
 
 // Boutique : un héros sur la dalle du marchand choisit son arme (p.shop = 1 + arme montrée).
 // ← → (selon l'écran) changent l'arme montrée, attaque ou saut la prend, reculer ou bloquer s'en va.
-// Une arme peut aussi être prise directement (clic, touches 1 à 8) : entrée mx = SHOP + n, mz = 127,
-// blk = vrai (un déplacement au clavier ne donne jamais mx entre 110 et 117).
+// Une arme peut aussi être prise directement (clic, touches 1 à 9) : entrée mx = SHOP + n, mz = 127,
+// blk = vrai (un déplacement au clavier ne donne jamais mx entre 110 et 126).
 const SHOP = 110;
 export const shopInput = (n) => ({ mx: SHOP + n, mz: 127, blk: true, press: 0 });
 const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + WEAPON_IDS.length ? s.mx - SHOP : -1);
@@ -130,11 +142,13 @@ export function equip(p, kind, wpn = defaultWeapon(kind)) {
   Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
+  const tank = wpnOf(p).tank;                   // gants de boxe : se cumule avec l'armure du héros
+  if (tank) p.armor = 1 - (1 - p.armor) * (1 - tank);
   p.hp = p.maxHp;
 }
 function newHero(i, kind, wpn) {
   // team : 0 = camp des héros (héros et chiens invoqués), 1 = ennemis ; owner : maître d'un chien
-  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, boons: '', trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1 });
+  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, boons: '', trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1, kills: 0 });
   equip(p, kind, wpn);
   return p;
 }
@@ -151,10 +165,13 @@ const span = (a, b, sg) => { const p = sg * a * TILE, q = sg * b * TILE; return 
 
 export class DungeonSim extends Sim {
   // kinds : personnage de chaque héros (1 ou 2) ; wpns : leurs armes (par défaut : celle du personnage)
-  constructor(seed = 1, kinds = ['soldier'], wpns = []) {
+  // unlocked : héros débloqués de chaque joueur (listes d'identifiants), ou null = tous (tests, outils).
+  // Ce n'est pas de l'état : identique chez les deux joueurs en ligne (transmis au lancement).
+  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null) {
     super(seed);
     if (!Array.isArray(kinds)) kinds = [kinds];
-    this.f = kinds.map((k, i) => newHero(i, k, wpns[i]));
+    this.unlocked = unlocked ? kinds.map((_, i) => (Array.isArray(unlocked[i]) ? unlocked[i].filter((k) => HEROES[k]) : [])) : null;
+    this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i]));
     this.inp = this.f.map(() => newInput());
     this.g = { phase: 'menu', np: kinds.length, room: 0, kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
       exitOpen: false, chest: 0, chestX: 0, chestZ: 0, o0: '', o1: '', o2: '', pick0: -1, pick1: -1, flagEnd: false };
@@ -164,18 +181,21 @@ export class DungeonSim extends Sim {
   }
 
   isHero(f) { return f.idx < this.g.np; }
+  // le joueur i peut-il prendre ce héros ?
+  canPick(i, kind) { return !this.unlocked || kind === FIRST_HERO || this.unlocked[i]?.includes(kind); }
   get heroes() { return this.f.slice(0, this.g.np); }
   get foesLeft() { let n = 0; for (const e of this.f) if (e.team === 1 && e.state !== 'dead') n++; return n; }
   // chiens vivants invoqués par le héros h
   dogsOf(h) { let n = 0; for (const e of this.f) if (e.owner === h && e.state !== 'dead') n++; return n; }
   get offer() { return [this.g.o0, this.g.o1, this.g.o2]; }
 
-  start() { this.g.room = 0; this.g.kills = 0; this.newRoom(); }
+  start() { this.g.room = 0; this.g.kills = 0; for (const p of this.heroes) p.kills = 0; this.newRoom(); }
 
   // ---------------- salle d'armes ----------------
   startHub() {
     const g = this.g;
     g.room = 0; g.kills = 0;
+    for (const p of this.heroes) p.kills = 0;
     const obs = HUB_PADS.filter((pd) => pd.t === 'hero').map((pd) => ({ ...padStand(pd), r: OBS_R.stand, kind: 'stand' }));
     // comptoir du marchand (trois cercles côte à côte)
     for (const dx of [-0.8, 0, 0.8]) obs.push({ x: MERCHANT.x + dx, z: MERCHANT.counterZ, r: OBS_R.stand, kind: 'counter' });
@@ -207,6 +227,11 @@ export class DungeonSim extends Sim {
     const pd = pads[on];
     if (pd.t === 'shop') { this.enterShop(p, pd); return; }
     if (pd.id === p.kind) return;
+    if (!this.canPick(p.idx, pd.id)) {
+      this.emit('pop', 'VERROUILLÉ', p.x, p.y + 2.1, p.z, 'miss');
+      this.emit('sfx', 'dodge');
+      return;
+    }
     equip(p, pd.id, p.wpn === defaultWeapon(p.kind) ? defaultWeapon(pd.id) : p.wpn);
     this.equipped(p, HEROES[pd.id].name);
   }
@@ -286,7 +311,8 @@ export class DungeonSim extends Sim {
     // estrades avec un escalier tourné vers le centre (à partir de la 3e salle)
     const surf = [];
     const q = r.next();
-    const nPlat = n < 3 ? 0 : boss ? 2 : q < 0.4 ? 1 : q < 0.6 ? 2 : 0;
+    const lair = bossId === 'cerbere';            // antre de Cerbère : salle dédiée, arène dégagée
+    const nPlat = n < 3 || lair ? 0 : boss ? 2 : q < 0.4 ? 1 : q < 0.6 ? 2 : 0;
     const quads = [[1, 1], [-1, 1], [1, -1], [-1, -1]];
     for (let p = 0; p < nPlat; p++) {
       const [sx, sz] = quads.splice((r.next() * quads.length) | 0, 1)[0];
@@ -320,8 +346,9 @@ export class DungeonSim extends Sim {
       return null;
     };
     const obs = [];
-    const nObs = boss ? 2 : (r.next() * 4) | 0;
+    const nObs = lair ? 0 : boss ? 2 : (r.next() * 4) | 0;
     const kinds = ['column', 'column', 'barrel', 'rocks'];
+    if (lair) for (const [i, j] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) obs.push({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' });
     for (let k = 0; k < nObs; k++) {
       const t = freeTile();
       if (!t) break;
@@ -329,11 +356,11 @@ export class DungeonSim extends Sim {
       obs.push({ x: t[0], z: t[1], r: OBS_R[kind], kind });
     }
     const traps = [];
-    if (n >= 2 && r.next() < 0.45) {
+    if (n >= 2 && !lair && r.next() < 0.45) {
       const nt = 2 + ((r.next() * 3) | 0);
       for (let k = 0; k < nt; k++) { const t = freeTile(); if (t) traps.push({ x: t[0], z: t[1] }); }
     }
-    this.room = { exit, obs, surf, traps, boss, bossId };
+    this.room = { exit, obs, surf, traps, boss, bossId, lair: lair ? 'cerbere' : '' };
 
     // les héros entrent par le mur opposé à la sortie (les héros tombés se relèvent)
     const ent = ROOM_R - 0.7;
@@ -398,7 +425,7 @@ export class DungeonSim extends Sim {
     const e = Object.assign(newFighter(idx), { x, z, yaw, visTarget: yaw, kind: T.kind, wpn: T.wpn ?? defaultWeapon(T.kind), foe: id, size: T.size,
       boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
     e.arch = !!wpnOf(e).bow;
-    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first, rage: 0 });
+    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first, rage: 0, spTick: 0 });
     e.y = this.groundY(e);
     return e;
   }
@@ -524,20 +551,20 @@ export class DungeonSim extends Sim {
     dmg = Math.max(1, Math.round(dmg * att.pow * (1 - def.armor)));
     if (att.leech) heal(att, att.leech);
     if (def.boss) knock *= 0.4;               // le chef ne recule presque pas
-    if (def.sp) this.armorHit(def, dmg, cx, cy, cz);
+    if (def.sp) this.armorHit(att, def, dmg, cx, cy, cz);
     else super.damage(att, def, dmg, knock, dur, cx, cy, cz);
     // le colosse enrage à la moitié de ses PV
     if (def.sp !== undefined && !def.rage && def.state !== 'dead' && def.hp <= def.maxHp * BOSS.rage) this.startSpecial(def, 'roar');
   }
   // coup encaissé sans broncher (boss pendant une attaque spéciale)
-  armorHit(def, dmg, cx, cy, cz) {
+  armorHit(att, def, dmg, cx, cy, cz) {
     def.hp = Math.max(0, def.hp - dmg);
     this.emit('fx', def.idx, 'hit');
     this.emit('emit', cx, cy, cz, 12, { color: [0xffffff, 0xffe27a, 0xff6a4a], speed: 4, up: 3, size: 0.09, life: 0.4, grav: 9 });
     this.emit('pop', `-${dmg}`, def.x, def.y + 1.75 * def.size, def.z, 'dmg');
     this.emit('sfx', 'clang');
     this.g.hitstop = Math.max(this.g.hitstop, 0.04);
-    if (def.hp <= 0) { def.sp = ''; this.die(def); this.g.hitstop = 0.22; this.onKO(null, def); }
+    if (def.hp <= 0) { def.sp = ''; this.die(def); this.g.hitstop = 0.22; this.onKO(att, def); }
   }
 
   // ---------------- attaques spéciales du boss ----------------
@@ -549,6 +576,11 @@ export class DungeonSim extends Sim {
     const o = this.target(e.idx);
     if (!o) return;
     const d = hypot(o.x - e.x, o.z - e.z);
+    if (FOES[e.foe].moves.includes('fire')) {
+      // Cerbère : loin, il charge ; à portée de flammes, il crache le feu ; collé, il bondit une fois sur deux
+      this.startSpecial(e, d > BOSS.fire.R + 0.4 ? 'charge' : d < 2.4 && this.rng.next() < 0.5 ? 'slam' : 'fire');
+      return;
+    }
     // loin : charge ; près : saut écrasant ; entre les deux : au hasard (rng de la simulation)
     this.startSpecial(e, d > 4.2 ? 'charge' : d < 2.4 ? 'slam' : this.rng.next() < 0.5 ? 'charge' : 'slam');
   }
@@ -564,6 +596,10 @@ export class DungeonSim extends Sim {
       e.spX = sin(e.yaw); e.spZ = cos(e.yaw);
       this.play(e, 'emote-no', { ts: 1.8, fade: 0.08 });
       this.emit('sfx', 'steam');
+    } else if (kind === 'fire') {
+      if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+      e.spTick = 0;
+      this.emit('sfx', 'growl');
     } else {
       e.rage = 1;
       this.play(e, 'emote-yes', { ts: 0.8, fade: 0.08, loop: false });
@@ -622,6 +658,24 @@ export class DungeonSim extends Sim {
           this.emit('emit', e.x + e.spX * 0.6, e.y + 1.2, e.z + e.spZ * 0.6, 26, { color: [0xc0c0c8, 0x8a8090, 0xffe27a], speed: 4, up: 3, size: 0.1, life: 0.7, grav: 8 });
         } else if (e.spT >= C.dur) this.endSpecial(e);
       }
+    } else if (e.sp === 'fire') {
+      const F = BOSS.fire;
+      if (e.spA === 0) {
+        if (e.spT >= (rage ? F.windRage : F.wind)) { e.spA = 1; e.spT = 0; e.spTick = 0; this.emit('sfx', 'flame'); this.emit('shake', 0.12); }
+      } else {
+        // il pivote lentement vers sa cible pendant qu'il crache (on peut le contourner)
+        const o = this.target(e.idx);
+        if (o) {
+          const want = atan2(o.x - e.x, o.z - e.z), turn = (rage ? F.turnRage : F.turn) * dt;
+          let da = want - e.yaw;
+          while (da > Math.PI) da -= 2 * Math.PI;
+          while (da < -Math.PI) da += 2 * Math.PI;
+          e.yaw += clamp(da, -turn, turn); e.visTarget = e.yaw;
+        }
+        e.spTick -= dt;
+        if (e.spTick <= 0) { e.spTick += F.tick; this.flames(e); }
+        if (e.spT >= F.dur) this.endSpecial(e);
+      }
     } else if (e.sp === 'roar') {
       const R = BOSS.roar;
       if (e.spA === 0 && e.spT >= R.at) {
@@ -644,6 +698,30 @@ export class DungeonSim extends Sim {
         }
       }
       if (e.spT >= R.dur) this.endSpecial(e);
+    }
+  }
+  // souffle de feu : brûlure de tous ceux qui sont dans le cône devant le boss (une fois par tick)
+  flames(e) {
+    const F = BOSS.fire, fx = sin(e.yaw), fz = cos(e.yaw), R = F.R * (e.size / FOES.cerbere.size);
+    // flammes visibles : un jet par tête (gauche, milieu, droite)
+    for (const a of [-0.32, 0, 0.32]) {
+      const dx = sin(e.yaw + a), dz = cos(e.yaw + a);
+      this.emit('emit', e.x + dx * 0.55 * e.size, e.y + 0.42 * e.size, e.z + dz * 0.55 * e.size, 6,
+        { color: [0xffe27a, 0xff9a2e, 0xff4a1a], speed: 7.5, up: 0.6, size: 0.16, life: 0.6, dir: { x: dx, z: dz }, grav: -1.5 });
+    }
+    for (const d of this.f) {
+      if (d.state === 'dead' || d.team === e.team) continue;
+      const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
+      if (dist > R + 0.3 || dist < 0.05 || Math.abs(d.y - e.y) > 1.6) continue;
+      if ((dx * fx + dz * fz) / dist < cos(F.half)) continue;          // hors du cône
+      if (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36) continue;
+      if (d.state === 'block' && sin(d.yaw) * fx + cos(d.yaw) * fz < -0.2) {
+        d.guard -= F.guard * wpnOf(d).guard; d.guardT = 0;
+        this.emit('fx', d.idx, 'blocked');
+        if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(e, d, F.dmg, F.knock, 0.15, d.x, d.y + 1, d.z);
     }
   }
   // retombée du saut : onde de choc autour du point d'impact
@@ -749,6 +827,9 @@ export class DungeonSim extends Sim {
       return;
     }
     g.kills++;
+    // victime d'un héros ou de son chien : comptée pour ses défis (kills, remis à zéro à chaque donjon)
+    const k = att ? (this.isHero(att) ? att.idx : att.owner) : -1;
+    if (k >= 0 && this.f[k]) this.f[k].kills++;
     this.emit('sfx', 'coin');
     this.emit('emit', def.x, def.y + 1, def.z, 18, { color: [0xffd34a, 0xffe27a, 0xfff0a0], speed: 2.5, up: 4, size: 0.08, life: 0.9, grav: 9 });
     if (this.foesLeft === 0 && g.phase === 'fight') {
@@ -841,7 +922,7 @@ export class DungeonSim extends Sim {
     if (e && this.g.phase === 'intro') { this.g.phase = 'fight'; this.g.t = 0; }
     if (!e || this.g.phase !== 'fight') return false;
     if (kind === 'rage') { e.hp = Math.min(e.hp, Math.floor(e.maxHp * BOSS.rage)); if (!e.rage) this.startSpecial(e, 'roar'); return true; }
-    if (e.sp || !this.target(e.idx)) return false;
+    if (e.sp || !this.target(e.idx) || !FOES[e.foe].moves.includes(kind)) return false;   // une attaque qu'il connaît
     this.startSpecial(e, kind);
     return true;
   }

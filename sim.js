@@ -39,8 +39,12 @@ export const WEAPONS = {
   hammer: { name: 'Marteau de guerre', desc: 'Un seul coup écrasant, qui ruine la garde', reach: 1.6, dmg: 17, combo: 1, run: 0.94, guard: 1.3, crush: 1.8 },
   staff: { name: 'Sceptre de feu', desc: 'Boules de feu qui explosent et brûlent tout autour', reach: 1.45, dmg: 6, combo: 3, run: 1, guard: 1.4, bow: true, fire: true },
   tome: { name: 'Grimoire', desc: 'Invoque des chiens qui se battent pour toi (2 au plus)', reach: 1.3, dmg: 5, combo: 2, run: 1, guard: 1.3, summon: true },
+  // tank : part des dégâts encaissée par les gants (donjon : s'ajoute à l'armure du héros, voir equip)
+  gloves: { name: 'Gants de boxe', desc: 'Pour encaisser : −20 % de dégâts subis et la meilleure garde, mais petits coups de près', reach: 1.15, dmg: 6, combo: 3, run: 1, guard: 0.45, tank: 0.2 },
   // crocs des chiens invoqués (pas proposés dans la salle d'armes)
   bite: { name: 'Crocs', desc: '', reach: 1.25, dmg: 8, combo: 2, run: 1.25, guard: 1.5, hidden: true },
+  // les trois gueules de Cerbère : un enchaînement de 3 morsures (une par tête), de loin (il est grand)
+  fangs: { name: 'Trois gueules', desc: '', reach: 2.0, dmg: 13, combo: 3, run: 1.05, guard: 1, hidden: true },
   bow: { name: 'Arc', desc: 'Tire des flèches ; on court plus vite, mais on bloque mal', reach: 1.45, dmg: SHOT.bash, combo: 3, run: SHOT.run, guard: 1.6, bow: true },
 };
 export const wpnOf = (f) => WEAPONS[f.wpn] ?? WEAPONS.sword;

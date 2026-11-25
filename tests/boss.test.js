@@ -18,11 +18,13 @@ const boss = (s) => s.f.find((f) => f.foe === 'colosse');
 // fait avancer jusqu'à ce que cond soit vraie (ou n images)
 const until = (s, cond, n = 600, i0 = () => NEUTRAL) => { for (let k = 0; k < n && !cond(); k++) s.step(i0(k)); return cond(); };
 
-test('les boss alternent : chef orc (salles 5, 15…), colosse (salles 10, 20…)', () => {
+test('les boss se suivent : chef orc (5, 20…), colosse (10, 25…), Cerbère (15, 30…)', () => {
   assert.equal(bossOf(5), 'boss');
   assert.equal(bossOf(10), 'colosse');
-  assert.equal(bossOf(15), 'boss');
-  assert.equal(bossOf(20), 'colosse');
+  assert.equal(bossOf(15), 'cerbere');
+  assert.equal(bossOf(20), 'boss');
+  assert.equal(bossOf(25), 'colosse');
+  assert.equal(bossOf(30), 'cerbere');
   const s = colosseRoom();
   assert.equal(s.room.bossId, 'colosse');
   const e = boss(s);
