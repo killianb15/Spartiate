@@ -79,7 +79,10 @@ export class AI {
         break;
       }
     }
-    if (this.think <= 0) this.decide(out, me, o, L, dist, ux, uz);
+    // grands corps (boss) : ils ne se rapprochent pas à moins de 0,45 x (somme des tailles) ; ce contact
+    // compte comme le corps à corps (1,2) pour les distances de décision (rien ne change à taille normale)
+    const touch = 0.45 * ((me.size ?? 1) + (o.size ?? 1));
+    if (this.think <= 0) this.decide(out, me, o, L, Math.max(0.001, dist - Math.max(0, touch - 1.2)), ux, uz);
     out.mx = quant(out.mx); out.mz = quant(out.mz);
     return out;
   }

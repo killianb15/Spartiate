@@ -100,3 +100,47 @@ test('outil de débogage : chaque boss ne lance que ses propres attaques', () =>
   assert.equal(s.debugBoss('fire'), false, 'le colosse ne crache pas de feu');
   assert.equal(s.debugBoss('slam'), true);
 });
+
+test('on touche les grands boss au contact, avec toutes les armes de corps à corps (bug : Cerbère intouchable)', () => {
+  // collé au boss (aussi près que les corps le permettent), face à lui : le coup doit porter
+  const hitAtContact = (room, foe, wpn) => {
+    const s = new DungeonSim(4, ['soldier'], [wpn]);
+    s.start();
+    s.debugGoto(room);
+    while (s.g.phase !== 'fight') s.step();
+    const e = s.f.find((f) => f.foe === foe), p = s.f[0];
+    e.spCd = 99;                                                      // pas d'attaque spéciale pendant le test
+    const d = 0.45 * (p.size + e.size) + 0.02;
+    Object.assign(e, { x: 0, z: 0, vx: 0, vz: 0 });
+    Object.assign(p, { x: 0, z: d, vx: 0, vz: 0, yaw: Math.PI, visTarget: Math.PI });
+    s.ais[e.idx] = null;                                              // le boss ne bouge pas
+    const hp0 = e.hp;
+    s.startAttack(p, false);
+    for (let k = 0; k < 30; k++) s.step();
+    return hp0 - e.hp;
+  };
+  for (const wpn of ['sword', 'gloves', 'spear', 'axe', 'hammer']) {
+    assert.ok(hitAtContact(15, 'cerbere', wpn) > 0, `Cerbère touché au ${wpn}`);
+    assert.ok(hitAtContact(10, 'colosse', wpn) > 0, `colosse touché au ${wpn}`);
+  }
+});
+
+test('Cerbère mord : son IA attaque au contact (sinon il tournait autour du héros sans frapper)', () => {
+  // 5 combats de 15 s contre un héros immobile : ~80 morsures avant la correction, ~190 après
+  let bites = 0;
+  for (const seed of [6, 7, 8, 9, 10]) {
+    const s = new DungeonSim(seed, ['soldier']);
+    s.start();
+    s.debugGoto(15);
+    while (s.g.phase !== 'fight') s.step();
+    const e = s.f.find((f) => f.foe === 'cerbere'), p = s.f[0];
+    s.debugGod(true);
+    for (let k = 0; k < 900; k++) {
+      e.spCd = 99;                                    // seulement ses morsures
+      p.x = 0; p.z = 0; p.vx = p.vz = 0;              // le héros ne bouge pas
+      s.step();
+      if (e.state === 'attack' && e.stateT < s.dt * 1.5) bites++;
+    }
+  }
+  assert.ok(bites >= 130, `${bites} morsures`);
+});

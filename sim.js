@@ -563,13 +563,16 @@ export class Sim {
     const afx = fx(att), afz = fz(att);
     const dx = def.x - att.x, dz = def.z - att.z, dy = def.y - att.y;
     const along = dx * afx + dz * afz, lateral = Math.abs(dx * afz - dz * afx);
-    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45)) return;
+    // une grande cible (boss) a un corps plus large : la portée compte depuis sa surface, pas son centre
+    // (deux corps restent à 0,45 x (somme des tailles) l'un de l'autre, voir DungeonSim)
+    const big = 0.45 * Math.max(0, (def.size ?? 1) - 1), hitW = HIT_W + big;
+    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45) + big) return;
     if (kind === 'air' ? (dy > 0.6 || dy < -1.7) : Math.abs(dy) > 0.9) return;
-    const reach = Math.min(Math.max(along, 0.3), 0.75);
+    const reach = Math.min(Math.max(along - big, 0.3), 0.75);
     const cx = att.x + afx * reach, cy = Math.max(att.y, def.y) + 0.85, cz = att.z + afz * reach;
-    if (lateral > HIT_W) {
+    if (lateral > hitW) {
       // le coup passe à côté : esquive par un pas de côté (seulement si on était à portée)
-      if (along > 0.2 && lateral < HIT_W + 0.8) { att.hitDone = true; this.emit('pop', 'ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); this.emit('sfx', 'dodge'); }
+      if (along > 0.2 && lateral < hitW + 0.8) { att.hitDone = true; this.emit('pop', 'ESQUIVE', def.x, def.y + 1.8, def.z, 'miss'); this.emit('sfx', 'dodge'); }
       return;
     }
     att.hitDone = true;
