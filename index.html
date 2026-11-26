@@ -24,7 +24,7 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #120c08; color: var(--ink);
     font-family: 'Barlow Condensed', system-ui, sans-serif; user-select: none; }
-  canvas { display: block; position: fixed; inset: 0; }
+  canvas { display: block; position: fixed; inset: 0; width: 100%; height: 100%; }
   .hidden { display: none !important; }
   #netStat { position: fixed; left: 12px; bottom: 8px; z-index: 5; font-size: 14px; letter-spacing: .04em; color: var(--muted); opacity: .78; pointer-events: none; text-shadow: 0 1px 2px #000; }
   button { font: inherit; color: inherit; cursor: pointer; }
@@ -149,24 +149,24 @@
   #announce.show { animation: ann 1.2s ease-out forwards; }
   #biome { position: fixed; left: 0; right: 0; top: 27%; text-align: center; z-index: 8; pointer-events: none; opacity: 0;
     font-family: Cinzel, serif; font-weight: 800; font-size: clamp(20px, 3.6vw, 40px); letter-spacing: .16em; color: #f1c66d;
-    text-shadow: 0 3px 0 #2a1806, 0 0 24px rgba(0,0,0,.8); }
+    text-shadow: 0 3px 0 #2a1806, 0 0 24px rgba(0,0,0,.8); will-change: transform, opacity; }
   #biome.show { animation: biome 3.2s ease-out forwards; }
-  @keyframes biome { 0% { opacity: 0; letter-spacing: .5em; } 18% { opacity: 1; letter-spacing: .16em; } 75% { opacity: 1; } 100% { opacity: 0; } }
+  @keyframes biome { 0% { opacity: 0; transform: scale(1.16); } 18% { opacity: 1; transform: scale(1); } 75% { opacity: 1; } 100% { opacity: 0; } }
   #announce.ko { color: #ff6a50; text-shadow: 0 6px 0 #3a0c06, 0 0 50px rgba(255,60,30,.7); }
   @keyframes ann { 0% { opacity: 0; transform: scale(2.2); } 12% { opacity: 1; transform: scale(.95); } 20% { transform: scale(1); }
     80% { opacity: 1; } 100% { opacity: 0; transform: scale(1.05); } }
-  #pops { position: fixed; inset: 0; pointer-events: none; z-index: 7; }
-  .pop { position: absolute; transform: translate(-50%, -50%); font-family: Cinzel, serif; font-weight: 900; font-size: 26px;
-    color: #fff; -webkit-text-stroke: 1px #000; text-shadow: 0 3px 0 #000; animation: pop 1s ease-out forwards; white-space: nowrap; }
+  #pops { position: fixed; inset: 0; pointer-events: none; z-index: 7; contain: layout style; }
+  .pop { position: absolute; transform: translate3d(-50%, -50%, 0); font-family: Cinzel, serif; font-weight: 900; font-size: 26px;
+    color: #fff; -webkit-text-stroke: 1px #000; text-shadow: 0 3px 0 #000; animation: pop 1s ease-out forwards; white-space: nowrap; will-change: transform, opacity; }
   .pop.dmg { font-family: 'Barlow Condensed'; font-size: 30px; color: #ffe27a; }
   .pop.parry { color: #8fd8ff; font-size: 32px; }
   .pop.brk { color: #ffb04a; font-size: 32px; }
   .pop.miss { color: #d8d8d8; font-size: 22px; }
-  @keyframes pop { 0% { opacity: 0; margin-top: 10px; transform: translate(-50%,-50%) scale(.6); }
-    15% { opacity: 1; transform: translate(-50%,-50%) scale(1.15); } 30% { transform: translate(-50%,-50%) scale(1); }
-    100% { opacity: 0; margin-top: -60px; } }
+  @keyframes pop { 0% { opacity: 0; transform: translate3d(-50%, calc(-50% + 10px), 0) scale(.6); }
+    15% { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1.15); } 30% { transform: translate3d(-50%, -50%, 0) scale(1); }
+    100% { opacity: 0; transform: translate3d(-50%, calc(-50% - 60px), 0); } }
 
-  #fade, #flash { position: fixed; inset: 0; pointer-events: none; z-index: 9; opacity: 0; }
+  #fade, #flash { position: fixed; inset: 0; pointer-events: none; z-index: 9; opacity: 0; will-change: opacity; }
   #fade { background: #0a0604; transition: opacity .3s; }
   #fade.on { opacity: 1; }
   #flash { background: #dfe8ff; }
@@ -429,6 +429,13 @@
   <div class="sec" id="arenaSec"><label>Arène</label>
     <div class="cards" id="arenaCards"></div>
   </div>
+  <div class="sec" id="gfxSec"><label>Graphismes</label>
+    <div class="seg" data-key="gfx">
+      <button data-val="low" title="Petit PC : sans ombres, éclairage allégé, effets réduits">Bas (Petit PC)</button>
+      <button data-val="med" title="PC moyen : bon équilibre entre graphismes et fluidité">Moyen</button>
+      <button data-val="high" title="Gros PC : ombres fines, effets et détails complets">Élevé (Gros PC)</button>
+    </div>
+  </div>
 
   <button id="go">COMBATTRE</button>
 
@@ -508,6 +515,7 @@
   <p id="pauseTxt">Échap pour reprendre</p>
   <div class="btns">
     <button class="main" id="resumeBtn">Reprendre</button>
+    <button id="pauseGfxBtn">Graphismes : Moyen</button>
     <button id="pauseKeysBtn">Touches</button>
     <button id="quitBtn">Menu principal</button>
   </div>

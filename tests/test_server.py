@@ -1,5 +1,7 @@
 """Tests du serveur (stdlib uniquement) : lance le vrai serveur en sous-processus."""
 import base64
+import gzip
+import http.client
 import json
 import os
 import socket
@@ -153,7 +155,39 @@ class ServerTest(unittest.TestCase):
     def test_http_index(self):
         with urllib.request.urlopen(f'http://127.0.0.1:{self.port}/index.html', timeout=5) as r:
             self.assertEqual(r.status, 200)
+            self.assertEqual(r.headers.get('Cache-Control'), 'no-cache')
             self.assertIn(b'<', r.read(200))
+
+    def test_http_gzip_cache_and_keepalive(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+        try:
+            conn.request('GET', '/game.js', headers={'Accept-Encoding': 'gzip'})
+            r1 = conn.getresponse()
+            body1 = r1.read()
+            self.assertEqual(r1.status, 200)
+            self.assertEqual(r1.getheader('Content-Encoding'), 'gzip')
+            self.assertEqual(r1.getheader('Cache-Control'), 'no-cache')
+            raw1 = gzip.decompress(body1)
+            with open(os.path.join(ROOT, 'game.js'), 'rb') as f:
+                self.assertEqual(raw1, f.read())
+
+            # même connexion HTTP/1.1 réutilisée pour un modèle 3D (cache long + gzip)
+            conn.request('GET', '/assets/biomes/lava.glb', headers={'Accept-Encoding': 'gzip'})
+            r2 = conn.getresponse()
+            body2 = r2.read()
+            self.assertEqual(r2.status, 200)
+            self.assertEqual(r2.getheader('Content-Encoding'), 'gzip')
+            self.assertEqual(r2.getheader('Cache-Control'), 'public, max-age=86400')
+            with open(os.path.join(ROOT, 'assets/biomes/lava.glb'), 'rb') as f:
+                self.assertEqual(gzip.decompress(body2), f.read())
+
+            # fichier caché toujours refusé même avec gzip
+            conn.request('GET', '/.gitignore', headers={'Accept-Encoding': 'gzip'})
+            r3 = conn.getresponse()
+            r3.read()
+            self.assertEqual(r3.status, 404)
+        finally:
+            conn.close()
 
     def test_create_join_relay(self):
         h, g, code = self.pair()
