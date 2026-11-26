@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlsplit
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ARGS = [a for a in sys.argv[1:] if not a.startswith('-')]
-PORT = int(ARGS[0]) if ARGS else 8123
+PORT = int(ARGS[0]) if ARGS and ARGS[0].isdigit() else 8123   # (importé par les tests : autres arguments)
 OPEN_BROWSER = '--no-browser' not in sys.argv[1:]
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
