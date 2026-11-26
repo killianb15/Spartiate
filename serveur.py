@@ -4,6 +4,8 @@ Aucune dépendance pour jouer : seulement la bibliothèque standard de Python.
 Comptes des joueurs (/api/...) : facultatifs, relayés vers l'API Rust (api/, docker-compose.yml),
 seule à parler à la base PostgreSQL. Sans elle, le jeu marche comme avant (comptes indisponibles)."""
 import base64
+import email.utils
+import gzip
 import hashlib
 import http.client
 import ipaddress
@@ -286,7 +288,31 @@ def hidden(path):
     return any(part.startswith('.') for part in unquote(path).replace('\\', '/').split('/'))
 
 
+# Compression gzip en mémoire des fichiers statiques (GLB, JS, HTML : ~78 % plus léger au chargement)
+GZIP_EXTS = {'.js', '.mjs', '.html', '.css', '.json', '.svg', '.glb'}
+GZIP_CACHE = {}          # (chemin, mtime_ns, taille) -> bytes compressés
+GZIP_CACHE_MAX = 200
+GZIP_LOCK = threading.Lock()
+
+
+def gzip_bytes(fs_path, st):
+    """Renvoie la version gzip d'un fichier (mise en cache en mémoire tant que le fichier ne change pas)."""
+    key = (fs_path, st.st_mtime_ns, st.st_size)
+    with GZIP_LOCK:
+        hit = GZIP_CACHE.get(key)
+        if hit is not None:
+            return hit
+    with open(fs_path, 'rb') as f:
+        data = gzip.compress(f.read(), compresslevel=6)
+    with GZIP_LOCK:
+        if len(GZIP_CACHE) >= GZIP_CACHE_MAX:
+            GZIP_CACHE.clear()
+        GZIP_CACHE[key] = data
+    return data
+
+
 class Handler(SimpleHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'     # connexions persistantes (keep-alive) : bien moins de poignées de main TCP
     extensions_map = {
         **SimpleHTTPRequestHandler.extensions_map,
         '.js': 'text/javascript', '.mjs': 'text/javascript',
@@ -296,9 +322,55 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def cache_policy(self):
+        path = self.path.split('?')[0]
+        if path.startswith('/assets/'):
+            return 'public, max-age=86400'
+        return 'no-cache'
+
     def end_headers(self):
-        self.send_header('Cache-Control', 'no-cache')
+        has_cc = any(line.lower().startswith(b'cache-control:') for line in getattr(self, '_headers_buffer', ()))
+        if not has_cc:
+            self.send_header('Cache-Control', self.cache_policy())
         super().end_headers()
+
+    def serve_gzip(self, head_only=False):
+        """Sert le fichier statique compressé en gzip si le navigateur l'accepte. Renvoie True si traité."""
+        if 'gzip' not in self.headers.get('Accept-Encoding', '').lower():
+            return False
+        fs_path = self.translate_path(self.path)
+        if not os.path.isfile(fs_path):
+            return False
+        _, ext = os.path.splitext(fs_path)
+        if ext.lower() not in GZIP_EXTS:
+            return False
+        try:
+            st = os.stat(fs_path)
+            ims = self.headers.get('If-Modified-Since')
+            if ims:
+                try:
+                    t = email.utils.parsedate_to_datetime(ims)
+                    if t.tzinfo is not None and int(st.st_mtime) <= int(t.timestamp()):
+                        self.send_response(304)
+                        self.send_header('Vary', 'Accept-Encoding')
+                        self.send_header('Content-Length', '0')
+                        self.end_headers()
+                        return True
+                except (TypeError, ValueError, OverflowError):
+                    pass
+            gz = gzip_bytes(fs_path, st)
+        except OSError:
+            return False
+        self.send_response(200)
+        self.send_header('Content-Type', self.guess_type(fs_path))
+        self.send_header('Content-Encoding', 'gzip')
+        self.send_header('Vary', 'Accept-Encoding')
+        self.send_header('Content-Length', str(len(gz)))
+        self.send_header('Last-Modified', self.date_time_string(st.st_mtime))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(gz)
+        return True
 
     def do_GET(self):
         path = self.path.split('?')[0]
@@ -308,13 +380,13 @@ class Handler(SimpleHTTPRequestHandler):
             self.api('GET', path)
         elif hidden(path):
             self.send_error(404)     # .git, .env… : jamais servis
-        else:
+        elif not self.serve_gzip(head_only=False):
             super().do_GET()
 
     def do_HEAD(self):
         if hidden(self.path.split('?')[0]):
             self.send_error(404)
-        else:
+        elif not self.serve_gzip(head_only=True):
             super().do_HEAD()
 
     def do_POST(self):
