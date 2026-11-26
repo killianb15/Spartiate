@@ -76,6 +76,14 @@ export const BOSS = {
   fire: { wind: 0.75, windRage: 0.5, dur: 1.6, R: 4.8, half: 0.62, turn: 1.0, turnRage: 1.5, tick: 0.2, dmg: 6, guard: 9, knock: 1.2 },
 };
 
+// Adaptation au nombre de joueurs (à deux) : chacun doit subir autant qu'en solo (dégâts reçus par héros,
+// durée des salles). Réglée avec tools/equilibrage.mjs (héros joués par l'IA, mêmes salles seul et à deux).
+// count/cap : nombre d'ennemis des salles normales ; hp, pow : PV et dégâts des ennemis ; boss* : boss ;
+// escort/escortCap : escorte du chef orc
+export const COOP = { count: 2, cap: 10, hp: 1.3, pow: 1.25, bossHp: 2.2, bossPow: 2, bossCd: 0.6, escort: 1.5, escortCap: 6 };
+// multiplicateur de COOP pour np joueurs (1 en solo)
+const coop = (np, k) => (np > 1 ? COOP[k] : 1);
+
 // Héros jouables, chacun avec un petit trait (appliqué par equip)
 export const HEROES = {
   soldier: { name: 'Gladiateur', desc: 'Équilibré', apply: () => {} },
@@ -377,10 +385,12 @@ export class DungeonSim extends Sim {
     // ennemis (plus nombreux à deux)
     const list = [];
     // le chef orc vient avec des orcs ; le colosse arrive seul (ses renforts viennent quand il enrage)
-    if (boss) { list.push(bossId); if (bossId === 'boss') for (let k = 0; k < Math.min(4, n / BOSS_EVERY + np - 1); k++) list.push('grunt'); }
+    // (à deux, son escorte grandit : x COOP.escort + 1, au plus COOP.escortCap)
+    const escort = Math.min(4, n / BOSS_EVERY), escortN = np > 1 ? Math.min(COOP.escortCap, Math.ceil(escort * COOP.escort) + 1) : escort;
+    if (boss) { list.push(bossId); if (bossId === 'boss') for (let k = 0; k < escortN; k++) list.push('grunt'); }
     else {
       let count = Math.min(5, 1 + Math.floor(n / 2));
-      if (np > 1) count = Math.min(7, Math.ceil(count * 1.5));
+      if (np > 1) count = Math.min(COOP.cap, Math.ceil(count * COOP.count));
       for (let k = 0; k < count; k++) {
         const u = r.next();
         // à partir de la 2e salle, environ un ennemi sur cinq est un archer
@@ -422,11 +432,11 @@ export class DungeonSim extends Sim {
   // ennemi n° idx de type id (PV et dégâts selon la profondeur et le nombre de héros)
   newFoe(id, idx, x, z, yaw) {
     const T = FOES[id], n = Math.max(1, this.g.room);
-    const hp = Math.round(T.hp * (1 + 0.07 * (n - 1)) * (this.g.np > 1 ? 1.15 : 1));
+    const np = this.g.np, hp = Math.round(T.hp * (1 + 0.07 * (n - 1)) * coop(np, T.boss ? 'bossHp' : 'hp'));
     const e = Object.assign(newFighter(idx), { x, z, yaw, visTarget: yaw, kind: T.kind, wpn: T.wpn ?? defaultWeapon(T.kind), foe: id, size: T.size,
-      boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
+      boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)) * coop(np, T.boss ? 'bossPow' : 'pow'), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
     e.arch = !!wpnOf(e).bow;
-    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first, rage: 0, spTick: 0 });
+    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first * coop(np, 'bossCd'), rage: 0, spTick: 0 });
     if (T.brute) e.brute = 1;
     e.y = this.groundY(e);
     return e;
@@ -611,7 +621,7 @@ export class DungeonSim extends Sim {
   }
   endSpecial(e) {
     e.sp = ''; e.vx = e.vz = 0;
-    e.spCd = (e.rage ? BOSS.cdRage : BOSS.cd) * (0.8 + 0.4 * this.rng.next());
+    e.spCd = (e.rage ? BOSS.cdRage : BOSS.cd) * (0.8 + 0.4 * this.rng.next()) * coop(this.g.np, 'bossCd');
     if (e.state === 'special') this.toIdle(e);
   }
   // une image d'attaque spéciale (avant le déplacement fait par updateFighter)
@@ -653,7 +663,7 @@ export class DungeonSim extends Sim {
           // tête la première dans le mur : sonné
           e.vx = e.vz = 0; e.sp = '';
           this.stun(e, C.stun);
-          e.spCd = rage ? BOSS.cdRage : BOSS.cd;
+          e.spCd = (rage ? BOSS.cdRage : BOSS.cd) * coop(this.g.np, 'bossCd');
           this.emit('pop', 'SONNÉ !', e.x, e.y + 2.2 * e.size, e.z, 'brk');
           this.emit('sfx', 'brk');
           this.emit('shake', 0.4);

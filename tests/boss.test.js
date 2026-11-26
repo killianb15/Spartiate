@@ -87,7 +87,7 @@ test('à la moitié de ses PV, le colosse enrage et appelle des zombies (un de p
   for (const kinds of [['soldier'], ['soldier', 'orc']]) {
     const s = colosseRoom(3, kinds), e = boss(s), p = s.f[0];
     const n0 = s.foesLeft;
-    e.hp = Math.floor(e.maxHp * 0.55);
+    e.hp = Math.floor(e.maxHp * 0.5) + 5;       // juste au-dessus de la moitié (ses PV dépendent du nombre de joueurs)
     s.damage(p, e, 20, 3, 0.3, e.x, 1, e.z);
     assert.equal(e.sp, 'roar');
     assert.equal(e.rage, 1);
