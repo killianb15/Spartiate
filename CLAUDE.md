@@ -73,6 +73,12 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Équipier parti (`bye`) : chacun repart seul dans sa salle d'armes (l'hôte garde son salon) ; quitter
   pour le menu en donjon = quitter le salon ; franchir la porte seul ferme le salon. Testé par
   `tests/test_server.py` et `node tools/lobby-test.mjs <dossier>` (deux contextes Chromium).
+- **Réanimation** (à deux, `REVIVE` dans dungeon.js) : un héros qui tombe alors que son équipier est debout reste
+  `state 'dead'` avec `down = 1` (les ennemis l'ignorent comme un mort ; anim 'crouch'). `reviveTick` (phase fight) :
+  un équipier en état 'block' à moins de `R` remplit `revT` ; à `time` s, `getUp` (40 % PV) ; la jauge redescend sinon.
+  Salle nettoyée : tous les héros tombés se relèvent. Tous à terre (ou seul) : fin de partie comme avant.
+  Affichage : `FighterView` penché en avant (`downK`, rotation 'YXZ'), jauge verte `revive()`, anneau qui clignote.
+  Tests : `tests/rea.test.js` ; scénario navigateur `rea`.
 - **Bénédictions** (`BOONS` dans dungeon.js, `rare` 0 commune / 1 rare / 2 légendaire, `RARITY`, `unique`) : coffre =
   Potion + 2 tirages par rareté (`rollOffer`, chances `boonOdds(n)` qui montent en profondeur ; rareté épuisée → un
   cran en dessous ; une unique que tous ont n'est plus proposée). Champs des héros posés par `equip` : pow, maxHp,

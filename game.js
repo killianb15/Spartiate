@@ -6,7 +6,7 @@ const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, RARITY, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, BOONS, RARITY, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -1167,7 +1167,8 @@ class FighterView {
     this.glowCol = new THREE.Color(1, 0.3, 0.05);    // lueur permanente (rage du colosse) ajoutée au flash
     this.glow = 0;
     this.cur = null;
-    this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0;
+    this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0; this.downK = 0;
+    this.model.rotation.order = 'YXZ';     // à terre : penché vers l'avant dans sa propre direction
     this.seenReset = -1; this.seenAnim = '';
     this.px = this.py = this.pz = 0;       // position à l'image de simulation précédente (interpolation)
     this.rx = this.ry = this.rz = 0;       // position affichée
@@ -1198,6 +1199,33 @@ class FighterView {
     this.hpFill = mk(0.76, 0.06, color, 1, 0.001);
     this.hpBar = g;
     this.root.add(g);
+  }
+
+  // jauge de réanimation au-dessus d'un héros à terre (créée au premier besoin)
+  revive(sf) {
+    if (!sf.down && !this.revBar) return;
+    if (!this.revBar) {
+      const g = new THREE.Group();
+      g.position.y = 1.55;
+      const mk = (w, h, c, o, z) => {
+        const geo = new THREE.PlaneGeometry(w, h);
+        geo.translate(w / 2, 0, 0);
+        const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: o, depthTest: false, toneMapped: false }));
+        m.position.set(-w / 2, 0, z);
+        m.renderOrder = 10;
+        g.add(m);
+        return m;
+      };
+      mk(0.9, 0.13, 0x000000, 0.7, 0);
+      this.revFill = mk(0.84, 0.08, 0x8fe36a, 1, 0.001);
+      this.revBar = g;
+      this.root.add(g);
+    }
+    this.revBar.visible = !!sf.down;
+    if (!sf.down) return;
+    this.revBar.quaternion.copy(camera.quaternion);
+    this.revFill.scale.x = Math.max(0.001, sf.revT / REVIVE.time);
+    this.revFill.material.opacity = sf.revT > 0 ? 1 : 0.35 + 0.25 * Math.sin(clockT * 5);
   }
 
   // à appeler avant chaque image de simulation
@@ -1328,6 +1356,11 @@ class FighterView {
     this.vyaw = lerpAng(this.vyaw, sf.visTarget, Math.min(1, dt * 14));
     this.model.rotation.y = this.vyaw;
     this.model.rotation.z = st === 'stun' ? Math.sin(T * 7) * 0.1 : 0;
+    // à terre (à deux) : penché en avant, à quatre pattes, en attendant d'être relevé
+    this.downK += ((sf.down ? 1 : 0) - this.downK) * Math.min(1, dt * 8);
+    this.model.rotation.x = this.downK * (0.95 + 0.04 * Math.sin(T * 3));
+    this.model.position.y = -0.65 - this.downK * 0.12;
+    this.revive(sf);
     if (st === 'roll') {
       const k = Math.min(1, sf.stateT / (ROLL.dur * 0.85));
       v1.set(sf.rdz, 0, -sf.rdx);
@@ -1353,7 +1386,7 @@ class FighterView {
     this.stars.rotation.y = T * 5;
     const gy = sim.groundY(sf);
     this.ring.position.set(this.rx, gy + 0.03, this.rz);
-    this.ring.material.opacity = st === 'dead' ? 0 : 0.75 - Math.min(0.5, (this.ry - gy) * 0.25);
+    this.ring.material.opacity = sf.down ? 0.45 + 0.3 * Math.sin(T * 6) : st === 'dead' ? 0 : 0.75 - Math.min(0.5, (this.ry - gy) * 0.25);
   }
 }
 

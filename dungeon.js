@@ -150,6 +150,10 @@ export const BOONS = {
 // chances de rare et de légendaire pour une place du coffre, salle n
 export const boonOdds = (n) => ({ rare: Math.min(0.4, 0.2 + 0.012 * n), legend: Math.min(0.12, 0.03 + 0.005 * n) });
 const PHOENIX = 0.6;            // PV rendus par la Plume de phénix
+// Réanimation (à deux) : un héros tombé reste à quatre pattes (état 'dead' + down = 1, les ennemis l'ignorent).
+// Son équipier le relève en bloquant à moins de R de lui pendant time s (la jauge redescend s'il s'arrête) ;
+// sinon il se relève quand la salle est nettoyée. hp : part de ses PV max rendue. Seul, tomber = fin.
+export const REVIVE = { time: 3, R: 1.5, hp: 0.4, decay: 2 };
 const FURY = { below: 0.4, mul: 1.7 };
 
 // Choix d'une bénédiction transmis comme une entrée (pour qu'il passe par le rollback en ligne) :
@@ -175,7 +179,7 @@ export function equip(p, kind, wpn = defaultWeapon(kind)) {
 }
 function newHero(i, kind, wpn) {
   // team : 0 = camp des héros (héros et chiens invoqués), 1 = ennemis ; owner : maître d'un chien
-  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, boons: '', trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1, kills: 0 });
+  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, boons: '', trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1, kills: 0, down: 0, revT: 0 });
   equip(p, kind, wpn);
   return p;
 }
@@ -230,7 +234,7 @@ export class DungeonSim extends Sim {
     this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, pads: HUB_PADS };
     this.heroes.forEach((p, i) => {
       const x = this.g.np > 1 ? (i ? 1.6 : 0.4) : 1, yaw = Math.PI * 0.75;
-      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0 });
+      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0 });
       p.resetN++;
       this.toIdle(p);
     });
@@ -395,7 +399,7 @@ export class DungeonSim extends Sim {
       const off = np > 1 ? (i ? 0.8 : -0.8) : 0;
       const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
       if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
-      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0 });
+      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0 });
       p.resetN++;
       this.toIdle(p);
     });
@@ -589,6 +593,25 @@ export class DungeonSim extends Sim {
     this.enrage(def);
     // « Épines de bronze » : une part des dégâts revient à l'attaquant
     if (def.thorns && att !== def && att.team !== def.team && att.state !== 'dead') this.thornsHit(def, att, Math.max(1, Math.round(dmg * def.thorns)));
+  }
+  // un héros à terre se relève (réanimé par son équipier, ou salle nettoyée)
+  getUp(p, msg) {
+    p.down = 0; p.revT = 0;
+    p.hp = Math.max(1, Math.round(p.maxHp * REVIVE.hp));
+    this.toIdle(p);
+    this.emit('pop', msg, p.x, p.y + 2.1, p.z, 'parry');
+    this.emit('sfx', 'parry');
+    this.emit('ring', p.x, p.y + 0.1, p.z, 0x8fe36a, 2, 0.5, true);
+    this.emit('emit', p.x, p.y + 0.8, p.z, 22, { color: [0x8fe36a, 0xd8ffc0, 0xffffff], speed: 2, up: 3, size: 0.07, life: 0.8, grav: 3 });
+  }
+  // réanimation : un équipier qui bloque à côté d'un héros à terre le relève peu à peu
+  reviveTick(dt) {
+    for (const p of this.heroes) {
+      if (!p.down) continue;
+      const helped = this.heroes.some((q) => q !== p && q.state === 'block' && hypot(q.x - p.x, q.z - p.z) < REVIVE.R);
+      p.revT = helped ? p.revT + dt : Math.max(0, p.revT - dt * REVIVE.decay);
+      if (p.revT >= REVIVE.time) this.getUp(p, 'RELEVÉ !');
+    }
   }
   // le colosse (et Cerbère) enrage à la moitié de ses PV
   enrage(e) { if (e.sp !== undefined && !e.rage && e.state !== 'dead' && e.hp <= e.maxHp * BOSS.rage) this.startSpecial(e, 'roar'); }
@@ -871,7 +894,10 @@ export class DungeonSim extends Sim {
     if (this.isHero(def)) {
       if (g.phase === 'dead') return;
       if (this.heroes.some((h) => h.state !== 'dead')) {
-        this.emit('announce', `J${def.idx + 1} À TERRE !`, 'ko', 1.3);
+        // à deux : il tombe à quatre pattes, en attendant qu'on le relève (ou la fin de la salle)
+        def.down = 1; def.revT = 0; def.vx = def.vz = 0;
+        this.play(def, 'crouch', { fade: 0.1 });
+        this.emit('announce', `J${def.idx + 1} À TERRE ! Bloque à côté de lui pour le relever`, 'ko', 2);
         this.emit('sfx', 'ko');
         return;
       }
@@ -890,6 +916,7 @@ export class DungeonSim extends Sim {
     if (this.foesLeft === 0 && g.phase === 'fight') {
       g.phase = 'clear'; g.t = 0;
       g.exitOpen = true;
+      for (const p of this.heroes) if (p.down) this.getUp(p, 'DEBOUT !');     // salle nettoyée : les héros tombés se relèvent
       g.chest = 1; g.chestX = 0; g.chestZ = 0;
       // le coffre apparaît au centre, ou à côté si un héros s'y trouve
       if (this.heroes.some((p) => hypot(p.x, p.z) < 1.5)) g.chestX = this.f[0].x > 0 ? -1.5 : 1.5;
@@ -954,7 +981,7 @@ export class DungeonSim extends Sim {
   // va directement à la salle n (0 : salle d'armes) ; les héros tombés se relèvent
   debugGoto(n) {
     n = Math.max(0, Math.floor(n));
-    for (const p of this.heroes) if (p.state === 'dead') { p.hp = Math.round(p.maxHp * 0.4); this.toIdle(p); }
+    for (const p of this.heroes) if (p.state === 'dead') { p.hp = Math.round(p.maxHp * 0.4); p.down = 0; p.revT = 0; this.toIdle(p); }
     if (n === 0) { this.startHub(); return; }
     this.g.room = n - 1;
     this.newRoom();
@@ -1032,6 +1059,7 @@ export class DungeonSim extends Sim {
 
     const heroAct = ph === 'intro' || ph === 'fight' || ph === 'clear' || ph === 'hub';
     for (let i = 0; i < f.length; i++) this.updateFighter(i, i < np ? heroAct : ph === 'fight');
+    if (ph === 'fight') this.reviveTick(dt);
 
     // les combattants ne se traversent pas
     for (let i = 0; i < f.length; i++) for (let j = i + 1; j < f.length; j++) {

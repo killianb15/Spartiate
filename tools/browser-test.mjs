@@ -251,6 +251,41 @@ if (scenario === 'biomes') {
   ws.close();
   process.exit(0);
 }
+if (scenario === 'rea') {
+  // à deux sur un clavier : J2 tombe à quatre pattes, J1 le relève en maintenant Bloquer (G) à côté de lui
+  await evalJs(`(() => { __game.startDungeon({ mode: 'duo', p1: 'soldier', p2: 'soldier', w1: 'sword', w2: 'sword' }); return true; })()`);
+  await waitFor(`__game.game.phase === 'hub'`, 30000);
+  await evalJs(`spartiate.debugGoto(1); true`);
+  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
+  await evalJs(`(() => { const s = spartiate.sim; for (const e of s.f) if (e.team === 1) { e.x = 5; e.z = -5; s.ais[e.idx] = null; }
+    const e = s.f.find((x) => x.team === 1), p = s.f[1]; p.hp = 1; s.damage(e, p, 999, 0, 0.3, 0, 1, 0);
+    Object.assign(p, { x: 0, z: 0 }); Object.assign(s.f[0], { x: 1, z: 0.3 }); spartiate.views[0].snapPos = spartiate.views[1].snapPos = true; return p.down; })()`);
+  await sleep(2500);
+  await shot('a-terre');
+  // gros plan sur J2 à quatre pattes (J1 écarté le temps de la capture)
+  await evalJs(`(() => { const s = spartiate.sim; Object.assign(s.f[0], { x: 3, z: 3 }); spartiate.views[0].snapPos = true; return true; })()`);
+  await sleep(1500);
+  {
+    const c = await evalJs(`(() => { const p = spartiate.sim.f[1], v = new spartiate.camera.position.constructor(p.x, p.y + 0.6, p.z).project(spartiate.camera); return [(v.x + 1) / 2 * innerWidth, (1 - v.y) / 2 * innerHeight]; })()`);
+    const r = await send('Page.captureScreenshot', { format: 'png', clip: { x: Math.max(0, c[0] - 110), y: Math.max(0, c[1] - 110), width: 220, height: 220, scale: 3 } });
+    fs.writeFileSync(path.join(outDir, 'a-terre-gros-plan.png'), Buffer.from(r.result.data, 'base64'));
+  }
+  await evalJs(`(() => { const s = spartiate.sim; Object.assign(s.f[0], { x: 1, z: 0.3 }); spartiate.views[0].snapPos = true; return true; })()`);
+  await sleep(500);
+  const st = () => evalJs(`(() => { const p = spartiate.sim.f[1]; return JSON.stringify({ etat: p.state, down: p.down, revT: +p.revT.toFixed(2), pv: p.hp, j1: spartiate.sim.f[0].state }); })()`);
+  console.log('ETAT', await st());
+  await key('keyDown', 'KeyG');
+  await waitFor(`spartiate.sim.f[1].revT > 1.3`, 120000);
+  await shot('releve-en-cours'); console.log('ETAT', await st());
+  await waitFor(`!spartiate.sim.f[1].down`, 120000);
+  await key('keyUp', 'KeyG');
+  await sleep(800);
+  await shot('releve'); console.log('ETAT', await st());
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
 if (scenario === 'benedictions') {
   // écran du coffre avec une bénédiction de chaque rareté, puis choix de la légendaire (touche 3)
   await evalJs(`spartiate.debugGoto(1); true`);
