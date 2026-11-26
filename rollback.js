@@ -24,9 +24,9 @@ const KEEP = 180;            // images d'historique conservées pour les entrée
 
 const same = (a, b) => a.mx === b.mx && a.mz === b.mz && a.blk === b.blk && a.press === b.press;
 const enc = (i) => [i.mx, i.mz, (i.blk ? 1 : 0) | (i.press << 1)];
-const dec = (a) => ({ mx: a[0] | 0, mz: a[1] | 0, blk: (a[2] & 1) === 1, press: (a[2] >> 1) & 31 });
+const dec = (a) => ({ mx: a[0] | 0, mz: a[1] | 0, blk: (a[2] & 1) === 1, press: (a[2] >> 1) & 63 });
 const clampI = (v) => Math.max(-127, Math.min(127, v | 0));
-function clean(i) { return { mx: clampI(i.mx), mz: clampI(i.mz), blk: !!i.blk, press: i.press & 31 }; }
+function clean(i) { return { mx: clampI(i.mx), mz: clampI(i.mz), blk: !!i.blk, press: i.press & 63 }; }
 
 // signature d'un événement pour ne pas le rejouer après une correction
 function sig(e) {

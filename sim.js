@@ -59,9 +59,49 @@ const shotOf = (f) => (wpnOf(f).summon ? CAST : wpnOf(f).fire ? FIRE : SHOT);
 export const defaultWeapon = (kind) => (kind === 'archer' ? 'bow' : 'sword');   // demi-largeur de la zone touchée : un pas de côté suffit pour esquiver
 const BUF = 0.18;            // durée de mémorisation d'une touche pressée
 
+// Sorts actifs propres à chaque personnage, avec temps de recharge (cd en secondes).
+export const SPELLS = {
+  soldier: {
+    id: 'spin', name: 'Tourbillon',
+    desc: 'Tourne sur lui-même et tranche tous les ennemis autour (3 coups)',
+    cd: 7, dur: 0.75, radius: 2.45, dmg: 7, hits: 3, knock: 3.4, guard: 14, color: 0xffd34a,
+  },
+  human: {
+    id: 'dash', name: 'Estoc fulgurant',
+    desc: 'Fonce droit devant et transperce tous les ennemis sur sa trajectoire',
+    cd: 6.5, dur: 0.42, dashDur: 0.25, speed: 13.5, radius: 1.05, dmg: 18, knock: 5.2, guard: 30, color: 0xffe27a,
+  },
+  orc: {
+    id: 'slam', name: 'Frappe sismique',
+    desc: 'Bondit et écrase le sol : onde de choc étourdissante autour de lui',
+    cd: 8.5, dur: 0.72, hitAt: 0.34, vy: 6.5, radius: 3.1, dmg: 20, knock: 6.0, guard: 36, stun: 0.65, color: 0xff8a2e,
+  },
+  archer: {
+    id: 'volley', name: 'Pluie de flèches',
+    desc: 'Bondit en arrière en tirant une salve de 5 flèches en éventail',
+    cd: 6.5, dur: 0.46, hitAt: 0.16, arrows: 5, spread: 0.17, back: 4.8, color: 0x9be8ff,
+  },
+  knight: {
+    id: 'aegis', name: 'Rempart sacré',
+    desc: 'Repousse autour, restaure la garde et réduit de 50 % les dégâts (3,5 s)',
+    cd: 10, dur: 0.44, hitAt: 0.14, radius: 2.6, dmg: 10, knock: 6.8, guard: 24, buff: 3.5, reduce: 0.5, color: 0xffe066,
+  },
+  zombie: {
+    id: 'nova', name: 'Nuée putride',
+    desc: 'Explosion toxique autour de lui qui draine 7 PV par ennemi touché',
+    cd: 8, dur: 0.54, hitAt: 0.22, radius: 2.9, dmg: 14, heal: 7, knock: 3.2, guard: 20, color: 0x7ae85a,
+  },
+  robot: {
+    id: 'overload', name: "Décharge d'arc",
+    desc: 'Onde électrique qui brise les gardes et étourdit les ennemis proches',
+    cd: 7.5, dur: 0.58, hitAt: 0.26, radius: 2.8, dmg: 15, knock: 4.2, stun: 0.85, color: 0x6fc3ff,
+  },
+};
+export const spellOf = (f) => SPELLS[f?.kind] ?? SPELLS.soldier;
+
 // Entrée d'un joueur pour une image : déplacement quantifié (-127..127), blocage, touches pressées (bits)
-export const PRESS = { atk: 1, par: 2, brk: 4, jump: 8, roll: 16 };
-export const ACTS = ['atk', 'par', 'brk', 'jump', 'roll'];
+export const PRESS = { atk: 1, par: 2, brk: 4, jump: 8, roll: 16, spell: 32 };
+export const ACTS = ['atk', 'par', 'brk', 'jump', 'roll', 'spell'];
 export const NEUTRAL = Object.freeze({ mx: 0, mz: 0, blk: false, press: 0 });
 export const quant = (v) => Math.max(-127, Math.min(127, Math.round(v * 127)));
 
@@ -77,18 +117,26 @@ export function newFighter(idx) {
     // description de l'animation demandée (la vue la lit quand animN change)
     anim: 'idle', animTs: 1, animLoop: true, animRestart: false, animFade: 0, animN: 0,
     resetN: 0,   // +1 à chaque remise à zéro (la vue réinitialise alors son squelette)
+    kind: 'soldier', // personnage (détermine le sort actif)
     arch: false, // archer : l'attaque tire une flèche
     wpn: 'sword', // arme (clé de WEAPONS)
+    // sort actif et temps de recharge
+    spellCd: 0, spellMax: SPELLS.soldier.cd, spellTick: 0, spellHit: 0, spellBuffT: 0, spellDx: 0, spellDz: 0,
   };
 }
-export const newInput = () => ({ mx: 0, mz: 0, blk: false, atk: 0, par: 0, brk: 0, jump: 0, roll: 0 });
+export const newInput = () => ({ mx: 0, mz: 0, blk: false, atk: 0, par: 0, brk: 0, jump: 0, roll: 0, spell: 0 });
 
 export class Sim {
-  // kinds : personnage de chaque combattant ('archer' tire des flèches)
+  // kinds : personnage de chaque combattant ('archer' tire des flèches, chacun a son sort)
   constructor(seed = 1, kinds = ['soldier', 'orc']) {
     this.rng = new Rng(seed);
     this.f = [newFighter(0), newFighter(1)];
-    this.f.forEach((f, i) => { f.wpn = defaultWeapon(kinds[i]); f.arch = !!wpnOf(f).bow; });
+    this.f.forEach((f, i) => {
+      f.kind = kinds[i] || 'soldier';
+      f.wpn = defaultWeapon(f.kind);
+      f.arch = !!wpnOf(f).bow;
+      f.spellMax = spellOf(f).cd;
+    });
     this.pr = [];           // flèches en vol (objets plats, sauvegardés avec le reste)
     this.inp = [newInput(), newInput()];
     this.g = { phase: 'menu', round: 1, w0: 0, w1: 0, timer: ROUND_TIME, t: 0, slow: 1, slowT: 0, hitstop: 0,
@@ -126,6 +174,10 @@ export class Sim {
   summon(f) {}
   // la flèche heurte-t-elle le décor ?
   arrowWall(a) { return a.y < 0.02 || hypot(a.x, a.z) > 9.6; }
+  // qui peut lancer le sort actif de son personnage ? (en arène : tout le monde ; en donjon : héros seulement)
+  canCastSpell(f) { return !!SPELLS[f.kind]; }
+  // réduction de dégâts du buff défensif (Rempart sacré) ; DungeonSim l'intègre à son calcul d'armure
+  mitigateSpell(def, dmg) { return def.spellBuffT > 0 ? Math.max(1, Math.round(dmg * (1 - SPELLS.knight.reduce))) : dmg; }
 
   // ---------------- sauvegarde / restauration / empreinte ----------------
   save() {
@@ -148,7 +200,7 @@ export class Sim {
   }
   reset(f, x, z, yaw) {
     const n = f.resetN + 1, an = f.animN + 1;
-    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an, arch: f.arch, wpn: f.wpn });
+    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an, kind: f.kind, arch: f.arch, wpn: f.wpn, spellMax: spellOf(f).cd });
   }
   startMatch() {
     const g = this.g;
@@ -408,6 +460,233 @@ export class Sim {
   }
   win(f) { this.setState(f, 'win'); this.play(f, 'emote-yes', { fade: 0.2 }); }
 
+  // ---------------- sorts actifs par personnage ----------------
+  startSpell(f, opp, mx, mz) {
+    if (!this.canCastSpell(f) || f.spellCd > 0) return false;
+    const S = spellOf(f);
+    f.spellCd = S.cd;
+    f.spellMax = S.cd;
+    f.spellTick = 0;
+    f.spellHit = 0;
+    f.airAtk = false;
+    f.combo = 0;
+    // direction du sort : vers la cible s'il y en a une, sinon vers la direction tenue ou devant soi
+    let dx = fx(f), dz = fz(f);
+    if (opp && hypot(opp.x - f.x, opp.z - f.z) > 0.05) {
+      const d = hypot(opp.x - f.x, opp.z - f.z);
+      dx = (opp.x - f.x) / d; dz = (opp.z - f.z) / d;
+      f.yaw = atan2(dx, dz);
+    } else if (hypot(mx, mz) > 0.1) {
+      const d = hypot(mx, mz);
+      dx = mx / d; dz = mz / d;
+      f.yaw = atan2(dx, dz);
+    }
+    f.spellDx = dx; f.spellDz = dz;
+    this.setState(f, 'spell', S.dur);
+    this.emit('pop', S.name.toUpperCase() + ' !', f.x, f.y + 2.15, f.z, 'spell');
+    if (S.id === 'spin') {
+      this.play(f, 'attack-melee-right', { loop: true, restart: true, ts: 1.9, fade: 0.05 });
+      this.emit('sfx', 'whirl');
+      this.emit('ring', f.x, f.y + 0.1, f.z, S.color, S.radius * 0.9, 0.35, true);
+    } else if (S.id === 'dash') {
+      this.play(f, 'attack-melee-right', { loop: false, restart: true, ts: 1.2, fade: 0.04 });
+      this.emit('sfx', 'dash');
+      this.emit('emit', f.x, f.y + 0.8, f.z, 14, { color: [0xffffff, S.color], speed: 3, up: 1.5, size: 0.07, life: 0.35, grav: 2 });
+    } else if (S.id === 'slam') {
+      f.vy = S.vy;
+      f.y += 0.01;
+      this.play(f, 'jump', { loop: false, restart: true, ts: 1.3, fade: 0.05 });
+      this.emit('sfx', 'jump');
+    } else if (S.id === 'volley') {
+      f.vx = -dx * S.back; f.vz = -dz * S.back;
+      this.play(f, 'holding-both-shoot', { loop: false, restart: true, ts: 1.5, fade: 0.05 });
+      this.emit('sfx', 'dodge');
+    } else if (S.id === 'aegis') {
+      this.play(f, 'emote-yes', { loop: false, restart: true, ts: 1.4, fade: 0.05 });
+      this.emit('sfx', 'aegis');
+      this.emit('fx', f.idx, 'parried');
+    } else if (S.id === 'nova') {
+      this.play(f, 'crouch', { loop: false, restart: true, ts: 1.2, fade: 0.05 });
+      this.emit('sfx', 'nova');
+    } else if (S.id === 'overload') {
+      this.play(f, 'emote-yes', { loop: false, restart: true, ts: 1.1, fade: 0.05 });
+      this.emit('sfx', 'spell');
+    }
+    return true;
+  }
+
+  // exécution à chaque image pendant l'état 'spell'
+  updateSpell(f, opp, mx, mz, dt) {
+    const S = spellOf(f), t = f.stateT;
+    if (S.id === 'spin') {
+      const spd = 2.4 * (f.runMul ?? 1);
+      f.vx = mx * spd; f.vz = mz * spd;
+      // 3 vagues de dégâts circulaires (à 0,10 s, 0,34 s, 0,58 s)
+      const nextAt = 0.10 + f.spellTick * 0.24;
+      if (f.spellTick < S.hits && t >= nextAt) {
+        f.spellTick++;
+        this.emit('ring', f.x, f.y + 0.75, f.z, S.color, S.radius, 0.24, true);
+        this.emit('emit', f.x, f.y + 0.85, f.z, 12, { color: [0xffffff, S.color, 0xff9a2e], speed: 4.2, up: 1.2, size: 0.07, life: 0.3, grav: 3 });
+        this.emit('sfx', 'swing');
+        this.spellAoE(f, S.radius, S.dmg, S.knock, S.guard, { dur: 0.22 });
+      }
+    } else if (S.id === 'dash') {
+      if (t < S.dashDur) {
+        f.vx = f.spellDx * S.speed; f.vz = f.spellDz * S.speed;
+        f.dustT -= dt;
+        if (f.dustT <= 0) {
+          f.dustT = 0.04;
+          this.emit('emit', f.x, f.y + 0.65, f.z, 3, { color: [0xffffff, S.color], speed: 1.2, up: 0.8, size: 0.07, life: 0.3, grav: 1 });
+        }
+        this.spellDashHits(f, S);
+      } else {
+        const k = exp(-dt * 14); f.vx *= k; f.vz *= k;
+      }
+    } else if (S.id === 'slam') {
+      const k = exp(-dt * 8); f.vx *= k; f.vz *= k;
+      const gy = this.groundY(f);
+      if (!f.spellTick && (t >= S.hitAt || (t > 0.12 && f.y <= gy + 0.04 && f.vy <= 0))) {
+        f.spellTick = 1;
+        f.y = gy; f.vy = 0;
+        this.emit('ring', f.x, gy + 0.06, f.z, S.color, S.radius * 1.05, 0.45, true);
+        this.emit('ring', f.x, gy + 0.1, f.z, 0xffffff, S.radius * 0.55, 0.28, true);
+        this.emit('emit', f.x, gy + 0.15, f.z, 34, { color: [0xc8a070, 0xffe27a, S.color], speed: 4.8, up: 3.2, size: 0.1, life: 0.65, grav: 7 });
+        this.emit('sfx', 'quake');
+        this.emit('shake', 0.35);
+        this.spellAoE(f, S.radius, S.dmg, S.knock, S.guard, { stun: S.stun, jumpEvade: true });
+      }
+    } else if (S.id === 'volley') {
+      const k = exp(-dt * 7); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        const half = (S.arrows - 1) / 2;
+        const y0 = f.y + 1.05;
+        let vy = 0;
+        if (opp) {
+          const d = hypot(opp.x - f.x, opp.z - f.z);
+          if (d > 0.3) vy = Math.max(-8, Math.min(8, (opp.y + 0.95 - y0) / (d / SHOT.speed)));
+        }
+        for (let n = 0; n < S.arrows; n++) {
+          const ang = f.yaw + (n - half) * S.spread;
+          const sx = sin(ang), sz = cos(ang);
+          this.pr.push({ x: f.x + sx * 0.5, y: y0, z: f.z + sz * 0.5, vx: sx * SHOT.speed, vy, vz: sz * SHOT.speed, o: f.idx, t: 0, k: 0 });
+        }
+        this.emit('sfx', 'bow');
+        this.emit('emit', f.x + fx(f) * 0.6, y0, f.z + fz(f) * 0.6, 12, { color: [0xffffff, S.color], speed: 2.5, up: 1.5, size: 0.06, life: 0.3, grav: 2 });
+      }
+    } else if (S.id === 'aegis') {
+      const k = exp(-dt * 12); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        f.guard = 100;
+        f.guardT = 9;
+        f.spellBuffT = S.buff;
+        this.emit('ring', f.x, f.y + 0.12, f.z, S.color, S.radius * 1.05, 0.45, true);
+        this.emit('ring', f.x, f.y + 0.9, f.z, 0xffffff, 1.5, 0.3);
+        this.emit('emit', f.x, f.y + 0.9, f.z, 24, { color: [0xffffff, S.color, 0xffb02e], speed: 4.5, up: 2.2, size: 0.08, life: 0.55, grav: 2 });
+        this.emit('shake', 0.2);
+        this.spellAoE(f, S.radius, S.dmg, S.knock, S.guard, { dur: 0.35 });
+      }
+    } else if (S.id === 'nova') {
+      const k = exp(-dt * 10); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        this.emit('ring', f.x, f.y + 0.1, f.z, S.color, S.radius * 1.05, 0.5, true);
+        this.emit('emit', f.x, f.y + 0.6, f.z, 34, { color: [S.color, 0x3a9a2a, 0xd8ffc0], speed: 4.2, up: 2.6, size: 0.1, life: 0.7, grav: 1 });
+        this.emit('sfx', 'boom');
+        this.emit('shake', 0.22);
+        const hits = this.spellAoE(f, S.radius, S.dmg, S.knock, S.guard, { dur: 0.3 });
+        if (hits > 0 && f.state !== 'dead') {
+          const cap = f.maxHp ?? 100;
+          const gain = Math.min(cap - f.hp, hits * S.heal);
+          if (gain > 0) {
+            f.hp += gain;
+            this.emit('pop', `+${Math.round(gain)} PV`, f.x, f.y + 1.9, f.z, 'heal');
+            this.emit('emit', f.x, f.y + 0.8, f.z, 12, { color: [0x8fe36a, 0xffffff], speed: 1.6, up: 3, size: 0.07, life: 0.55, grav: -1 });
+          }
+        }
+      }
+    } else if (S.id === 'overload') {
+      const k = exp(-dt * 12); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        this.emit('ring', f.x, f.y + 0.1, f.z, S.color, S.radius * 1.05, 0.45, true);
+        this.emit('ring', f.x, f.y + 0.9, f.z, 0xffffff, S.radius * 0.7, 0.25, true);
+        this.emit('emit', f.x, f.y + 0.9, f.z, 32, { color: [0xffffff, S.color, 0x3a8aff], speed: 5.5, up: 2.4, size: 0.09, life: 0.5, grav: 2 });
+        this.emit('sfx', 'zap');
+        this.emit('shake', 0.28);
+        this.spellAoE(f, S.radius, S.dmg, S.knock, 0, { stun: S.stun, breakGuard: true });
+      }
+    }
+    if (t >= S.dur) this.toIdle(f);
+  }
+
+  // coup de zone radial d'un sort : retourne le nombre de cibles touchées (non bloquées)
+  spellAoE(att, radius, dmg, knock, guardCost, opts = {}) {
+    if (this.g.phase !== 'fight') return 0;
+    let hits = 0;
+    for (const d of this.f) {
+      if (d === att || d.state === 'dead' || !this.foeOf(att.idx, d)) continue;
+      const dx = d.x - att.x, dz = d.z - att.z, dist = hypot(dx, dz), sz = d.size ?? 1;
+      if (dist > radius + 0.35 * (sz - 1) || Math.abs(d.y - att.y) > 1.35) continue;
+      if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) continue;
+      if (opts.jumpEvade && d.y - this.groundY(d) > 0.35) {
+        this.emit('pop', 'ESQUIVE', d.x, d.y + 1.8, d.z, 'miss');
+        this.emit('sfx', 'dodge');
+        continue;
+      }
+      const nx = dist > 0.05 ? dx / dist : fx(att), nz = dist > 0.05 ? dz / dist : fz(att);
+      if (opts.breakGuard && (d.state === 'block' || d.state === 'parry')) {
+        this.guardBreak(att, d, d.x, d.y + 1, d.z, Math.round(dmg * 0.5));
+        hits++;
+        continue;
+      }
+      if (guardCost > 0 && d.state === 'block') {
+        d.guard -= guardCost * guardOf(d); d.guardT = 0;
+        d.vx = nx * 2.5; d.vz = nz * 2.5;
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(att, d, dmg, 0, opts.dur ?? 0.35, d.x, d.y + 0.9, d.z);
+      hits++;
+      if (d.state !== 'dead') {
+        const kMul = d.boss ? 0.4 : 1;
+        d.vx = nx * knock * kMul; d.vz = nz * knock * kMul;
+        if (opts.stun && !d.sp) this.stun(d, d.boss ? opts.stun * 0.5 : opts.stun);
+      }
+    }
+    return hits;
+  }
+
+  // percée du Mirmillon : touche chaque ennemi traversé une seule fois (masque de bits spellHit)
+  spellDashHits(att, S) {
+    if (this.g.phase !== 'fight') return;
+    for (const d of this.f) {
+      if (d === att || d.state === 'dead' || !this.foeOf(att.idx, d)) continue;
+      const bit = 1 << (d.idx & 31);
+      if (att.spellHit & bit) continue;
+      const dx = d.x - att.x, dz = d.z - att.z, dist = hypot(dx, dz), sz = d.size ?? 1;
+      if (dist > S.radius + 0.4 * (sz - 1) || Math.abs(d.y - att.y) > 1.2) continue;
+      if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) continue;
+      att.spellHit |= bit;
+      if (d.state === 'block' && fx(d) * att.spellDx + fz(d) * att.spellDz < -0.2) {
+        d.guard -= S.guard * guardOf(d); d.guardT = 0;
+        d.vx = att.spellDx * 3.5; d.vz = att.spellDz * 3.5;
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(att, d, S.dmg, 0, 0.38, d.x, d.y + 0.9, d.z);
+      if (d.state !== 'dead') {
+        const kMul = d.boss ? 0.4 : 1;
+        d.vx = att.spellDx * S.knock * kMul; d.vz = att.spellDz * S.knock * kMul;
+      }
+    }
+  }
+
   updateFighter(i, canAct) {
     const f = this.f[i], opp = this.target(i), inp = this.inp[i], dt = this.dt;
     f.stateT += dt;
@@ -428,6 +707,7 @@ export class Sim {
     switch (st) {
       case 'idle': case 'walk': case 'block': {
         if (!canAct) { f.vx = f.vz = 0; if (st !== 'idle') this.toIdle(f); break; }
+        if (this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
         if (this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
         if (this.take(i, 'brk') && this.spend(f, STA.brk)) { this.startBreak(f); break; }
         // archer : tir, ou coup d'arc si l'adversaire est collé
@@ -463,8 +743,13 @@ export class Sim {
         if (t > 0.06 && t < 0.2) { f.vx = ffx * run; f.vz = ffz * run; }
         else { const k = exp(-dt * 12); f.vx *= k; f.vz *= k; }
         if (canAct && t > ATK.chain && f.combo < wpnOf(f).combo && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
+        if (canAct && t > ATK.end && this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
         if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
         if (t >= ATK.dur) { f.combo = 0; this.toIdle(f); }
+        break;
+      }
+      case 'spell': {
+        this.updateSpell(f, opp, mx, mz, dt);
         break;
       }
       case 'shoot': {
@@ -555,6 +840,8 @@ export class Sim {
     if (f.state !== 'block' && f.guardT > 0.9) f.guard = Math.min(100, f.guard + 24 * dt);
     f.staT += dt;
     f.staFail = Math.max(0, f.staFail - dt);
+    if (f.spellCd > 0) f.spellCd = Math.max(0, f.spellCd - dt);
+    if (f.spellBuffT > 0) f.spellBuffT = Math.max(0, f.spellBuffT - dt);
     if (f.staT > STA.delay && f.state !== 'roll') f.sta = Math.min(100, f.sta + STA.regen * dt * (f.state === 'block' ? 0.5 : 1));
   }
 
@@ -602,6 +889,7 @@ export class Sim {
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
     const g = this.g;
     if (def.state === 'stun') dmg = Math.round(dmg * 1.25);
+    dmg = this.mitigateSpell(def, dmg);
     def.hp = Math.max(0, def.hp - dmg);
     this.emit('fx', def.idx, 'hit');
     this.push(def, att, knock);

@@ -47,6 +47,7 @@ export function packFighter(f) {
     team: f.team ?? 0, owner: f.owner ?? -1, kills: f.kills ?? 0,
     down: f.down ? 1 : 0, revT: r3(f.revT ?? 0), shop: f.shop ?? 0,
     boons: f.boons || '', phoenix: f.phoenix ? 1 : 0,
+    spellCd: r3(f.spellCd ?? 0), spellMax: f.spellMax ?? 7, spellBuffT: r3(f.spellBuffT ?? 0),
   };
   if (f.brute) o.brute = 1;
   if (f.sp !== undefined) {
@@ -80,6 +81,7 @@ export function unpackFighter(p, prev = null) {
   f.team = p.team; f.owner = p.owner; f.kills = p.kills;
   f.down = p.down; f.revT = p.revT; f.shop = p.shop;
   f.boons = p.boons; f.phoenix = p.phoenix;
+  f.spellCd = p.spellCd ?? 0; f.spellMax = p.spellMax ?? 7; f.spellBuffT = p.spellBuffT ?? 0;
   f.brute = p.brute ? 1 : 0;
   if (p.sp !== undefined) {
     f.sp = p.sp; f.spT = p.spT; f.spA = p.spA;
@@ -165,7 +167,7 @@ export class CoopHost {
         for (const a of m.acts) {
           if (!Array.isArray(a) || !Number.isInteger(a[0]) || a[0] <= this.guestActSeq) continue;
           this.guestActSeq = a[0];
-          this.guestActs.push({ press: (a[1] | 0) & 31, shop: a[2] ?? -1, pick: a[3] ?? -1 });
+          this.guestActs.push({ press: (a[1] | 0) & 63, shop: a[2] ?? -1, pick: a[3] ?? -1 });
         }
       }
     }
@@ -343,7 +345,7 @@ export class CoopGuest {
   // Enregistre l'entrée locale (touches maintenues + actions ponctuelles) et l'envoie à l'hôte
   tick(inp = NEUTRAL, { shop = -1, pick = -1 } = {}) {
     this.tickN++;
-    const mx = clampI(inp.mx), mz = clampI(inp.mz), blk = !!inp.blk, press = (inp.press | 0) & 31;
+    const mx = clampI(inp.mx), mz = clampI(inp.mz), blk = !!inp.blk, press = (inp.press | 0) & 63;
     const hasAct = press !== 0 || shop >= 0 || pick >= 0;
     if (hasAct) {
       this.actQueue.push([++this.actSeq, press, shop, pick]);

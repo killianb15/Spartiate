@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, defaultWeapon, windupOf } from './sim.js';
+import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, SPELLS, spellOf, defaultWeapon, windupOf } from './sim.js';
 const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
@@ -311,6 +311,11 @@ const sfx = {
   fireball: () => { noise(0.45, { freq: 260, to: 900, q: 0.8, vol: 0.32 }); tone(110, 0.3, { type: 'sawtooth', vol: 0.06, to: 220 }); },
   boom: () => { noise(0.7, { freq: 240, type: 'lowpass', vol: 0.9 }); tone(70, 0.5, { type: 'sawtooth', vol: 0.2, to: 30 }); noise(0.25, { freq: 1800, vol: 0.15 }); },
   spell: () => { tone(330, 0.6, { type: 'triangle', vol: 0.08, to: 660 }); tone(495, 0.5, { type: 'sine', vol: 0.06, to: 990, delay: 0.05 }); noise(0.5, { freq: 3000, q: 2, vol: 0.05, attack: 0.2 }); },
+  whirl: () => { noise(0.55, { freq: 700, to: 2600, q: 1.4, vol: 0.28 }); tone(220, 0.45, { type: 'triangle', vol: 0.1, to: 440 }); },
+  dash: () => { noise(0.24, { freq: 1800, to: 600, q: 1.2, vol: 0.3 }); tone(420, 0.18, { type: 'sawtooth', vol: 0.08, to: 920 }); },
+  aegis: () => { tone(520, 0.65, { type: 'triangle', vol: 0.2, to: 780 }); tone(1040, 0.55, { vol: 0.14, delay: 0.04 }); noise(0.18, { freq: 3200, vol: 0.14 }); },
+  nova: () => { noise(0.45, { freq: 420, to: 160, q: 0.9, vol: 0.3 }); tone(160, 0.4, { type: 'sawtooth', vol: 0.1, to: 75 }); },
+  zap: () => { noise(0.32, { freq: 3600, to: 900, q: 1.8, vol: 0.36 }); tone(880, 0.24, { type: 'sawtooth', vol: 0.14, to: 140 }); tone(1320, 0.18, { type: 'square', vol: 0.08, to: 260, delay: 0.04 }); },
   bark: () => { noise(0.07, { freq: 900, q: 3, vol: 0.4 }); tone(420, 0.08, { type: 'square', vol: 0.08, to: 300 }); noise(0.07, { freq: 950, q: 3, vol: 0.35, delay: 0.14 }); tone(430, 0.08, { type: 'square', vol: 0.07, to: 310, delay: 0.14 }); },
   whine: () => tone(900, 0.4, { type: 'triangle', vol: 0.08, to: 420 }),
   tick: () => tone(880, 0.05, { type: 'triangle', vol: 0.06 }),
@@ -1714,13 +1719,21 @@ class FighterView {
     if (this.flinch > 0) { this.torso.rotateX(-0.55 * this.flinch); this.flinch = Math.max(0, this.flinch - dt * 4); }
 
     this.vyaw = lerpAng(this.vyaw, sf.visTarget, Math.min(1, dt * 14));
-    this.model.rotation.y = this.vyaw;
+    const spDef = st === 'spell' ? spellOf(sf) : null;
+    this.model.rotation.y = spDef?.id === 'spin' ? this.vyaw + sf.stateT * TAU * 3.6 : this.vyaw;
     this.model.rotation.z = st === 'stun' ? Math.sin(T * 7) * 0.1 : 0;
     // à terre (à deux) : penché en avant, à quatre pattes, en attendant d'être relevé
     this.downK += ((sf.down ? 1 : 0) - this.downK) * Math.min(1, dt * 8);
-    this.model.rotation.x = this.downK * (0.95 + 0.04 * Math.sin(T * 3));
+    this.model.rotation.x = this.downK * (0.95 + 0.04 * Math.sin(T * 3)) + (spDef?.id === 'dash' ? 0.32 : 0);
     this.model.position.y = -0.65 - this.downK * 0.12;
     this.revive(sf);
+    if (spDef) {
+      if (spDef.id === 'overload') { this.flashCol.setRGB(0.45, 0.8, 1); this.flash = Math.max(this.flash, 0.4 + 0.35 * Math.sin(T * 40)); }
+      else if (spDef.id === 'nova') { this.flashCol.setRGB(0.45, 0.95, 0.35); this.flash = Math.max(this.flash, 0.35 + 0.25 * Math.sin(T * 30)); }
+      else if (spDef.id === 'slam') { this.flashCol.setRGB(1, 0.55, 0.15); this.flash = Math.max(this.flash, 0.35); }
+      else if (spDef.id === 'spin' || spDef.id === 'dash') { this.flashCol.setRGB(1, 0.85, 0.3); this.flash = Math.max(this.flash, 0.28); }
+    }
+    if (sf.spellBuffT > 0) this.shieldGlow = Math.max(this.shieldGlow, 0.85 + 0.25 * Math.sin(T * 10));
     if (st === 'roll') {
       const k = Math.min(1, sf.stateT / (ROLL.dur * 0.85));
       v1.set(sf.rdz, 0, -sf.rdx);
@@ -1994,13 +2007,13 @@ const tapped = [new Set(), new Set()];   // touches tenues enfoncées depuis la 
 // Chaque action a 2 emplacements de touche (null = vide). En solo et en ligne,
 // les deux jeux de touches contrôlent le même personnage.
 const DEFAULT_KEYSETS = [
-  { l: ['KeyA', null], r: ['KeyD', null], u: ['KeyW', null], d: ['KeyS', null], jump: ['Space', null], atk: ['KeyF', null], blk: ['KeyG', null], par: ['KeyH', null], brk: ['KeyR', null], roll: ['KeyE', 'ShiftLeft'] },
-  { l: ['ArrowLeft', null], r: ['ArrowRight', null], u: ['ArrowUp', null], d: ['ArrowDown', null], jump: ['KeyO', 'Numpad0'], atk: ['KeyK', 'Numpad1'], blk: ['KeyL', 'Numpad2'], par: ['Semicolon', 'Numpad3'], brk: ['KeyI', 'Numpad4'], roll: ['KeyJ', 'Numpad5'] },
+  { l: ['KeyA', null], r: ['KeyD', null], u: ['KeyW', null], d: ['KeyS', null], jump: ['Space', null], atk: ['KeyF', null], blk: ['KeyG', null], par: ['KeyH', null], brk: ['KeyR', null], roll: ['KeyE', 'ShiftLeft'], spell: ['KeyQ', 'KeyC'] },
+  { l: ['ArrowLeft', null], r: ['ArrowRight', null], u: ['ArrowUp', null], d: ['ArrowDown', null], jump: ['KeyO', 'Numpad0'], atk: ['KeyK', 'Numpad1'], blk: ['KeyL', 'Numpad2'], par: ['Semicolon', 'Numpad3'], brk: ['KeyI', 'Numpad4'], roll: ['KeyJ', 'Numpad5'], spell: ['KeyU', 'Numpad6'] },
 ];
 const ACTIONS = [
   ['u', 'Haut (pas vers le fond)'], ['d', 'Bas (pas vers l\'avant)'], ['l', 'Gauche'], ['r', 'Droite'],
   ['jump', 'Sauter'], ['atk', 'Attaquer'], ['blk', 'Bloquer (maintenir)'], ['par', 'Parer'],
-  ['brk', 'Briser la garde'], ['roll', 'Roulade'],
+  ['brk', 'Briser la garde'], ['roll', 'Roulade'], ['spell', 'Sort spécial'],
 ];
 const KEYS_STORE = 'spartiate-touches';
 const RESERVED = ['Escape'];   // Échap = pause, non configurable
@@ -2065,13 +2078,13 @@ function controlsHTML(mode, compact) {
     const one = (act) => kb(key1(b, act) ?? key1(a, act));
     const move = (s) => ['u', 'l', 'd', 'r'].map((act) => kb(key1(s, act))).join('');
     const rows = [
-      `<b>Se déplacer</b> ${move(a)} ou ${move(b)} · <b>Sauter</b> ${kb(key1(a, 'jump') ?? key1(b, 'jump'))} · <b>Roulade</b> ${one('roll')}`,
+      `<b>Se déplacer</b> ${move(a)} ou ${move(b)} · <b>Sauter</b> ${kb(key1(a, 'jump') ?? key1(b, 'jump'))} · <b>Roulade</b> ${one('roll')} · <b>Sort</b> ${kb(key1(a, 'spell') ?? key1(b, 'spell'))}`,
       `<b>Attaquer</b> ${one('atk')} · <b>Bloquer</b> ${one('blk')} (maintenir) · <b>Parer</b> ${one('par')} · <b>Briser la garde</b> ${one('brk')}`,
     ];
-    if (!compact) rows.push(`<span>(ou ${['atk', 'blk', 'par', 'brk', 'roll'].map((act) => kb(key1(a, act))).join(' ')} de la main gauche)</span>`);
+    if (!compact) rows.push(`<span>(ou ${['atk', 'blk', 'par', 'brk', 'roll', 'spell'].map((act) => kb(key1(a, act))).join(' ')} de la main gauche)</span>`);
     return rows.map((r) => `<div class="row">${r}</div>`).join('');
   }
-  const p = (s, n) => `<b style="color:${n ? '#a8d4ff' : '#ffb3a8'}">J${n + 1}</b> ${['u', 'l', 'd', 'r'].map((act) => kb(key1(s, act))).join('')} saut ${kb(key1(s, 'jump'))} · att. ${kb(key1(s, 'atk'))} · bloc ${kb(key1(s, 'blk'))} · parer ${kb(key1(s, 'par'))} · briser ${kb(key1(s, 'brk'))} · roulade ${kb(key1(s, 'roll'))}`;
+  const p = (s, n) => `<b style="color:${n ? '#a8d4ff' : '#ffb3a8'}">J${n + 1}</b> ${['u', 'l', 'd', 'r'].map((act) => kb(key1(s, act))).join('')} saut ${kb(key1(s, 'jump'))} · att. ${kb(key1(s, 'atk'))} · bloc ${kb(key1(s, 'blk'))} · parer ${kb(key1(s, 'par'))} · briser ${kb(key1(s, 'brk'))} · roulade ${kb(key1(s, 'roll'))} · sort ${kb(key1(s, 'spell'))}`;
   return `<div class="row">${p(a, 0)}</div><div class="row">${p(b, 1)}</div>`;
 }
 
@@ -2342,6 +2355,18 @@ function simTick() {
 // =====================================================================
 //  HUD
 // =====================================================================
+// barre de sort spécial et temps de recharge dans le HUD (arène et donjon)
+function updateSpellHud(f, n, showKey) {
+  const S = spellOf(f);
+  const max = f.spellMax || S.cd || 7;
+  const cd = Math.max(0, f.spellCd || 0);
+  const ready = cd <= 0.01;
+  const kCode = showKey ? key1(KEYSETS[match?.mode === 'duo' ? n - 1 : 0], 'spell') : null;
+  setTxt('spn' + n, (kCode ? `[${lab(kCode)}] ` : '') + S.name);
+  setTxt('spc' + n, ready ? (f.spellBuffT > 0 ? `ACTIF ${f.spellBuffT.toFixed(1)} s` : 'PRÊT') : `${cd.toFixed(1)} s`);
+  setW('spf' + n, ready ? 100 : Math.max(0, Math.min(100, (1 - cd / max) * 100)));
+  setCls('spb' + n, 'ready', ready);
+}
 function updateHud() {
   if (game.phase === 'menu' || !F.length) return;
   if (isDungeon()) { dungeonHud(); return; }
@@ -2356,6 +2381,7 @@ function updateHud() {
     setW('s' + n, Math.max(0, f.sta));
     setCls('s' + n, 'low', f.sta < STA.tired);
     setCls('s' + n, 'fail', f.staFail > 0);
+    updateSpellHud(f, n, match?.mode === 'duo' || (net.live ? i === net.me : i === 0));
     if (uiTxt['w' + n] !== game.wins[i]) { uiTxt['w' + n] = game.wins[i]; [...$('w' + n).children].forEach((pip, k) => pip.classList.toggle('on', game.wins[i] > k)); }
   });
   const tm = Math.ceil(game.timer);
@@ -3008,7 +3034,8 @@ function buildHub(room) {
     let yes = null;
     if (clip) { yes = mixer.clipAction(clip); yes.setLoop(THREE.LoopOnce, 1); }
     const prev = HEROES[HERO_IDS[HERO_IDS.indexOf(pd.id) - 1]];
-    label((locked ? '🔒 ' : '') + HEROES[pd.id].name, locked ? `Défi du ${prev?.name ?? ''} requis` : HEROES[pd.id].desc, st.x + 0.2, 2.15, st.z, 1.25);
+    const sp = SPELLS[pd.id];
+    label((locked ? '🔒 ' : '') + HEROES[pd.id].name, locked ? `Défi du ${prev?.name ?? ''} requis` : `${HEROES[pd.id].desc} · ${sp.name}`, st.x + 0.2, 2.15, st.z, 1.35);
     return { pd, disc, rim, show, mixer: locked ? null : mixer, yes, sel: false, locked };
   });
   buildMerchant();
@@ -3648,6 +3675,7 @@ function dungeonHud() {
     setW('s' + n, Math.max(0, p.sta));
     setCls('s' + n, 'low', p.sta < STA.tired);
     setCls('s' + n, 'fail', p.staFail > 0);
+    updateSpellHud(p, n, match?.mode === 'duo' || (net.live ? i === net.me : i === 0));
     const nm = net.live ? (i === net.me ? myName() : net.peerName) : g.np === 1 ? myName() : '';
     const who = nm ? `${nm} · ` : g.np > 1 ? `J${n} · ` : '';
     const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
@@ -3721,7 +3749,10 @@ function refreshMenu() {
     const human = b.parentElement.dataset.key === 'p1' || cfg.mode === 'duo';
     const lock = human && !un.includes(b.dataset.val);
     b.disabled = lock;
-    b.title = lock ? `Verrouillé : réussis un défi du ${HEROES[HERO_IDS[HERO_IDS.indexOf(b.dataset.val) - 1]]?.name ?? ''}` : '';
+    const sp = SPELLS[b.dataset.val];
+    b.title = lock
+      ? `Verrouillé : réussis un défi du ${HEROES[HERO_IDS[HERO_IDS.indexOf(b.dataset.val) - 1]]?.name ?? ''}`
+      : (sp ? `Sort : ${sp.name} (${sp.cd} s) — ${sp.desc}` : '');
   });
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.val === cfg.arena));
   const online = cfg.mode === 'online', dg = cfg.game === 'dungeon';

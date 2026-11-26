@@ -10,7 +10,7 @@
 //  les IA des ennemis tournent DANS la simulation et sont sauvegardées avec elle, ce qui
 //  permet de jouer en ligne avec le rollback de rollback.js (step(entrée0, entrée1)).
 // =====================================================================
-import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
+import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, spellOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
 import { hypot, atan2, clamp, sin, cos } from './dmath.js';
 import { AI } from './ai.js';
 
@@ -170,7 +170,8 @@ const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteu
 export function equip(p, kind, wpn = defaultWeapon(kind)) {
   if (!HEROES[kind]) kind = 'soldier';
   if (!WEAPONS[wpn]) wpn = defaultWeapon(kind);
-  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, runMul: 1, phoenix: 0, thorns: 0, berserk: 0 });
+  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, runMul: 1, phoenix: 0, thorns: 0, berserk: 0,
+    spellCd: 0, spellMax: spellOf({ kind }).cd, spellBuffT: 0 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
   const tank = wpnOf(p).tank;                   // gants de boxe : se cumule avec l'armure du héros
@@ -234,7 +235,7 @@ export class DungeonSim extends Sim {
     this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, pads: HUB_PADS };
     this.heroes.forEach((p, i) => {
       const x = this.g.np > 1 ? (i ? 1.6 : 0.4) : 1, yaw = Math.PI * 0.75;
-      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0 });
+      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
       p.resetN++;
       this.toIdle(p);
     });
@@ -402,7 +403,7 @@ export class DungeonSim extends Sim {
       const off = np > 1 ? (i ? 0.8 : -0.8) : 0;
       const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
       if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
-      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0 });
+      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
       p.resetN++;
       this.toIdle(p);
     });
@@ -505,6 +506,8 @@ export class DungeonSim extends Sim {
   }
 
   foeOf(o, f) { const s = this.f[o]; return !!s && s.team !== f.team; }
+  canCastSpell(f) { return this.isHero(f) && !!SPELLS[f.kind]; }
+  mitigateSpell(def, dmg) { return dmg; }   // appliqué directement dans DungeonSim.damage()
 
   // ---------------- grimoire : chiens invoqués ----------------
   canSummon(f) {
@@ -589,7 +592,8 @@ export class DungeonSim extends Sim {
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
     if (def.god) { this.emit('pop', 'INVINCIBLE', def.x, def.y + 1.8, def.z, 'miss'); return; }
     const fury = att.berserk && att.hp < att.maxHp * FURY.below ? FURY.mul : 1;     // bénédiction « Fureur »
-    dmg = Math.max(1, Math.round(dmg * att.pow * fury * (1 - def.armor)));
+    const aegis = def.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;                // sort Rempart sacré
+    dmg = Math.max(1, Math.round(dmg * att.pow * fury * (1 - def.armor) * aegis));
     if (att.leech) heal(att, att.leech);
     // « Plume de phénix » : le coup qui l'aurait mis à terre le fait renaître (une fois)
     if (def.phoenix && def.hp - dmg <= 0) { this.rebirth(def); return; }
@@ -874,7 +878,8 @@ export class DungeonSim extends Sim {
   // pics d'un piège
   trapHit(f) {
     if (f.god) return;
-    const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor)));
+    const aegis = f.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;
+    const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor) * aegis));
     f.trapT = 1.0;
     if (f.phoenix && f.hp - dmg <= 0) { this.rebirth(f); return; }
     f.hp = Math.max(0, f.hp - dmg);

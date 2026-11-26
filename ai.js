@@ -3,7 +3,7 @@
 // simulation) : un match IA contre IA est reproductible, et l'IA n'influence la
 // simulation que par les entrées qu'elle produit.
 import { hypot, Rng } from './dmath.js';
-import { BRK, PRESS, canRoll, quant } from './sim.js';
+import { BRK, PRESS, canRoll, quant, spellOf } from './sim.js';
 
 export const AIL = [
   { react: 0.42, block: 0.28, parry: 0.05, dodge: 0.1, aggr: 0.3, brk: 0.3, roll: 0.12 },
@@ -119,7 +119,17 @@ export class AI {
       else { this.blkT = 0.4; out.blk = true; }
       return;
     }
-    if (me.arch) { this.decideArcher(out, me, o, L, dist, ux, uz, p); return; }
+    if (me.arch) {
+      if (me.team === undefined && me.spellCd <= 0 && dist > 1.8 && dist < 6.5 && p < L.aggr * 0.25) { out.press |= PRESS.spell; return; }
+      this.decideArcher(out, me, o, L, dist, ux, uz, p);
+      return;
+    }
+    // sort spécial en arène 1v1 (les ennemis du donjon ne lancent pas de sorts de héros)
+    if (me.team === undefined && me.spellCd <= 0 && this.sim.canCastSpell?.(me) && (me.state === 'idle' || me.state === 'walk' || me.state === 'block')) {
+      const sid = spellOf(me).id;
+      const inRange = sid === 'dash' ? (dist > 1.3 && dist < 3.6) : sid === 'aegis' ? (dist < 2.5 || me.guard < 45) : dist < 2.4;
+      if (inRange && p < L.aggr * 0.25) { out.press |= PRESS.spell; return; }
+    }
     if ((o.state === 'stun' || o.state === 'hit') && dist < 1.8) { if (dist > 1.3) this.go('in', 0.15); out.press |= PRESS.atk; return; }
     if (o.state === 'block' && dist < 1.5 && p < L.brk) { out.press |= PRESS.brk; return; }
     if (dist > 1.45) {

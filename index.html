@@ -126,6 +126,19 @@
   .sfill { height: 100%; width: 100%; background: var(--stamina); transition: width .08s linear; }
   .sfill.low { background: #e6c33a; }
   .sfill.fail { background: #ff4a3a; animation: blink .12s infinite alternate; }
+  .spbox { margin-top: 6px; width: 55%; font-size: 14px; line-height: 1.15; }
+  .p1 .spbox { margin-left: 0; text-align: left; } .p2 .spbox { margin-left: auto; text-align: right; }
+  .spmeta { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; text-shadow: 0 1px 3px #000; }
+  .p2 .spmeta { flex-direction: row-reverse; }
+  .spname { font-family: Cinzel, serif; font-weight: 800; font-size: 13px; letter-spacing: .05em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spcd { font-weight: 700; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .spbar { height: 6px; margin-top: 2px; border-radius: 3px; background: rgba(0,0,0,.6); border: 1px solid rgba(217,164,65,.35); overflow: hidden; }
+  .p2 .spbar { transform: scaleX(-1); }
+  .spfill { height: 100%; width: 100%; background: linear-gradient(90deg, #7c56b8, #c48cff); transition: width .08s linear; }
+  .spbox.ready .spname { color: #ffe27a; }
+  .spbox.ready .spcd { color: #ffe27a; }
+  .spbox.ready .spbar { border-color: #f1c66d; box-shadow: 0 0 8px rgba(241,198,109,.45); }
+  .spbox.ready .spfill { background: linear-gradient(90deg, #d9a441, #fff0a0); }
   @keyframes blink { to { opacity: .35; } }
   .pips { display: flex; gap: 6px; margin-top: 6px; }
   .p2 .pips { justify-content: flex-end; }
@@ -161,6 +174,8 @@
   .pop.dmg { font-family: 'Barlow Condensed'; font-size: 30px; color: #ffe27a; }
   .pop.parry { color: #8fd8ff; font-size: 32px; }
   .pop.brk { color: #ffb04a; font-size: 32px; }
+  .pop.spell { color: #ffe27a; font-size: 30px; text-shadow: 0 3px 0 #000, 0 0 14px rgba(255,210,80,.7); }
+  .pop.heal { color: #8fe36a; font-size: 28px; }
   .pop.miss { color: #d8d8d8; font-size: 22px; }
   @keyframes pop { 0% { opacity: 0; transform: translate3d(-50%, calc(-50% + 10px), 0) scale(.6); }
     15% { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1.15); } 30% { transform: translate3d(-50%, -50%, 0) scale(1); }
@@ -450,6 +465,10 @@
     <div class="bar"><div class="trail" id="t1"></div><div class="fill" id="h1"></div></div>
     <div class="gbar"><div class="gfill" id="g1"></div></div>
     <div class="sbar"><div class="sfill" id="s1"></div></div>
+    <div class="spbox ready" id="spb1">
+      <div class="spmeta"><span class="spname" id="spn1">Sort</span><span class="spcd" id="spc1">PRÊT</span></div>
+      <div class="spbar"><div class="spfill" id="spf1"></div></div>
+    </div>
     <div class="pips" id="w1"><i></i><i></i></div>
   </div>
   <div class="center">
@@ -461,6 +480,10 @@
     <div class="bar"><div class="trail" id="t2"></div><div class="fill" id="h2"></div></div>
     <div class="gbar"><div class="gfill" id="g2"></div></div>
     <div class="sbar"><div class="sfill" id="s2"></div></div>
+    <div class="spbox ready" id="spb2">
+      <div class="spmeta"><span class="spname" id="spn2">Sort</span><span class="spcd" id="spc2">PRÊT</span></div>
+      <div class="spbar"><div class="spfill" id="spf2"></div></div>
+    </div>
     <div class="pips" id="w2"><i></i><i></i></div>
   </div>
 </div>
