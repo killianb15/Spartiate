@@ -12,7 +12,7 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
   (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
-  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere). Chromium headless est lent (quelques images/s) : pour une capture
+  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure). Chromium headless est lent (quelques images/s) : pour une capture
   précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
@@ -103,6 +103,11 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   chargeant). Affichage : `DogView(i, 'cerbere', hellGlow)` (têtes `head-l/c/r`, yeux `eyes-*`, gerbes de flammes
   `jets` d'après l'état), cône `tele.cone`, biome `BIOME.lair` + `lairDecor()` (os, flammes), bandeau à l'entrée.
   Modèle : `tools/blender/cerbere.py` → `assets/summons/cerbere.glb`. Tests : `tests/cerbere.test.js`.
+  `brute` (FOES → `e.brute`) : son IA ne pare, ne bloque ni ne roule. Morsure préparée : arme `fangs` avec
+  `windup` (0,5 s ; ×0,6 pour les morsures enchaînées, `windupOf(f)` dans sim.js) puis `lunge` (bond) ; il vise
+  jusqu'à 0,25 s avant le bond puis se fige (fenêtre d'esquive) ; arc rouge `tele.bite` au sol pendant la préparation.
+  Grands corps : la portée des coups compte depuis la surface de la cible (`big` dans `resolve`) et l'IA compte leur
+  contact comme le corps à corps (`touch` dans ai.js). Scénario navigateur : `browser-test.mjs morsure`.
 - **Salle d'armes en plein air** : `BIOME.hub` (murs des cryptes, ciel de jour) et `outsideDecor('meadow')` :
   2 rangées de dalles d'herbe seulement (≈ 400-950 triangles chacune !), puis sol vert, touffes et fleurs
   instanciées, arbres (côtés vus par la caméra), buissons, rochers, collines.

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, defaultWeapon } from './sim.js';
+import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, defaultWeapon, windupOf } from './sim.js';
 const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
@@ -1435,9 +1435,14 @@ class DogView {
     const swing = moving ? Math.sin(this.phase) * Math.min(0.7, 0.25 + sp * 0.12) : 0;
     this.legs.forEach((l, k) => { l.rotation.x = (k < 2 ? swing : -swing); });
     let bob = moving ? Math.abs(Math.sin(this.phase)) * 0.02 : 0, pitch = 0, roll = 0, headX = 0, lunge = 0;
-    if (st === 'attack' || (st === 'air' && sf.airAtk)) {
+    const W = st === 'attack' ? windupOf(sf) : 0;
+    if (st === 'attack' && t < W) {
+      // morsure préparée (Cerbère) : il se ramasse, gueules en arrière, avant de se lancer
+      const k = Math.min(1, t / Math.min(W, 0.2));
+      headX = -0.45 * k; pitch = -0.14 * k; bob = -0.05 * k; lunge = -0.06 * k;
+    } else if (st === 'attack' || (st === 'air' && sf.airAtk)) {
       // morsure : la tête plonge vers l'avant, le corps suit
-      const k = Math.sin(Math.PI * Math.min(1, (st === 'air' ? sf.airAtkT : t) / ATK.dur));
+      const k = Math.sin(Math.PI * Math.min(1, (st === 'air' ? sf.airAtkT : t - W) / ATK.dur));
       headX = 0.55 * k; lunge = 0.12 * k; pitch = 0.18 * k;
     } else if (st === 'brk') {
       // bond : arrière-train baissé puis saut en avant
@@ -1494,7 +1499,7 @@ class DogView {
       });
     }
     // les yeux de Cerbère flambent quand il prépare une attaque ou qu'il est enragé
-    const hot = spc && sf.spA === 0 ? 2.2 + Math.sin(T * 28) : sf.rage ? 1.6 : 0;
+    const hot = (spc && sf.spA === 0) || (st === 'attack' && t < W) ? 2.2 + Math.sin(T * 28) : sf.rage ? 1.6 : 0;
     for (const gm of this.gems) gm.traverse((o) => { if (o.isMesh) o.material.color.copy(this.glowCol).multiplyScalar(1 + hot + 0.6 * Math.sin(T * 5)); });
     if (this.hpBar) {
       this.hpBar.visible = st !== 'dead';
@@ -2841,8 +2846,9 @@ const tele = (() => {
   const lane = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2).translate(0, 0, 0.5), laneMat);
   // cône du souffle de feu (centré sur +z avant rotation, rayon 1)
   const cone = new THREE.Mesh(new THREE.CircleGeometry(1, 32, -Math.PI / 2 - BOSS.fire.half, 2 * BOSS.fire.half).rotateX(-Math.PI / 2), mat(0xffb030, 0.4));
-  for (const m of [disk, fill, edge, lane, cone]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
-  return { disk, fill, edge, lane, tex, cone };
+  const bite = new THREE.Mesh(new THREE.RingGeometry(0.55, 1, 24, 1, -Math.PI / 2 - 0.55, 1.1).rotateX(-Math.PI / 2), mat(0xff2a10, 0.45));
+  for (const m of [disk, fill, edge, lane, cone, bite]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
+  return { disk, fill, edge, lane, tex, cone, bite };
 })();
 function bossTele() {
   const e = sim.f.find((o) => o.sp && o.state !== 'dead' && o.team === 1);
@@ -2850,6 +2856,16 @@ function bossTele() {
   tele.disk.visible = tele.fill.visible = tele.edge.visible = slam;
   tele.lane.visible = charge;
   tele.cone.visible = e?.sp === 'fire';
+  // morsure préparée de Cerbère (pas une attaque spéciale : on cherche le boss qui se ramasse)
+  const b = sim.f.find((o) => o.brute && o.state === 'attack' && o.stateT < windupOf(o));
+  tele.bite.visible = !!b;
+  if (b) {
+    const W = windupOf(b), r = WEAPONS[b.wpn].reach + 0.6;
+    tele.bite.position.set(b.x, b.y + 0.05, b.z);
+    tele.bite.rotation.y = b.yaw;
+    tele.bite.scale.setScalar(r);
+    tele.bite.material.opacity = 0.25 + 0.45 * (b.stateT / W) + 0.1 * Math.sin(clockT * 30);
+  }
   if (tele.cone.visible) {
     // préparation : le cône clignote ; pendant le souffle : il vacille comme une flamme
     tele.cone.position.set(e.x, e.y + 0.05, e.z);

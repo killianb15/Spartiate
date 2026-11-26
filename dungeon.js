@@ -50,7 +50,8 @@ export const FOES = {
   boss: { kind: 'orc', name: 'Chef orc', hp: 140, pow: 0.85, lv: 2, size: 1.4, boss: true },
   colosse: { kind: 'robot', name: "Colosse d'airain", hp: 190, pow: 0.75, lv: 2, size: 1.9, boss: true, wpn: 'hammer', moves: ['slam', 'charge'], adds: 'zombie' },
   // Cerbère : chien géant à trois têtes, gardien des enfers, dans son antre (salle dédiée, room.lair)
-  cerbere: { kind: 'cerbere', name: 'Cerbère', hp: 230, pow: 0.7, lv: 2, size: 2.8, boss: true, wpn: 'fangs', moves: ['fire', 'slam', 'charge'], adds: 'hound' },
+  // brute : ni parade ni blocage (son IA fonce et mord ; ses morsures se préparent : voir l'arme fangs)
+  cerbere: { kind: 'cerbere', name: 'Cerbère', hp: 230, pow: 0.7, lv: 2, size: 2.8, boss: true, wpn: 'fangs', moves: ['fire', 'slam', 'charge'], adds: 'hound', brute: true },
 };
 // boss de la salle n (une salle sur BOSS_EVERY) : chef orc, colosse, Cerbère, puis on recommence
 const BOSS_ORDER = ['boss', 'colosse', 'cerbere'];
@@ -426,6 +427,7 @@ export class DungeonSim extends Sim {
       boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
     e.arch = !!wpnOf(e).bow;
     if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first, rage: 0, spTick: 0 });
+    if (T.brute) e.brute = 1;
     e.y = this.groundY(e);
     return e;
   }

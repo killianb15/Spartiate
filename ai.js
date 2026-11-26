@@ -90,6 +90,15 @@ export class AI {
   decide(out, me, o, L, dist, ux, uz) {
     this.think = L.react * this.rand(0.7, 1.3);
     const p = this.rnd();
+    // brute (Cerbère) : ni parade, ni blocage, ni roulade : il fonce et mord
+    if (me.brute) {
+      if (me.state === 'attack') { if (p < 0.5) out.press |= PRESS.atk; return; }   // les têtes suivantes
+      if (me.state !== 'idle' && me.state !== 'walk') return;
+      if (dist > 1.45) this.go(this.rnd() < 0.2 ? 'side' : 'in', this.rand(0.2, 0.45));
+      else if (p < 0.7) out.press |= PRESS.atk;
+      else this.go('side', this.rand(0.25, 0.5));
+      return;
+    }
     // prise dans un enchaînement : roulade sur le côté ou en arrière
     if (me.state === 'hit' && canRoll(me) && p < L.roll) { this.doRoll(out, ux, uz); return; }
     if (!['idle', 'walk', 'block', 'air', 'attack'].includes(me.state)) return;

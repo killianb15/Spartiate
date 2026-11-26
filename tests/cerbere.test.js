@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DungeonSim, BOSS, FOES, ROOM_R, bossOf } from '../dungeon.js';
-import { NEUTRAL, hashState } from '../sim.js';
+import { NEUTRAL, hashState, WEAPONS } from '../sim.js';
 
 // antre de Cerbère (salle 15), combat commencé
 const lair = (seed = 1, kinds = ['soldier']) => {
@@ -143,4 +143,61 @@ test('Cerbère mord : son IA attaque au contact (sinon il tournait autour du hé
     }
   }
   assert.ok(bites >= 130, `${bites} morsures`);
+});
+
+// antre, héros 0 collé face à Cerbère (immobile, sans IA ni attaque spéciale)
+const duelCerbere = (seed = 4) => {
+  const s = new DungeonSim(seed, ['soldier']);
+  s.start();
+  s.debugGoto(15);
+  while (s.g.phase !== 'fight') s.step();
+  const e = s.f.find((f) => f.foe === 'cerbere'), p = s.f[0];
+  e.spCd = 99;
+  s.ais[e.idx] = null;
+  const d = 0.45 * (p.size + e.size) + 0.05;
+  Object.assign(e, { x: 0, z: 0, vx: 0, vz: 0, yaw: 0, visTarget: 0 });
+  Object.assign(p, { x: 0, z: d, vx: 0, vz: 0, yaw: Math.PI, visTarget: Math.PI });
+  return { s, e, p };
+};
+
+test('Cerbère ne pare ni ne bloque jamais, même harcelé', () => {
+  const s = new DungeonSim(8, ['soldier']);
+  s.start();
+  s.debugGoto(15);
+  while (s.g.phase !== 'fight') s.step();
+  const e = s.f.find((f) => f.foe === 'cerbere');
+  s.debugGod(true);
+  const seen = new Set();
+  for (let k = 0; k < 1800; k++) {
+    // le héros attaque sans arrêt en marchant vers lui
+    const p = s.f[0], dx = e.x - p.x, dz = e.z - p.z, d = Math.hypot(dx, dz) || 1;
+    s.step({ mx: Math.round(dx / d * 127), mz: Math.round(dz / d * 127), blk: false, press: k % 20 === 0 ? 1 : 0 });
+    seen.add(e.state);
+  }
+  assert.ok(!seen.has('block') && !seen.has('parry'), [...seen].join(' '));
+  assert.ok(seen.has('attack'), 'il attaque');
+});
+
+test('morsure préparée : rien pendant la préparation, puis il se lance et mord', () => {
+  const { s, e, p } = duelCerbere();
+  const W = WEAPONS.fangs.windup, hp0 = p.hp;
+  s.startAttack(e, false);
+  let firstHit = -1;
+  for (let k = 0; k < 90; k++) {
+    s.step();
+    if (firstHit < 0 && p.hp < hp0) firstHit = e.stateT;
+  }
+  assert.ok(firstHit > 0, 'la morsure touche');
+  assert.ok(firstHit >= W, `pas avant la fin de la préparation (${firstHit.toFixed(2)} s, préparation ${W} s)`);
+  assert.ok(s.ev.some((ev) => ev[0] === 'sfx' && ev[1] === 'bark'), 'aboiement au moment du bond');
+});
+
+test('morsure préparée : un pas de côté pendant la préparation l’esquive', () => {
+  const { s, e, p } = duelCerbere();
+  const hp0 = p.hp;
+  s.startAttack(e, false);
+  const side = { mx: 127, mz: 0, blk: false, press: 0 };
+  // le héros part sur le côté quand sa direction se fige (0,25 s avant le bond)
+  for (let k = 0; k < 90; k++) s.step(e.stateT > WEAPONS.fangs.windup - 0.25 && e.state === 'attack' ? side : NEUTRAL);
+  assert.equal(p.hp, hp0, 'esquivée');
 });

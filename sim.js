@@ -43,11 +43,14 @@ export const WEAPONS = {
   gloves: { name: 'Gants de boxe', desc: 'Pour encaisser : −20 % de dégâts subis et la meilleure garde, mais petits coups de près', reach: 1.15, dmg: 6, combo: 3, run: 1, guard: 0.45, tank: 0.2 },
   // crocs des chiens invoqués (pas proposés dans la salle d'armes)
   bite: { name: 'Crocs', desc: '', reach: 1.25, dmg: 8, combo: 2, run: 1.25, guard: 1.5, hidden: true },
-  // les trois gueules de Cerbère : un enchaînement de 3 morsures (une par tête), de loin (il est grand)
-  fangs: { name: 'Trois gueules', desc: '', reach: 2.0, dmg: 13, combo: 3, run: 1.05, guard: 1, hidden: true },
+  // les trois gueules de Cerbère : un enchaînement de 3 morsures (une par tête), de loin (il est grand) ;
+  // windup : il se ramasse avant chaque morsure (fenêtre d'esquive), puis se lance (lunge : vitesse du bond)
+  fangs: { name: 'Trois gueules', desc: '', reach: 2.0, dmg: 13, combo: 3, run: 1.05, guard: 1, hidden: true, windup: 0.5, lunge: 6 },
   bow: { name: 'Arc', desc: 'Tire des flèches ; on court plus vite, mais on bloque mal', reach: 1.45, dmg: SHOT.bash, combo: 3, run: SHOT.run, guard: 1.6, bow: true },
 };
 export const wpnOf = (f) => WEAPONS[f.wpn] ?? WEAPONS.sword;
+// temps de préparation du coup en cours (0 pour les armes normales ; plus court pour les coups enchaînés)
+export const windupOf = (f) => (wpnOf(f).windup ?? 0) * (f.combo > 1 ? 0.6 : 1);
 // temps du tir (arc), de l'incantation de la boule de feu (sceptre) ou de l'invocation (grimoire)
 const shotOf = (f) => (wpnOf(f).summon ? CAST : wpnOf(f).fire ? FIRE : SHOT);
 // arme par défaut d'un personnage (l'archère a son arc)
@@ -415,7 +418,8 @@ export class Sim {
     const dOpp = opp ? hypot(opp.x - f.x, opp.z - f.z) : (moving ? 1 : 0);
     const ffx = fx(f), ffz = fz(f);
     // verrouillage : on fait toujours face à l'adversaire, sauf pendant un coup déjà lancé
-    const track = (st === 'idle' || st === 'walk' || st === 'block' || st === 'air' || st === 'parry' || (st === 'attack' && f.stateT < ATK.track) || (st === 'shoot' && f.stateT < shotOf(f).rel));
+    // (coup préparé : il vise pendant la préparation, puis sa direction se fige 0,25 s avant de se lancer)
+    const track = (st === 'idle' || st === 'walk' || st === 'block' || st === 'air' || st === 'parry' || (st === 'attack' && f.stateT < ATK.track + Math.max(0, windupOf(f) - 0.25)) || (st === 'shoot' && f.stateT < shotOf(f).rel));
     if (track && dOpp > 0.05) f.yaw = lerpAng(f.yaw, toOpp, Math.min(1, dt * 20));
     let visYaw = f.yaw;
 
@@ -451,8 +455,10 @@ export class Sim {
         break;
       }
       case 'attack': {
-        const t = f.stateT;
-        if (t > 0.06 && t < 0.2) { f.vx = ffx * 2.6; f.vz = ffz * 2.6; }
+        // coup préparé (windup, Cerbère) : tout le coup est décalé d'autant, et il se lance plus loin
+        const W = windupOf(f), t = f.stateT - W, run = wpnOf(f).lunge ?? 2.6;
+        if (W > 0 && t >= 0.06 && t - dt < 0.06) this.emit('sfx', 'bark');
+        if (t > 0.06 && t < 0.2) { f.vx = ffx * run; f.vz = ffz * run; }
         else { const k = exp(-dt * 12); f.vx *= k; f.vz *= k; }
         if (canAct && t > ATK.chain && f.combo < wpnOf(f).combo && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
         if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
@@ -556,7 +562,7 @@ export class Sim {
     if (def.state === 'roll' && def.stateT > ROLL.inv0 && def.stateT < ROLL.inv1) return;  // invincible pendant la roulade
     let kind = null;
     const t = att.stateT;
-    if (att.state === 'attack' && t >= ATK.start && t <= ATK.end) kind = 'light';
+    if (att.state === 'attack' && t - windupOf(att) >= ATK.start && t - windupOf(att) <= ATK.end) kind = 'light';
     else if (att.state === 'brk' && t >= BRK.start && t <= BRK.end) kind = 'brk';
     else if (att.state === 'air' && att.airAtk && att.airAtkT >= 0.08 && att.airAtkT <= 0.32) kind = 'air';
     if (!kind) return;

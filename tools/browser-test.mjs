@@ -171,6 +171,28 @@ if (scenario === 'gloves') {
   ws.close();
   process.exit(0);
 }
+if (scenario === 'morsure') {
+  // morsure préparée de Cerbère : il se ramasse (arc rouge au sol), se lance puis mord
+  await evalJs(`spartiate.debugGoto(15); true`);
+  await waitFor(`spartiate.sim.room.lair === 'cerbere' && spartiate.sim.g.phase === 'fight'`, 90000);
+  await evalJs(`(() => { const s = spartiate.sim, e = s.f.find((f) => f.foe === 'cerbere'), p = s.f[0]; s.debugGod(true); e.spCd = 999; s.ais[e.idx] = null;
+    Object.assign(e, { x: 0, z: -1, vx: 0, vz: 0, yaw: 0, visTarget: 0 }); Object.assign(p, { x: 0, z: 1.2 }); spartiate.views[0].snapPos = true; return true; })()`);
+  await sleep(1500);
+  const bite = async (label) => {
+    await evalJs(`(() => { const s = spartiate.sim, e = s.f.find((f) => f.foe === 'cerbere'); s.startAttack(e, false); return true; })()`);
+    await waitFor(`(() => { const e = spartiate.sim.f.find((f) => f.foe === 'cerbere'); return e.state === 'attack' && e.stateT > 0.3; })()`, 30000);
+    await shot(label + '-preparation');
+    console.log('ETAT', await evalJs(`(() => { const e = spartiate.sim.f.find((f) => f.foe === 'cerbere'); return e.state + ' ' + e.stateT.toFixed(2); })()`));
+    await waitFor(`(() => { const e = spartiate.sim.f.find((f) => f.foe === 'cerbere'); return e.state === 'attack' && e.stateT > 0.62; })()`, 30000);
+    await shot(label + '-bond');
+    await waitFor(`spartiate.sim.f.find((f) => f.foe === 'cerbere').state !== 'attack'`, 30000);
+  };
+  await bite('morsure');
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
 if (scenario === 'cerbere') {
   // salle d'armes au milieu de sa prairie, puis l'antre de Cerbère et ses attaques (outil de débogage)
   const info = () => evalJs(`(() => { const r = spartiate.renderer.info; return JSON.stringify({ appels: r.render.calls, triangles: r.render.triangles, programmes: r.programs.length, geos: r.memory.geometries, textures: r.memory.textures, fps: Math.round(1 / Math.max(1e-3, spartiate.sim.dt)) }); })()`);
