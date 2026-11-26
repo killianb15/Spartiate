@@ -26,7 +26,7 @@
     font-family: 'Barlow Condensed', system-ui, sans-serif; user-select: none; }
   canvas { display: block; position: fixed; inset: 0; }
   .hidden { display: none !important; }
-  #netStat { position: fixed; left: 12px; bottom: 8px; z-index: 5; font-size: 14px; letter-spacing: .04em; color: var(--muted); opacity: .6; pointer-events: none; }
+  #netStat { position: fixed; left: 12px; bottom: 8px; z-index: 5; font-size: 14px; letter-spacing: .04em; color: var(--muted); opacity: .78; pointer-events: none; text-shadow: 0 1px 2px #000; }
   button { font: inherit; color: inherit; cursor: pointer; }
 
   /* ---------- Loading ---------- */
@@ -197,6 +197,7 @@
     box-shadow: 0 0 18px rgba(255,170,40,.45), inset 0 0 12px rgba(255,200,90,.2); }
   .boons button.r2 small { color: #ffc860; }
   .boons button span { font-family: 'Barlow Condensed', sans-serif; font-weight: 500; font-size: 18px; letter-spacing: 0; color: var(--ink); }
+  .boons button .owned { font-size: 14px; color: #ff9a7a; margin-top: 2px; }
 
   /* ---------- Marchand d'armes ---------- */
   #talk { position: fixed; z-index: 6; pointer-events: none; transform: translate(-50%, calc(-100% - 14px)); max-width: min(360px, calc(100vw - 32px));

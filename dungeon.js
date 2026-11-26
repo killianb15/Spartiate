@@ -283,7 +283,10 @@ export class DungeonSim extends Sim {
     p.shop = 1 + Math.max(0, WEAPON_IDS.indexOf(p.wpn));
     p.shopIn = 7;                       // ignore la direction tenue en arrivant, jusqu'à ce qu'on la relâche
     const yaw = Math.PI;                // face au marchand (vers −z)
-    Object.assign(p, { x: pd.x, z: pd.z, vx: 0, vz: 0, yaw, visTarget: yaw });
+    // à deux devant le comptoir : on se décale légèrement pour ne pas se pousser hors de la dalle
+    const busy = this.heroes.some((q) => q !== p && q.shop > 0);
+    const x = busy ? pd.x + (p.idx ? 0.52 : -0.52) : pd.x;
+    Object.assign(p, { x, z: pd.z, vx: 0, vz: 0, yaw, visTarget: yaw });
     this.toIdle(p);
     this.emit('sfx', 'coin');
   }
@@ -565,7 +568,10 @@ export class DungeonSim extends Sim {
     if (door && (a < -R || this.inLane(f))) {
       a = Math.min(a, R);
       if (a < -R) b *= 0.8;                       // dans le passage : on est guidé vers le milieu
-      if (a < -ROOM_R - 0.5 && (g.phase === 'clear' || g.phase === 'hub')) { g.phase = 'exit'; g.t = 0; this.emit('exit'); }
+      // ne pas arracher un équipier en train de choisir son arme chez le marchand
+      const blockedByShop = g.phase === 'hub' && this.heroes.some((q) => q !== f && q.shop > 0);
+      if (blockedByShop) a = Math.max(a, -R);
+      else if (a < -ROOM_R - 0.5 && (g.phase === 'clear' || g.phase === 'hub')) { g.phase = 'exit'; g.t = 0; this.emit('exit'); }
     } else a = clamp(a, -R, R);
     if (ex === 'z') { f.z = a; f.x = b; } else { f.x = a; f.z = b; }
   }
@@ -968,6 +974,50 @@ export class DungeonSim extends Sim {
   }
   // vrai si le héros h doit encore choisir
   mustPick(h) { return this.g.phase === 'reward' && h < this.g.np && this.f[h].state !== 'dead' && this.g['pick' + h] < 0; }
+  // vrai si le héros h peut prendre la bénédiction c (évite de bloquer sur une unique déjà possédée)
+  canChoose(h, c) {
+    if (!this.mustPick(h)) return false;
+    const id = this.offer[c], p = this.f[h];
+    if (!BOONS[id] || !p) return false;
+    return !(BOONS[id].unique && p.boons.split(',').includes(id));
+  }
+
+  // retire proprement un héros qui quitte la partie en cours de donjon (passage fluide en solo)
+  dropHero(idx) {
+    const g = this.g;
+    if (g.np <= 1 || idx < 0 || idx >= g.np) return false;
+    // supprime le héros parti et ses chiens invoqués, puis réindexe tous les combattants et projectiles
+    const keepIdx = [];
+    const map = new Map();
+    for (let i = 0; i < this.f.length; i++) {
+      const e = this.f[i];
+      if (i === idx || e.owner === idx) continue;
+      map.set(i, keepIdx.length);
+      keepIdx.push(i);
+    }
+    this.f = keepIdx.map((old, ni) => {
+      const e = this.f[old];
+      e.idx = ni;
+      if (e.owner >= 0) e.owner = map.get(e.owner) ?? -1;
+      return e;
+    });
+    this.inp = keepIdx.map((old) => this.inp[old]);
+    this.ais = keepIdx.map((old, ni) => {
+      const a = this.ais[old];
+      if (a) a.me = ni;
+      return a;
+    });
+    this.pr = this.pr.filter((a) => map.has(a.o)).map((a) => ({ ...a, o: map.get(a.o) }));
+    if (this.unlocked) this.unlocked = [this.unlocked[1 - idx] ?? []];
+    if (idx === 0) g.pick0 = g.pick1;
+    g.pick1 = -1;
+    g.np = 1;
+    // si le héros restant était à terre en attendant son équipier, il se relève pour continuer seul
+    const p = this.f[0];
+    if (p && p.down) this.getUp(p, 'EN SOLO !');
+    if (g.phase === 'reward' && !this.mustPick(0)) { g.phase = 'clear'; g.t = 0; }
+    return true;
+  }
 
   // frappe de att sur une liste de cibles : un même coup peut en toucher plusieurs
   strike(att, targets) {

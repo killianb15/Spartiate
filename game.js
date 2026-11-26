@@ -5,6 +5,7 @@ import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, 
 const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
+import { CoopHost, CoopGuest } from './coop.js';
 import { Link } from './net.js';
 import { DungeonSim, BOONS, RARITY, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
@@ -1707,10 +1708,9 @@ addEventListener('keydown', (e) => { if (e.code === 'F2') { e.preventDefault(); 
 addEventListener('blur', () => down.clear());
 
 // déplacements relatifs à la caméra : ← → le long de l'écran, ↑ ↓ en profondeur (pas de côté)
-// Entrée d'un joueur pour la prochaine image de simulation (déplacement quantifié, identique chez les deux joueurs)
-function localInput(pl) {
-  if (sim instanceof DungeonSim && sim.g.phase === 'reward' && pickReq[pl] >= 0) { pending[pl] = 0; return pickInput(pickReq[pl]); }
-  if (sim instanceof DungeonSim && sim.g.phase === 'hub' && shopReq[pl] >= 0) { const n = shopReq[pl]; shopReq[pl] = -1; pending[pl] = 0; return shopInput(n); }
+// Entrée d'un joueur pour la prochaine image de simulation (déplacement quantifié, identique chez les deux joueurs).
+// consume = false permet de lire l'entrée sans effacer pending/tapped (utile si le rollback attend un paquet).
+function readMoveInput(pl, consume = true) {
   const h = held[pl];
   for (const k of HELD) h[k] = false;
   if (!game.paused) for (const code of down) {
@@ -1719,7 +1719,7 @@ function localInput(pl) {
     for (const [p, act] of b) if (p === pl && HELD.includes(act)) h[act] = true;
   }
   if (!game.paused) for (const act of tapped[pl]) h[act] = true;
-  tapped[pl].clear();
+  if (consume) tapped[pl].clear();
   const rx = Math.cos(camAng), rz = -Math.sin(camAng);   // droite de l'écran
   const fx = -Math.sin(camAng), fz = -Math.cos(camAng);  // vers le fond de l'écran
   const hh = (h.r ? 1 : 0) - (h.l ? 1 : 0), v = (h.u ? 1 : 0) - (h.d ? 1 : 0);
@@ -1727,15 +1727,24 @@ function localInput(pl) {
   const n = Math.hypot(mx, mz);
   if (n > 1) { mx /= n; mz /= n; }
   const press = pending[pl];
-  pending[pl] = 0;
+  if (consume) pending[pl] = 0;
   return { mx: quant(mx), mz: quant(mz), blk: !!h.blk, press };
+}
+function localInput(pl, consume = true) {
+  if (isDungeon() && sim.g.phase === 'reward' && pickReq[pl] >= 0) { if (consume) pending[pl] = 0; return pickInput(pickReq[pl]); }
+  if (isDungeon() && sim.g.phase === 'hub' && shopReq[pl] >= 0) { const n = shopReq[pl]; if (consume) { shopReq[pl] = -1; pending[pl] = 0; } return shopInput(n); }
+  return readMoveInput(pl, consume);
 }
 
 // =====================================================================
 //  Déroulement du match
 // =====================================================================
 let sim = new Sim(1);          // simulation du combat (remplacée à chaque match)
-let rb = null;                 // rollback réseau (en ligne uniquement)
+let rb = null;                 // rollback réseau (arène 1v1 en ligne)
+let coop = null;               // moteur coop hôte-autoritaire (donjon à 2 en ligne, coop.js)
+let sessionSeq = 0;
+const nextSid = () => (((Date.now() & 0xfffff) * 1024) + (++sessionSeq & 1023)) >>> 0 || 1;
+const isDungeon = (s = sim) => s instanceof DungeonSim || !!s?.isCoopGuest;
 // État de la partie côté interface ; le reste est lu dans la simulation (sim.g)
 const game = {
   loading: true, paused: false, shake: 0,
@@ -1767,7 +1776,7 @@ function makeFighters(p1 = cfg.p1, p2 = cfg.p2) {
 }
 // aperçu du menu : en ligne, on montre le personnage choisi par l'adversaire
 function menuFighters() {
-  if (sim instanceof DungeonSim) return;
+  if (isDungeon()) return;
   const peer = cfg.mode === 'online' && net.peerKind;
   if (!peer) makeFighters();
   else if (net.role === 'guest') makeFighters(peer, cfg.p1);
@@ -1804,8 +1813,9 @@ function playEvents(evs) {
 }
 
 function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.arena }) {
-  match = m;
+  match = { ...m, game: 'arena' };
   net.live = m.mode === 'online';
+  coop = null;
   ac();
   game.paused = false;
   ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
@@ -1831,6 +1841,7 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   sim.ev.length = 0;
   rb = net.live ? new Rollback(sim, {
     me: net.me,
+    sid: m.sid || 0,
     send: (msg, reliable) => (net.link ? net.link.send(msg, reliable) : netSend(msg)),
     onDesync: (d) => console.warn('Désynchronisation détectée à l\'image', d.frame, d.me === 0 ? '(resynchronisation envoyée)' : ''),
   }) : null;
@@ -1858,13 +1869,17 @@ function endMatch() {
 
 // remote : c'est l'adversaire qui a quitté le combat, inutile de le prévenir
 function toMenu(remote = false) {
-  if (match?.game === 'dungeon' && !remote && net.ws) { if (net.live) netInfo('Partie en ligne quittée.'); netClose(); }
-  else if (net.live && !remote) netSend({ t: 'menu' });
+  if (match?.game === 'dungeon' && !remote && net.ws) {
+    if (net.live) netInfo('Partie en ligne quittée.');
+    netSend({ t: 'leave' });
+    netClose();
+  } else if (net.live && !remote) netSend({ t: 'menu' });
   net.live = false;
   rb = null;
+  coop = null;
   sim.g.phase = 'menu';
   game.paused = false;
-  ['hud', 'help', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
+  ['hud', 'help', 'result', 'pause', 'reward', 'lobby', 'talk', 'shop', 'bossBar'].forEach((id) => $(id).classList.add('hidden'));
   $('fade').classList.remove('on');
   $('menu').classList.remove('hidden');
   menuScene();
@@ -1873,7 +1888,7 @@ function toMenu(remote = false) {
 // décor et personnages derrière le menu, selon le jeu choisi
 function menuScene() {
   if (cfg.game === 'dungeon') { dungeonPreview(); return; }
-  if (sim instanceof DungeonSim) sim = new Sim(1);
+  if (isDungeon()) sim = new Sim(1);
   if (curArena !== cfg.arena) buildArena(cfg.arena);
   menuFighters();
 }
@@ -1881,22 +1896,41 @@ function menuScene() {
 function togglePause() {
   if (!['intro', 'fight', 'ko', 'clear', 'exit', 'dead', 'hub'].includes(game.phase)) return;
   game.paused = !game.paused;
-  $('pauseTxt').textContent = net.live ? 'En ligne, le combat continue pendant la pause !' : 'Échap pour reprendre';
+  $('pauseTxt').textContent = net.live ? 'En ligne, la partie continue pendant la pause !' : 'Échap pour reprendre';
   $('pause').classList.toggle('hidden', !game.paused);
   if (game.paused) down.clear();
 }
 
-// Une image de simulation (1/60 s). Retourne false si on doit attendre l'adversaire (en ligne).
+// Une image de simulation (1/60 s). Retourne false si on doit attendre l'adversaire (arène en ligne).
 function simTick() {
   F.forEach((v, i) => sim.f[i] && v.capture(sim.f[i]));
-  if (sim instanceof DungeonSim && !rb) {
+  if (coop) {
+    if (coop.role === 'host') {
+      coop.tick(localInput(0));
+      playEvents(coop.takeEvents());
+    } else {
+      const me = net.me;
+      const inp = readMoveInput(me, true);
+      const shop = sim.g.phase === 'hub' && shopReq[me] >= 0 ? shopReq[me] : -1;
+      if (shop >= 0) shopReq[me] = -1;
+      let pick = -1;
+      if (sim.g.phase === 'reward' && pickReq[me] >= 0 && !pickSent[me]) { pick = pickReq[me]; pickSent[me] = true; }
+      coop.tick(inp, { shop, pick });
+      playEvents(coop.takeEvents());
+    }
+    return true;
+  }
+  if (isDungeon() && !rb) {
     sim.step(localInput(0), sim.g.np > 1 ? localInput(1) : NEUTRAL);
     playEvents(sim.ev);
     sim.ev.length = 0;
     return true;
   }
   if (rb) {
-    if (!rb.tick(localInput(net.me))) return false;
+    // on lit sans effacer tant que rollback n'a pas réellement avancé (évite de perdre une touche sur un stall)
+    const inp = localInput(net.me, false);
+    if (!rb.tick(inp)) return false;
+    pending[net.me] = 0; tapped[net.me].clear();
     playEvents(rb.takeEvents());
     return true;
   }
@@ -1918,7 +1952,7 @@ function simTick() {
 // =====================================================================
 function updateHud() {
   if (game.phase === 'menu' || !F.length) return;
-  if (sim instanceof DungeonSim) { dungeonHud(); return; }
+  if (isDungeon()) { dungeonHud(); return; }
   sim.f.forEach((f, i) => {
     const n = i + 1;
     const hp = Math.max(0, f.hp);
@@ -1945,7 +1979,7 @@ let camAng = 0;               // angle de la caméra autour du point milieu
 const camPos = new THREE.Vector3();
 const camTgt = new THREE.Vector3();
 function camGoal(dt) {
-  if (sim instanceof DungeonSim && game.phase !== 'loading') { dungeonCam(dt); return; }
+  if (isDungeon() && game.phase !== 'loading') { dungeonCam(dt); return; }
   if (game.phase === 'menu' || game.phase === 'loading') {
     camAng += dt * 0.12;
     camPos.set(Math.sin(camAng) * 8.6, 3.4, Math.cos(camAng) * 8.6);
@@ -2032,9 +2066,10 @@ function step(rdt) {
     if (!simTick()) break;       // en ligne : on attend l'adversaire (le temps non simulé est conservé)
     acc -= DT; n++;
   }
-  const g = sim.g, alpha = Math.min(1, acc / DT);
+  if (coop?.role === 'guest') coop.interpolate(rdt);
+  const g = sim.g, alpha = coop?.role === 'guest' ? 1 : Math.min(1, acc / DT);
   const animDt = g.hitstop > 0 ? 0 : rdt * g.slow;
-  if (sim instanceof DungeonSim && game.phase !== 'menu') dungeonSync();
+  if (isDungeon() && game.phase !== 'menu') dungeonSync();
   lobbySync();
   syncArrows(alpha);
   F.forEach((f, i) => sim.f[i] && f.render(sim.f[i], animDt, clockT, alpha));
@@ -2051,19 +2086,27 @@ function step(rdt) {
 // éléments d'interface qui suivent l'état de la simulation (écrits seulement quand ils changent)
 let uiFade = false, uiNet = '';
 function syncUi() {
-  const fade = sim instanceof DungeonSim ? game.phase === 'exit' : game.phase === 'ko' && sim.g.flagFade;
+  const fade = isDungeon() ? game.phase === 'exit' : game.phase === 'ko' && sim.g.flagFade;
   if (fade !== uiFade) { uiFade = fade; $('fade').classList.toggle('on', fade); }
-  const txt = rb ? `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}` : '';
+  let txt = '';
+  if (coop) {
+    const mode = net.link?.state === 'rtc' ? 'direct' : 'relais';
+    const ping = coop.stats.ping ? ` · ${coop.stats.ping} ms` : '';
+    const warn = coop.stats.stalled ? ' · signal faible…' : '';
+    txt = `Coop (${coop.role === 'host' ? 'Hôte' : 'Invité'}) · ${mode}${ping}${warn}`;
+  } else if (rb) {
+    txt = `${net.link?.state === 'rtc' ? 'direct' : 'relais'} · ↺ ${rb.stats.rollbacks}`;
+  }
   if (txt !== uiNet) { uiNet = txt; $('netStat').textContent = txt; }
 }
 
 // =====================================================================
 //  Donjon (rogue-like) : affichage. Toute la logique est dans dungeon.js.
-//  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges) plutôt que ses
-//  événements : en ligne, le rollback peut revenir en arrière, l'image se recale seule.
+//  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges).
 // =====================================================================
-const dng = { room: -1, gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] };
+const dng = { room: -1, roomVer: -1, gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [], endShown: false };
 const pickReq = [-1, -1];            // bénédiction choisie à l'écran, envoyée comme entrée
+const pickSent = [false, false];     // en coop invité : évite de renvoyer 60 fois la même sélection
 const DNG_REC = 'spartiate-donjon-record';
 const ISO = Math.PI / 4;             // caméra en diagonale au-dessus de la salle (vue isométrique)
 const HERO_COL = [0xff5a4a, 0x4aa3ff];
@@ -2078,7 +2121,7 @@ function playOnce(mixer, key, name) {
 }
 // héros joués sur cette machine
 function localHeroes() {
-  if (!(sim instanceof DungeonSim)) return [];
+  if (!isDungeon()) return [];
   if (match?.mode === 'online') return [net.me];
   return sim.g.np > 1 ? [0, 1] : [0];
 }
@@ -2415,7 +2458,7 @@ function buildDungeonRoom(room, n) {
   const lanterns = [0, 1].map(() => { const l = new THREE.PointLight(0xffc890, (3 + 6 * k) * B.lantern, 10, 1.4); world.add(l); return l; });
   updaters.push(() => {
     lanterns.forEach((l, i) => {
-      const v = F[i], on = sim instanceof DungeonSim && i < sim.g.np && v;
+      const v = F[i], on = isDungeon() && i < sim.g.np && v;
       l.visible = !!on;
       if (on) l.position.set(v.rx, v.ry + 2.6, v.rz);
     });
@@ -2499,7 +2542,7 @@ keep(padGeo, padRing);
 function buildHub(room) {
   // héros verrouillés pour le joueur de cette machine : statue grise et figée, dalle éteinte
   const me = localHeroes()[0] ?? 0;
-  const lockedFor = (id) => sim instanceof DungeonSim && !sim.canPick(me, id);
+  const lockedFor = (id) => isDungeon() && !sim.canPick(me, id);
   const pads = room.pads.map((pd) => {
     const hero = pd.t === 'hero', locked = hero && lockedFor(pd.id);
     const col = locked ? 0x8a8a90 : hero ? 0xffc04a : 0x6fc3ff;
@@ -2547,7 +2590,7 @@ function buildHub(room) {
 
   // ce que portent les héros : leur dalle brille, la statue salue au moment du choix
   updaters.push((dt, t) => {
-    const hs = sim instanceof DungeonSim ? sim.heroes : [];
+    const hs = isDungeon() ? sim.heroes : [];
     for (const p of pads) {
       const sel = hs.some((h) => (p.pd.t === 'hero' ? h.kind === p.pd.id : h.shop > 0));
       if (sel && !p.sel && p.yes) p.yes.reset().play();
@@ -2581,7 +2624,7 @@ const shopReq = [-1, -1];            // arme choisie à l'écran (clic, touches 
 const shopUi = { key: '', say: '', sayT: 0, last: [{ shop: 0, wpn: '' }, { shop: 0, wpn: '' }] };
 // héros joué sur cette machine qui est dans la boutique (-1 sinon) : la caméra se place derrière lui
 function localShopper() {
-  if (!(sim instanceof DungeonSim) || sim.g.phase !== 'hub') return -1;
+  if (!isDungeon() || sim.g.phase !== 'hub') return -1;
   return localHeroes().find((h) => sim.f[h]?.shop > 0) ?? -1;
 }
 function say(text, dur) { shopUi.say = text; shopUi.sayT = dur; }
@@ -2659,8 +2702,9 @@ function buildMerchant() {
   say('', 0);
 
   updaters.push((dt, t) => {
-    const hs = sim instanceof DungeonSim ? sim.heroes : [];
-    const buyer = hs.find((h) => h.shop > 0);
+    const hs = isDungeon() ? sim.heroes : [];
+    const locSh = localShopper();
+    const buyer = (locSh >= 0 ? sim.f[locSh] : null) ?? hs.find((h) => h.shop > 0);
     // réactions du marchand, d'après l'état de la simulation (rien à défaire en cas de rollback)
     hs.forEach((h, i) => {
       const was = shopUi.last[i];
@@ -2709,7 +2753,7 @@ function buildMerchant() {
 
 // bulle du marchand et panneau de choix (HTML par-dessus la scène)
 function shopSync() {
-  const hub = sim instanceof DungeonSim && sim.g.phase === 'hub' && !game.paused;
+  const hub = isDungeon() && sim.g.phase === 'hub' && !game.paused;
   const talk = $('talk');
   const v = v1.set(MERCHANT.x + 0.5, 1.75, MERCHANT.z).project(camera);
   if (hub && shopUi.say && v.z < 1) {
@@ -2753,6 +2797,7 @@ function makeView(i) {
   const e = sim.f[i], np = sim.g.np;
   if (e.kind === 'cerbere') {
     const v = new DogView(i, 'cerbere', hellGlow);
+    v.team = e.team;
     v.setSize(e.size);
     v.ring.material.color.set(0xff3020);      // pas de petite barre : grande barre de boss en haut
     return v;
@@ -2761,6 +2806,7 @@ function makeView(i) {
     // chien du grimoire (violet), ou chien des enfers (pelage brûlé, yeux rouges) dans le camp ennemi
     const hell = e.team === 1;
     const v = new DogView(i, 'dog', hell ? hellGlow : runeColor);
+    v.team = e.team;
     v.setSize(e.size);
     if (hell) { for (const m of v.mats) m.color.setRGB(0.85, 0.42, 0.36); v.ring.material.color.set(0xe0452f); }
     v.addHpBar(hell ? 0xe0452f : 0xb98aff);
@@ -2768,6 +2814,7 @@ function makeView(i) {
     return v;
   }
   const v = new FighterView(i, e.kind, e.wpn);
+  v.team = e.team;
   if (i < np) {
     v.hero = true;
     v.ring.material.color.set(np > 1 ? HERO_COL[i] : 0xffd34a);
@@ -2780,14 +2827,16 @@ function makeView(i) {
   }
   return v;
 }
-// chiens invoqués en cours de salle (ou retirés par un retour en arrière en ligne) : seules leurs vues changent
+// chiens invoqués ou ennemis mis à jour en cours de salle : seules leurs vues changent
 function extraViews() {
   while (F.length > sim.f.length) F.pop().dispose();
-  for (let i = sim.g.np; i < F.length; i++) if (F[i].kind !== sim.f[i].kind) { F[i].dispose(); F[i] = makeView(i); }
+  for (let i = sim.g.np; i < F.length; i++) {
+    if (F[i].kind !== sim.f[i].kind || F[i].team !== sim.f[i].team) { F[i].dispose(); F[i] = makeView(i); }
+  }
   while (F.length < sim.f.length) F.push(makeView(F.length));
 }
 
-// un héros a changé de personnage ou d'arme (salle d'armes, ou rollback en ligne) : nouvelle vue
+// un héros a changé de personnage ou d'arme (salle d'armes) : nouvelle vue
 function heroViews() {
   for (let i = 0; i < sim.g.np && i < F.length; i++) {
     const e = sim.f[i], v = F[i];
@@ -2795,8 +2844,11 @@ function heroViews() {
     v.dispose();
     const n = new FighterView(i, e.kind, e.wpn);
     n.hero = true;
+    n.team = e.team;
     n.ring.material.color.copy(v.ring.material.color);
     F[i] = n;
+    // si notre salon est ouvert dans la salle d'armes, on met à jour son aperçu sur le serveur
+    if (net.hall && !net.live && i === 0) netSend({ t: 'hall_state', kind: e.kind, wpn: e.wpn });
   }
 }
 
@@ -2815,7 +2867,13 @@ function saveHeroes() {
 function dungeonRoom() {
   if (dng.room === 0 && sim.g.room === 1) {
     saveHeroes();
-    if (!net.live && net.ws) netClose();   // on ne se rejoint que dans la salle d'armes
+    if (coop?.role === 'host') {
+      // on quitte la salle d'armes à deux : retirer le salon de la liste publique
+      netSend({ t: 'hall_state', open: false });
+      net.hall = false;
+    } else if (!net.live && net.ws) {
+      netClose();   // on ne se rejoint que dans la salle d'armes
+    }
   }
   buildDungeonRoom(sim.room, sim.g.room);
   // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
@@ -2828,15 +2886,18 @@ function dungeonRoom() {
     b.className = 'show';
   }
   dng.room = sim.g.room;
+  dng.roomVer = coop?.role === 'guest' ? coop.roomVer : 0;
   dungeonViews();
   snapCamera();
 }
 
 // À chaque image : porte, coffre, pièges et fenêtre de bénédiction suivent la simulation
 function dungeonSync() {
+  if (coop?.role === 'guest' && !coop.ready) return;
   const g = sim.g;
-  if (dng.room !== g.room) dungeonRoom();
-  else { heroViews(); if (F.length !== sim.f.length) extraViews(); }
+  const needRoom = dng.room !== g.room || (coop?.role === 'guest' && dng.roomVer !== coop.roomVer);
+  if (needRoom) dungeonRoom();
+  else { heroViews(); extraViews(); }
   if (g.exitOpen && !dng.gateOpen) { dng.gateOpen = true; dng.gate?.open(); }
   if (g.chest >= 1 && !dng.chest) { dng.chest = 1; dng.spawnChest?.(); }
   if (g.chest === 2 && dng.chest === 1) { dng.chest = 2; dng.openChest?.(); }
@@ -2856,6 +2917,7 @@ function dungeonSync() {
   });
   rewardSync();
   bossTele();
+  if (g.phase === 'end' && !dng.endShown) endDungeon();
 }
 
 // ---------- Colosse : zones dangereuses au sol (déduites de l'état de la simulation) ----------
@@ -2975,11 +3037,12 @@ function dungeonPreview() {
   dungeonViews();
 }
 
-// m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed }
+// m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed, sid }
 function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p1, p2: cfg.p2, w1: cfg.w1, w2: cfg.w2 }) {
   match = { ...m, game: 'dungeon' };
   net.live = m.mode === 'online';
   rb = null;
+  coop = null;
   ac();
   game.paused = false;
   ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
@@ -2995,30 +3058,45 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   // héros débloqués : en ligne, ceux de chaque joueur ; à deux sur un clavier, ceux du compte connecté
   const mine = unlockedHeroes();
   const unlocks = m.mode === 'online' ? [cleanUnlocked(m.u1), cleanUnlocked(m.u2)] : [mine, mine];
-  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np));
+  const sendCoop = (msg, reliable) => (net.link ? net.link.send(msg, reliable) : netSend(msg));
   F.forEach((v) => v.dispose());
   F = [];
   ai = ai0 = null;
   pending[0] = pending[1] = 0;
+  tapped[0].clear(); tapped[1].clear();
   pickReq.fill(-1);
+  pickSent.fill(false);
+  shopReq.fill(-1);
   rewardUi = '';
+  dng.room = -1;
+  dng.roomVer = -1;
+  dng.endShown = false;
   for (const k in uiTxt) delete uiTxt[k];   // l'arène a pu réécrire ces textes
+  if (m.mode === 'online' && net.role === 'guest') {
+    // Invité COOP : reçoit l'état autoritaire de l'hôte (zéro rollback, zéro désync)
+    coop = new CoopGuest({ sid: m.sid || 1, send: sendCoop, unlocked: unlocks });
+    sim = coop.sim;
+    acc = 0;
+    return;
+  }
+  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np));
   sim.startHub();   // on commence dans la salle d'armes
   playEvents(sim.ev);
   sim.ev.length = 0;
-  rb = net.live ? new Rollback(sim, {
-    me: net.me,
-    send: (msg, reliable) => (net.link ? net.link.send(msg, reliable) : netSend(msg)),
-    onDesync: (d) => console.warn('Désynchronisation détectée à l\'image', d.frame),
-  }) : null;
+  if (m.mode === 'online') {
+    // Hôte COOP : simulation autoritaire à 60 Hz, diffusion compacte à 30 Hz
+    coop = new CoopHost(sim, { sid: m.sid || nextSid(), send: sendCoop });
+  }
   dungeonRoom();
   acc = 0;
 }
 
 function endDungeon() {
+  if (dng.endShown) return;
+  dng.endShown = true;
   const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
   const me = sim.f[localHeroes()[0] ?? 0];     // à deux sur un clavier : le compte suit le joueur 1
-  accountRun(g.room, me.kills, me.kind, me.wpn);
+  if (me) accountRun(g.room, me.kills, me.kind, me.wpn);
   const guest = net.live && net.role === 'guest';
   if (best) try { localStorage.setItem(DNG_REC, String(g.room)); } catch (e) { /* ignoré */ }
   $('resTitle').textContent = g.np > 1 ? 'VAINCUS…' : 'VAINCU…';
@@ -3045,11 +3123,12 @@ function rewardKey(code) {
   return null;
 }
 function pickBoon(h, n) {
-  if (!(sim instanceof DungeonSim) || h === undefined || !sim.mustPick(h) || !localHeroes().includes(h)) return;
-  pickReq[h] = n;   // transmis à la simulation par localInput (et donc au partenaire en ligne)
+  if (!isDungeon() || h === undefined || !sim.canChoose(h, n) || !localHeroes().includes(h)) return;
+  pickReq[h] = n;   // transmis à la simulation (et à l'hôte en coop)
+  pickSent[h] = false;
   rewardUi = '';
 }
-function clickBoon(n) { pickBoon(localHeroes().find((h) => sim.mustPick(h) && pickReq[h] < 0), n); }
+function clickBoon(n) { pickBoon(localHeroes().find((h) => sim.canChoose(h, n) && pickReq[h] < 0), n); }
 
 let rewardUi = '';
 function rewardSync() {
@@ -3058,9 +3137,10 @@ function rewardSync() {
     rewardUi = '';
     $('reward').classList.add('hidden');
     pickReq.fill(-1);
+    pickSent.fill(false);
     return;
   }
-  for (const h of [0, 1]) if (!sim.mustPick(h)) pickReq[h] = -1;
+  for (const h of [0, 1]) if (!sim.mustPick(h)) { pickReq[h] = -1; pickSent[h] = false; }
   const offer = sim.offer;
   const key = [g.room, ...offer, g.pick0, g.pick1, ...pickReq].join('|');
   if (key === rewardUi) return;
@@ -3069,18 +3149,20 @@ function rewardSync() {
   const duo = loc.length > 1;
   const btns = $('reward').querySelectorAll('button');
   offer.forEach((id, i) => {
+    if (!BOONS[id]) return;
     const keys = duo ? `${i + 1}</kbd> <kbd>${'890'[i]}` : `${i + 1}`;
     const r = BOONS[id].rare;
+    const owned = loc.length > 0 && loc.every((h) => BOONS[id].unique && sim.f[h]?.boons?.split(',').includes(id));
     btns[i].className = 'r' + r;     // rareté : couleur du cadre (commune, rare, légendaire)
-    btns[i].innerHTML = `${r ? `<small>${RARITY[r].toUpperCase()}</small>` : ''}<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>`;
-    btns[i].disabled = !loc.some((h) => sim.mustPick(h) && pickReq[h] < 0);
+    btns[i].innerHTML = `${r ? `<small>${RARITY[r].toUpperCase()}</small>` : ''}<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>${owned ? '<div class="owned">Déjà acquise</div>' : ''}`;
+    btns[i].disabled = !loc.some((h) => sim.canChoose(h, i) && pickReq[h] < 0);
   });
   const st = [];
   for (let h = 0; h < g.np; h++) {
     const p = sim.f[h], pk = g['pick' + h], who = g.np > 1 ? `J${h + 1}` : 'Toi';
     let s;
     if (p.state === 'dead') s = 'à terre';
-    else if (pk >= 0) s = '✔ ' + BOONS[offer[pk]].name;
+    else if (pk >= 0) s = '✔ ' + (BOONS[offer[pk]]?.name ?? '');
     else if (pickReq[h] >= 0) s = '…';
     else s = loc.includes(h) ? 'choisis !' : 'choisit…';
     st.push(`${who} (${Math.ceil(p.hp)} / ${p.maxHp} PV) : ${s}`);
@@ -3112,13 +3194,20 @@ function dungeonHud() {
     const nm = net.live ? (i === net.me ? myName() : net.peerName) : g.np === 1 ? myName() : '';
     const who = nm ? `${nm} · ` : g.np > 1 ? `J${n} · ` : '';
     const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
-    setTxt('n' + n, who + what + ' · ' + (p.state === 'dead' ? 'À TERRE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`));
+    const st = p.state === 'dead' ? 'À TERRE' : (g.room === 0 && p.shop > 0 ? 'EN BOUTIQUE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`);
+    setTxt('n' + n, who + what + ' · ' + st);
   });
   setTxt('timer', g.room ? `SALLE ${g.room}` : "SALLE D'ARMES");
-  if (g.room === 0) { setTxt('roundLbl', 'CHOISIS TON HÉROS, PRENDS TON ARME CHEZ LE MARCHAND, PUIS PASSE LA PORTE'); return; }
+  if (g.room === 0) {
+    const shopping = g.np > 1 && sim.heroes.some((h) => h.shop > 0);
+    setTxt('roundLbl', shopping ? 'ÉQUIPIER EN BOUTIQUE — ATTENDS-LE AVANT DE PASSER LA PORTE' : 'CHOISIS TON HÉROS, PRENDS TON ARME CHEZ LE MARCHAND, PUIS PASSE LA PORTE');
+    return;
+  }
   const left = sim.foesLeft;
+  const me = sim.f[localHeroes()[0] ?? 0];
   let lbl = left ? `${left} ENNEMI${left > 1 ? 'S' : ''}` : '';
-  if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : 'LA PORTE EST OUVERTE';
+  if (me?.down && g.phase === 'fight') lbl = 'À TERRE · ATTENDS QUE TON ÉQUIPIER BLOQUE PRÈS DE TOI';
+  else if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : 'LA PORTE EST OUVERTE';
   setTxt('roundLbl', lbl);
 }
 
@@ -3129,9 +3218,9 @@ function dungeonCam(dt) {
     camTgt.set(0, 0.6, 0);
     return;
   }
-  // chez le marchand : la caméra passe derrière le héros, face au comptoir
+  // chez le marchand : la caméra passe derrière le héros (hors duo même clavier pour ne pas décaler les touches de l'autre joueur)
   const sh = localShopper();
-  if (sh >= 0) {
+  if (sh >= 0 && match?.mode !== 'duo') {
     const p = sim.f[sh];
     camAng = 0;      // les flèches suivent l'écran : ← → le long du comptoir, ↓ pour s'en aller
     camPos.set(p.x + 1.05, 2.4, p.z + 2.45);
@@ -3139,8 +3228,10 @@ function dungeonCam(dt) {
     return;
   }
   camAng = ISO;   // fixe : les déplacements suivent l'écran
-  const alive = sim.heroes.filter((h) => h.state !== 'dead');
-  const hs = alive.length ? alive : sim.heroes;
+  // inclut les héros à terre (réanimables) dans le cadrage pour que l'équipier les voie toujours
+  const active = sim.heroes.filter((h) => h.state !== 'dead' || h.down);
+  const hs = active.length ? active : sim.heroes;
+  if (!hs.length) return;
   const mx = hs.reduce((a, h) => a + h.x, 0) / hs.length, mz = hs.reduce((a, h) => a + h.z, 0) / hs.length;
   const my = hs.reduce((a, h) => a + h.y, 0) / hs.length;
   const sep = hs.length > 1 ? Math.hypot(hs[0].x - hs[1].x, hs[0].z - hs[1].z) : 0;
@@ -3280,7 +3371,7 @@ function setupMenu() {
     });
   });
   $('go').onclick = () => (cfg.mode === 'online' ? netStart() : cfg.game === 'dungeon' ? startDungeon() : startMatch());
-  $('againBtn').onclick = () => (match?.mode === 'online' ? netStart() : match?.game === 'dungeon' ? startDungeon() : startMatch());
+  $('againBtn').onclick = () => (match?.mode === 'online' ? netStart(match.game) : match?.game === 'dungeon' ? startDungeon() : startMatch());
   $('reward').querySelectorAll('button').forEach((b, i) => { b.onclick = () => clickBoon(i); });
   $('menuBtn').onclick = () => toMenu();
   $('resumeBtn').onclick = togglePause;
@@ -3313,6 +3404,7 @@ function netClose() {
   net.link?.close();
   Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [], hall: false, halls: [] });
   rb = null;
+  coop = null;
   if (ws) ws.close();
 }
 // liaison directe avec l'adversaire (créée dès que les deux joueurs sont dans la partie)
@@ -3363,19 +3455,29 @@ function refreshGo() {
   $('go').textContent = txt;
   $('go').disabled = !ok;
 }
-function netStart() {
+function netStart(forcedGame = null) {
   if (net.role !== 'host' || !net.peer) return;
-  const m = { mode: 'online', game: cfg.game, p1: cfg.p1, p2: net.peerKind || 'soldier', w1: cfg.w1 || '', w2: net.peerWpn || '', u1: unlockedHeroes(), u2: net.peerUnlocked, arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0 };
+  const g = forcedGame || cfg.game;
+  const keepDg = g === 'dungeon' && isDungeon() && sim.f.length >= 2;
+  const p1 = keepDg ? sim.f[0].kind : cfg.p1, w1 = keepDg ? sim.f[0].wpn : (cfg.w1 || '');
+  const p2 = keepDg ? sim.f[1].kind : (net.peerKind || 'soldier'), w2 = keepDg ? sim.f[1].wpn : (net.peerWpn || '');
+  const m = {
+    mode: 'online', game: g, sid: nextSid(),
+    p1, p2, w1, w2,
+    u1: unlockedHeroes(), u2: net.peerUnlocked,
+    arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0,
+  };
   netSend({ t: 'start', ...m });
   if (m.game === 'dungeon') startDungeon(m); else startMatch(m);
 }
 function netMsg(m) {
+  if (m.t === 'cs' || m.t === 'ci' || m.t === 'cp' || m.t === 'cq') { if (coop) coop.receive(m); return; }
   if (m.t === 'ri' || m.t === 'rs') { if (rb) rb.receive(m); return; }
   if (m.t === 'rtc') { net.link?.signal(m); return; }
   switch (m.t) {
     case 'created':
       Object.assign(net, { role: 'host', me: 0, code: String(m.code ?? ''), hall: !!m.hall, urls: Array.isArray(m.urls) ? m.urls.map(String) : [] });
-      netInfo(hostInfo() + '<br>En attente d’un adversaire…');
+      netInfo(hostInfo() + (cfg.game === 'dungeon' ? '<br>En attente d’un équipier…' : '<br>En attente d’un adversaire…'));
       break;
     case 'rooms':
       net.halls = (Array.isArray(m.rooms) ? m.rooms : []).filter((r) => r && /^[A-Z]{4}$/.test(r.code) && HEROES[r.kind])
@@ -3386,38 +3488,78 @@ function netMsg(m) {
       lobby.msg = `Connecté au salon ${net.code} : la partie va commencer…`;
       netSend({ t: 'hello', ...myHero() });
       netLink();
-      netInfo(`Connecté à la partie <b>${esc(m.code)}</b> ! L’hôte choisit l’arène et lance le combat.`);
+      netInfo(`Connecté à la partie <b>${esc(m.code)}</b> ! ` + (cfg.game === 'dungeon' ? 'L’hôte va lancer le donjon.' : 'L’hôte choisit l’arène et lance le combat.'));
       break;
     case 'peer':
       net.peer = true;
       netSend({ t: 'hello', ...myHero() });
       netLink();
-      netInfo(`Un adversaire a rejoint la partie <b>${esc(net.code)}</b> ! Choisis l’arène puis clique sur COMBATTRE.`);
+      netInfo(`Un ${cfg.game === 'dungeon' ? 'équipier' : 'adversaire'} a rejoint la partie <b>${esc(net.code)}</b> ! ` +
+        (cfg.game === 'dungeon' ? 'Clique sur ENTRER.' : 'Choisis l’arène puis clique sur COMBATTRE.'));
       break;
     case 'hello':
       net.peerKind = CHARS[m.kind] ? m.kind : 'soldier';
       net.peerWpn = WEAPON_IDS.includes(m.wpn) ? m.wpn : null;
       net.peerName = cleanName(m.name);
       net.peerUnlocked = cleanUnlocked(m.unlocked);
+      if (coop?.role === 'host' && sim.g.room === 0 && sim.unlocked) sim.unlocked[1] = net.peerUnlocked;
       if (game.phase === 'menu') menuFighters();
-      if (net.role === 'host' && net.hall && inHall()) hallStart();   // un équipier entre dans notre salon
+      if (net.role === 'host' && inHall()) hallStart();   // un équipier rejoint notre salle d'armes
       break;
-    case 'start':
+    case 'start': {
       if (net.role !== 'guest' || !CHARS[m.p1] || !CHARS[m.p2]) break;
-      if (m.game === 'dungeon') startDungeon({ mode: 'online', p1: m.p1, p2: m.p2, w1: m.w1, w2: m.w2, u1: cleanUnlocked(m.u1), u2: cleanUnlocked(m.u2), seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
-      else if (ARENAS[m.arena]) startMatch({ mode: 'online', p1: m.p1, p2: m.p2, arena: m.arena, seed: Number.isFinite(+m.seed) ? +m.seed : 1 });
+      const sid = Number.isFinite(+m.sid) ? +m.sid : 1;
+      const seed = Number.isFinite(+m.seed) ? +m.seed : 1;
+      if (m.game === 'dungeon') startDungeon({ mode: 'online', sid, p1: m.p1, p2: m.p2, w1: m.w1, w2: m.w2, u1: cleanUnlocked(m.u1), u2: cleanUnlocked(m.u2), seed });
+      else if (ARENAS[m.arena]) startMatch({ mode: 'online', sid, p1: m.p1, p2: m.p2, arena: m.arena, seed });
       break;
+    }
     case 'menu':
       if (!net.live) break;
       toMenu(true);
       netInfo('L’adversaire est revenu au menu.' + (net.role === 'host' ? ' Clique sur COMBATTRE pour relancer.' : ''));
       break;
     case 'bye': {
-      // donjon : on repart seul dans la salle d'armes, avec son héros et son arme (l'hôte garde son salon)
-      const dg = net.live && match?.game === 'dungeon', mine = dg && sim.f[net.me];
-      if (net.live && !dg) toMenu(true);
+      const dg = net.live && match?.game === 'dungeon';
+      const wasHost = net.role === 'host';
+      const mine = dg && sim.f[net.me] ? { kind: sim.f[net.me].kind, wpn: sim.f[net.me].wpn } : null;
+      const onResult = !$('result').classList.contains('hidden');
       net.link?.close(); net.link = null;
-      if (net.role === 'host') {
+      coop = null; rb = null;
+      if (dg && onResult) {
+        // Écran de fin : ne pas interrompre le joueur, lui permettre de relancer seul
+        net.live = false;
+        if (wasHost) Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [] });
+        else netClose();
+        match.mode = 'solo';
+        $('resSub').textContent += '  ·  équipier parti';
+        $('againBtn').classList.remove('hidden');
+        break;
+      }
+      if (dg && sim.g.room >= 1) {
+        if (wasHost) {
+          // L'hôte continue sa partie en cours dans la même salle, convertie en solo
+          net.live = false;
+          netClose();
+          sim.dropHero(1);
+          match.mode = 'solo';
+          $('hud').classList.add('solo');
+          $('help').innerHTML = controlsHTML('solo', true);
+          setupBindings('solo', 0);
+          F.forEach((v) => v.dispose()); F = [];
+          dungeonViews();
+          announce('ÉQUIPIER PARTI — TU CONTINUES SEUL', 2.4, '#ffd34a');
+        } else {
+          // L'invité retourne dans sa salle d'armes solo avec son héros et son arme
+          netClose();
+          startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, p2: cfg.p2, w2: cfg.w2 });
+          lobby.msg = 'L’hôte a quitté la partie.';
+          announce('L’HÔTE A QUITTÉ', 2.2, '#ff6b57');
+        }
+        break;
+      }
+      if (net.live && !dg) toMenu(true);
+      if (wasHost) {
         Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [] });
         if (game.phase === 'menu') menuFighters();
         netInfo('L’adversaire a quitté la partie.<br>' + hostInfo());
@@ -3427,8 +3569,8 @@ function netMsg(m) {
         netInfo('L’hôte a fermé la partie.');
       }
       if (dg) {
-        startDungeon({ mode: 'solo', p1: mine.kind, w1: mine.wpn, p2: cfg.p2, w2: cfg.w2 });
-        lobby.msg = net.role === 'host' ? 'Ton équipier est parti. Ton salon reste ouvert.' : 'Ton équipier a quitté la partie.';
+        startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, p2: cfg.p2, w2: cfg.w2 });
+        lobby.msg = wasHost && net.hall ? 'Ton équipier est parti. Ton salon reste ouvert.' : 'Ton équipier a quitté la partie.';
       }
       break;
     }
@@ -3583,27 +3725,28 @@ function accountRender() {
   $('acMsg').textContent = compte.msg;
   lobby.key = '';     // le pseudo apparaît dans le panneau des salons
   if (compte.ready && clampHeroes() && game.phase === 'menu') menuScene();
+  if (compte.ready && net.ws?.readyState === 1 && net.peer) netSend({ t: 'hello', ...myHero() });
   refreshMenu();      // héros verrouillés du menu
 }
 
 // =====================================================================
 //  Salons de la salle d'armes : seul dans la salle d'armes, on ouvre son salon (listé sur le serveur)
 //  ou on rejoint celui d'un autre, dans la liste ou par son code. Dès qu'un équipier entre, les deux
-//  navigateurs relancent la salle d'armes en ligne, à deux (même graine), chacun avec son héros et son
-//  arme. Quand l'équipier part, chacun repart seul dans sa salle d'armes (l'hôte garde son salon).
+//  navigateurs relancent la salle d'armes en ligne, à deux, chacun avec son héros et son arme.
+//  Quand l'équipier part, chacun repart seul (l'hôte continue sa salle en cours ou garde son salon).
 // =====================================================================
 // wait : heure limite de la réponse à « ouvrir mon salon » (un serveur d'avant les salons ne répond rien)
 const lobby = { next: 0, key: '', msg: '', down: false, wait: 0 };
-const inHall = () => sim instanceof DungeonSim && game.phase === 'hub' && !net.live && match?.mode === 'solo';
+const inHall = () => isDungeon() && game.phase === 'hub' && !net.live && match?.mode === 'solo';
 // héros et arme de ce joueur : ceux de la salle d'armes en cours, sinon ceux du menu
 function myHero() {
-  const p = game.phase !== 'menu' && sim instanceof DungeonSim ? sim.f[localHeroes()[0] ?? 0] : null;
+  const p = game.phase !== 'menu' && isDungeon() ? sim.f[localHeroes()[0] ?? 0] : null;
   return { ...(p ? { kind: p.kind, wpn: p.wpn } : { kind: cfg.p1, wpn: cfg.w1 || '' }), name: myName(), unlocked: unlockedHeroes() };
 }
 function lobbyWs(m) { if (net.ws?.readyState === 1) netSend(m); else netConnect(m); }
 function hallStart() {
   const me = myHero();
-  const m = { mode: 'online', game: 'dungeon', p1: me.kind, w1: me.wpn, p2: net.peerKind || 'soldier', w2: net.peerWpn || '',
+  const m = { mode: 'online', game: 'dungeon', sid: nextSid(), p1: me.kind, w1: me.wpn, p2: net.peerKind || 'soldier', w2: net.peerWpn || '',
     u1: unlockedHeroes(), u2: net.peerUnlocked, seed: (Math.random() * 4294967296) >>> 0 };
   netSend({ t: 'start', ...m });
   startDungeon(m);
@@ -3750,7 +3893,7 @@ function setupDebug() {
   });
 }
 // la simulation du donjon, si l'outil peut y toucher
-function dbgSim() { return sim instanceof DungeonSim && !rb && !net.live && game.phase !== 'menu' ? sim : null; }
+function dbgSim() { return sim instanceof DungeonSim && !rb && !coop && !net.live && game.phase !== 'menu' ? sim : null; }
 function dbgMsg(t) { $('dbgInfo').textContent = t; dbg.msgT = 2.5; }
 function dbgGoto(n) {
   const s = dbgSim();
@@ -3808,5 +3951,5 @@ setInterval(() => { if (dbg.msgT > 0) dbg.msgT -= 0.25; dbgRefresh(); }, 250);
 
 // Accès de débogage et de test (uniquement avec ?debug dans l'adresse)
 if (new URLSearchParams(location.search).has('debug')) {
-  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart, startDungeon };
+  window.__game = { get sim() { return sim; }, get rb() { return rb; }, get coop() { return coop; }, get net() { return net; }, game, cfg, get F() { return F; }, startMatch, netStart, startDungeon };
 }

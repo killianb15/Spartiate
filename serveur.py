@@ -254,6 +254,21 @@ def hall_of(m):
     return h
 
 
+def update_hall(c, m):
+    """Met à jour l'état public d'un salon ouvert par l'hôte (fermeture dès qu'on quitte la salle d'armes,
+    ou mise à jour du héros / de l'arme affichés dans la liste des salons)."""
+    with lock:
+        r = rooms.get(c.room)
+        if not r or not c.is_host:
+            return
+        if m.get('open') is False:
+            r['hall'] = None
+        elif r['hall'] is not None:
+            for k, n in HALL_KEYS.items():
+                if k in m:
+                    r['hall'][k] = str(m.get(k, ''))[:n]
+
+
 def list_halls(c):
     with lock:
         out = [{'code': code, **r['hall']} for code, r in rooms.items()
@@ -385,23 +400,31 @@ class Handler(SimpleHTTPRequestHandler):
                 if not ok:
                     continue           # débit dépassé : message ignoré
                 other = peer_of(c)
-                if other:
-                    other.send(msg)       # partie en cours : on relaie tel quel
+                # Voie rapide : paquets jeu temps réel relayés sans analyse JSON
+                if other and msg.startswith(('{"t":"cs"', '{"t":"ci"', '{"t":"cp"', '{"t":"cq"', '{"t":"ri"', '{"t":"rs"', '{"t":"rtc"')):
+                    other.send(msg)
                     continue
                 try:
                     m = json.loads(msg)
                 except ValueError:
+                    if other:
+                        other.send(msg)
                     continue
-                if m.get('t') == 'create':
+                t = m.get('t') if isinstance(m, dict) else None
+                if t == 'create':
                     create(c)
-                elif m.get('t') == 'open':
+                elif t == 'open':
                     create(c, hall_of(m))
-                elif m.get('t') == 'list':
+                elif t == 'list':
                     list_halls(c)
-                elif m.get('t') == 'close':
+                elif t in ('close', 'leave'):
                     leave(c)
-                elif m.get('t') == 'join':
+                elif t == 'hall_state':
+                    update_hall(c, m)
+                elif t == 'join':
                     join(c, str(m.get('code', '')).strip().upper())
+                elif other:
+                    other.send(msg)       # message de partie (start, hello, menu, etc.) : relayé tel quel
         except OSError:
             pass
         finally:

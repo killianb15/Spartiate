@@ -35,9 +35,9 @@ function sig(e) {
 }
 
 export class Rollback {
-  // opts : me (0|1), send(msg, reliable), delay (images), maxPred (images), onDesync(info)
-  constructor(sim, { me, send, delay = 2, maxPred = 10, onDesync = null, keep = KEEP }) {
-    this.sim = sim; this.me = me; this.rem = 1 - me; this.send = send;
+  // opts : me (0|1), send(msg, reliable), delay (images), maxPred (images), onDesync(info), sid (identifiant de session)
+  constructor(sim, { me, send, delay = 2, maxPred = 10, onDesync = null, keep = KEEP, sid = 0 }) {
+    this.sim = sim; this.me = me; this.rem = 1 - me; this.send = send; this.sid = sid;
     this.keep = keep; this.delay = delay; this.maxPred = maxPred; this.onDesync = onDesync;
     this.inputs = [new Map(), new Map()];   // images -> entrée connue (définitive)
     this.used = new Map();                  // images -> entrée adverse PRÉDITE utilisée
@@ -131,11 +131,13 @@ export class Rollback {
 
   // ---------------- réseau ----------------
   sendPacket() {
+    // on envoie toujours depuis la plus vieille image non acquittée (évite tout blocage permanent)
     const from = this.peerAck + 1, to = this.localScheduled;
-    const lo = Math.max(from, to - MAX_PACKET + 1);
+    const lo = from, hi = Math.min(to, from + MAX_PACKET - 1);
     const list = [];
-    for (let f = lo; f <= to; f++) list.push(enc(this.inputs[this.me].get(f) ?? NEUTRAL));
+    for (let f = lo; f <= hi; f++) list.push(enc(this.inputs[this.me].get(f) ?? NEUTRAL));
     const msg = { t: 'ri', f: lo, i: list, a: this.confirmedRem };
+    if (this.sid) msg.sid = this.sid;
     const ck = this.latestCheck();
     if (ck) { msg.k = ck[0]; msg.h = ck[1]; }
     this.send(msg, false);
@@ -150,6 +152,7 @@ export class Rollback {
 
   receive(m) {
     if (!m || typeof m !== 'object') return;
+    if (this.sid && m.sid !== this.sid) return;
     this.stats.received++;
     if (m.t === 'ri') this.receiveInputs(m);
     else if (m.t === 'rs') this.receiveResync(m);
@@ -204,7 +207,9 @@ export class Rollback {
     this.onDesync?.({ frame: k, me: this.me });
     if (this.me === 0 && this.checkSnaps.has(k)) {
       // l'hôte fait foi : il renvoie sa sauvegarde (canal fiable)
-      this.send({ t: 'rs', k, s: this.checkSnaps.get(k) }, true);
+      const msg = { t: 'rs', k, s: this.checkSnaps.get(k) };
+      if (this.sid) msg.sid = this.sid;
+      this.send(msg, true);
     }
   }
 

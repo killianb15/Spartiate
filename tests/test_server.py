@@ -277,6 +277,42 @@ class ServerTest(unittest.TestCase):
         h.send_json(t='open', kind='knight', wpn='sword')
         self.assertEqual(h.recv_json()['t'], 'created')
 
+    def test_hall_state_update_and_unlist_on_dungeon_start(self):
+        h, g, obs = self.client(), self.client(), self.client()
+        h.send_json(t='open', kind='soldier', wpn='sword')
+        code = h.recv_json()['code']
+
+        # Mise à jour en direct de l'équipement dans la salle d'armes
+        h.send_json(t='hall_state', kind='knight', wpn='axe')
+        obs.send_json(t='list')
+        rooms = obs.recv_json()['rooms']
+        self.assertEqual(len(rooms), 1)
+        self.assertEqual(rooms[0]['kind'], 'knight')
+        self.assertEqual(rooms[0]['wpn'], 'axe')
+
+        # Un invité rejoint, puis le duo quitte la salle d'armes (hall_state open=False)
+        g.send_json(t='join', code=code)
+        self.assertEqual(g.recv_json()['t'], 'joined')
+        self.assertEqual(h.recv_json()['t'], 'peer')
+        h.send_json(t='hall_state', open=False)
+        g.expect_silence(0.2)
+
+        # Quand l'invité quitte en salle 1+, le salon NE réapparaît PAS dans la liste publique
+        g.send_json(t='leave')
+        self.assertEqual(h.recv_json()['t'], 'bye')
+        obs.send_json(t='list')
+        self.assertEqual(obs.recv_json()['rooms'], [])
+
+    def test_close_and_leave_while_paired(self):
+        h, g, code = self.pair()
+        g.send_json(t='leave')
+        self.assertEqual(h.recv_json()['t'], 'bye')
+        # L'hôte peut encore fermer proprement la salle
+        h.send_json(t='close')
+        x = self.client()
+        x.send_json(t='join', code=code)
+        self.assertEqual(x.recv_json()['t'], 'error')
+
 
 
 class ProxyTest(unittest.TestCase):
