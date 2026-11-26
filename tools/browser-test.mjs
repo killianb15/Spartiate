@@ -251,6 +251,20 @@ if (scenario === 'biomes') {
   ws.close();
   process.exit(0);
 }
+if (scenario === 'invite') {
+  // menu sans compte : bloc Compte avec l'explication du jeu en invité, puis partie lancée en invité
+  await send('Page.navigate', { url: GAME + '/?debug' });
+  await waitFor(`!document.getElementById('menu').classList.contains('hidden')`, 60000);
+  await sleep(2500);
+  console.log('COMPTE', await evalJs(`!document.getElementById('acctSec').classList.contains('hidden')`), '|', await evalJs(`document.getElementById('acGuest').textContent.slice(0, 60)`));
+  await shot('menu-invite');
+  await evalJs(`(() => { __game.startDungeon({ mode: 'solo', p1: 'orc', w1: 'sword' }); return true; })()`);
+  console.log('PARTIE', await waitFor(`__game.game.phase === 'hub'`, 30000), 'héros', await evalJs(`__game.sim.f[0].kind`));
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
 if (scenario === 'code') {
   // F2 : le panneau de débogage demande un code ; un mauvais code est refusé (le bon : CODE_DBG=… dans l'environnement)
   const f2 = async () => { await send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 }); await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 }); await sleep(300); };

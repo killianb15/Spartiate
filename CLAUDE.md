@@ -37,7 +37,7 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   de defis.rs alignés sur HEROES/WEAPONS. Scénario navigateur : `browser-test.mjs compte` (sur l'API de test).
 - **Héros verrouillés** : seul `FIRST_HERO` (Gladiateur) au départ ; chaîne = ordre de `HERO_IDS` / `HEROS`
   (defis.rs `debloques` : un défi réussi du héros précédent débloque le suivant, renvoyé dans le profil). Sans
-  compte : Gladiateur seulement. La sim reçoit les listes (`new DungeonSim(seed, kinds, wpns, unlocked)`,
+  compte (invité, expliqué par `#acGuest` dans le bloc Compte) : Gladiateur seulement. La sim reçoit les listes (`new DungeonSim(seed, kinds, wpns, unlocked)`,
   `canPick(i, kind)`, pas de l'état ; null = tout permis pour les tests) ; en ligne elles passent dans
   `hello`/`start` (`u1`, `u2`). Affichage : statues de pierre + 🔒 (`buildHub`), boutons du menu de l'arène
   désactivés (`refreshMenu`), `clampHeroes()` remet le Gladiateur à la place d'un choix verrouillé.
