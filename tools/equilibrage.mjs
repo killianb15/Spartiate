@@ -7,11 +7,18 @@
 //  tank : héros à 5000 PV (ils ne tombent pas) : on compare alors les dégâts reçus PAR HÉROS (pression
 //  sur chaque joueur) et le temps pour nettoyer la salle, aussi dans les salles profondes.
 //  Les réglages hp=… count=… changent COOP (dungeon.js) le temps de la mesure, pour les essayer.
+//
+//    node tools/equilibrage.mjs partie [nombre de graines] [PV x, ex. 4]
+//  partie : parties complètes, salle après salle, avec une bénédiction tirée au sort à chaque coffre et la
+//  relève des héros tombés en fin de salle (à deux) : profondeur atteinte seul et à deux. PV x : PV des héros
+//  multipliés (seul comme à deux) pour que l'IA, moins forte qu'un joueur, descende plus loin.
+//  Les pièges à pics sont retirés : l'IA ne sait pas les éviter (elle resterait plantée dessus).
 // =====================================================================
-import { DungeonSim, COOP } from '../dungeon.js';
+import { DungeonSim, COOP, BOONS } from '../dungeon.js';
 import { AI } from '../ai.js';
 import { NEUTRAL } from '../sim.js';
 
+if (process.argv[2] === 'partie') { runs(+(process.argv[3] ?? 24), +(process.argv[4] ?? 1)); process.exit(0); }
 const N = +(process.argv[2] ?? 12);
 const ROOMS = (process.argv[3] ?? '1,3,5,8,10,12,15').split(',').map(Number);
 const TANK = process.argv.includes('tank');
@@ -22,6 +29,7 @@ function play(np, room, seed) {
   const s = new DungeonSim(seed, np > 1 ? ['soldier', 'soldier'] : ['soldier'], ['sword', 'sword']);
   s.start();
   s.debugGoto(room);
+  s.room.traps = [];          // l'IA ne sait pas éviter les pièges : on ne mesure que le combat
   while (s.g.phase !== 'fight') s.step();
   if (TANK) for (const p of s.heroes) p.hp = p.maxHp = 5000;
   const heroes = s.heroes, hp0 = heroes.reduce((a, p) => a + p.hp, 0), maxHp = heroes.reduce((a, p) => a + p.maxHp, 0);
@@ -56,4 +64,41 @@ for (const room of ROOMS) {
 if (TANK && ratios.length) {
   const g = (k) => Math.exp(ratios.reduce((a, x) => a + Math.log(x[k]), 0) / ratios.length);
   console.log(`moyenne (salles > 1) : temps ${g(0).toFixed(2)}, dégâts par héros ${g(1).toFixed(2)}   (objectif : 1 et 1)`);
+}
+
+// ---------- parties complètes ----------
+function run(np, seed, hpx) {
+  const s = new DungeonSim(seed, np > 1 ? ['soldier', 'soldier'] : ['soldier'], ['sword', 'sword']);
+  s.start();
+  for (const p of s.heroes) p.hp = p.maxHp = p.maxHp * hpx;
+  const ais = s.heroes.map((p, i) => new AI(s, i, 2, seed * 31 + i));
+  const legend = { rare: 0, legend: 0 };
+  for (let room = 1; room <= 60; room++) {
+    s.room.traps = [];        // l'IA ne sait pas éviter les pièges : on ne mesure que le combat
+    while (s.g.phase !== 'fight') s.step();
+    let k = 0;
+    for (; k < 240 * 60 && s.g.phase === 'fight'; k++) s.step(ais[0].update(s.dt), ais[1] ? ais[1].update(s.dt) : NEUTRAL);
+    if (s.g.phase !== 'clear') return { depth: room, ...legend };      // tous à terre (ou salle interminable)
+    // coffre : chacun prend une bénédiction au hasard parmi les trois
+    s.rollOffer();
+    s.g.phase = 'reward'; s.g.pick0 = s.g.pick1 = -1;
+    for (let h = 0; h < np; h++) {
+      const c = (s.rng.next() * 3) | 0;
+      if (s.choose(h, c)) { const r = BOONS[s.offer[c]].rare; if (r === 1) legend.rare++; if (r === 2) legend.legend++; }
+    }
+    s.debugGoto(room + 1);
+  }
+  return { depth: 61, ...legend };
+}
+function runs(N, hpx) {
+  console.log(`${N} parties seul et à deux (héros IA niveau difficile au glaive, PV x${hpx}, une bénédiction au hasard par coffre)`);
+  for (const np of [1, 2]) {
+    const d = [];
+    let rare = 0, legend = 0;
+    for (let seed = 1; seed <= N; seed++) { const o = run(np, seed, hpx); d.push(o.depth); rare += o.rare; legend += o.legend; }
+    d.sort((a, b) => a - b);
+    const mean = d.reduce((a, x) => a + x, 0) / N;
+    console.log(`${np > 1 ? 'à deux' : 'seul  '} : salle atteinte moyenne ${mean.toFixed(1)}, médiane ${d[N >> 1]}, de ${d[0]} à ${d[N - 1]} ; ` +
+      `${(rare / N).toFixed(1)} rares et ${(legend / N).toFixed(1)} légendaires prises par partie`);
+  }
 }
