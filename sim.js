@@ -50,6 +50,8 @@ export const WEAPONS = {
 };
 export const wpnOf = (f) => WEAPONS[f.wpn] ?? WEAPONS.sword;
 // temps de préparation du coup en cours (0 pour les armes normales ; plus court pour les coups enchaînés)
+// coût du blocage : celui de l'arme, réduit par la bénédiction « Garde de fer » (guardMul)
+export const guardOf = (f) => wpnOf(f).guard * (f.guardMul ?? 1);
 export const windupOf = (f) => (wpnOf(f).windup ?? 0) * (f.combo > 1 ? 0.6 : 1);
 // temps du tir (arc), de l'incantation de la boule de feu (sceptre) ou de l'invocation (grimoire)
 const shotOf = (f) => (wpnOf(f).summon ? CAST : wpnOf(f).fire ? FIRE : SHOT);
@@ -293,7 +295,7 @@ export class Sim {
       if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) continue;   // roulade : on passe à travers
       // bloquer face à l'explosion : la garde encaisse
       if (d.state === 'block' && (dist < 0.05 || (fx(d) * dx + fz(d) * dz) / dist < -0.2)) {
-        d.guard -= FIRE.guard * wpnOf(d).guard; d.guardT = 0;
+        d.guard -= FIRE.guard * guardOf(d); d.guardT = 0;
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
         if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
@@ -345,7 +347,7 @@ export class Sim {
     }
     if (a.k === 1) return true;      // boule de feu : elle explose (dégâts de zone dans explode)
     if (d.state === 'block' && facing) {
-      d.guard -= SHOT.guard * wpnOf(d).guard; d.guardT = 0;
+      d.guard -= SHOT.guard * guardOf(d); d.guardT = 0;
       this.emit('fx', d.idx, 'blocked');
       this.emit('emit', a.x, a.y, a.z, 8, { color: [0xffe27a, 0xffffff], speed: 3, up: 2, size: 0.05, life: 0.3, grav: 10 });
       this.emit('sfx', 'clang');
@@ -439,7 +441,7 @@ export class Sim {
           f.vx = mx * 1.1; f.vz = mz * 1.1;
           break;
         }
-        const spd = (f.sta < STA.tired ? 2.5 : 3.4) * wpnOf(f).run;   // l'archer est plus léger, le pavois plus lourd
+        const spd = (f.sta < STA.tired ? 2.5 : 3.4) * wpnOf(f).run * (f.runMul ?? 1);   // l'archer est plus léger, le pavois plus lourd
         f.vx = mx * spd; f.vz = mz * spd;
         if (moving) {
           if (st !== 'walk') this.setState(f, 'walk');
@@ -624,7 +626,7 @@ export class Sim {
 
   blocked(att, def, cost, cx, cy, cz) {
     const g = this.g;
-    cost *= wpnOf(def).guard * (wpnOf(att).crush ?? 1);     // on pare moins bien avec un arc qu'avec un bouclier, mieux avec un pavois
+    cost *= guardOf(def) * (wpnOf(att).crush ?? 1);     // on pare moins bien avec un arc qu'avec un bouclier, mieux avec un pavois
     def.guard -= cost; def.guardT = 0;
     this.push(def, att, 2.4); this.push(att, att, -1.4);
     this.emit('fx', def.idx, 'blocked');

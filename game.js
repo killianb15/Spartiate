@@ -6,7 +6,7 @@ const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, BOONS, RARITY, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -3037,7 +3037,9 @@ function rewardSync() {
   const btns = $('reward').querySelectorAll('button');
   offer.forEach((id, i) => {
     const keys = duo ? `${i + 1}</kbd> <kbd>${'890'[i]}` : `${i + 1}`;
-    btns[i].innerHTML = `<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>`;
+    const r = BOONS[id].rare;
+    btns[i].className = 'r' + r;     // rareté : couleur du cadre (commune, rare, légendaire)
+    btns[i].innerHTML = `${r ? `<small>${RARITY[r].toUpperCase()}</small>` : ''}<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>`;
     btns[i].disabled = !loc.some((h) => sim.mustPick(h) && pickReq[h] < 0);
   });
   const st = [];

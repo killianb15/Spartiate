@@ -73,6 +73,12 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Équipier parti (`bye`) : chacun repart seul dans sa salle d'armes (l'hôte garde son salon) ; quitter
   pour le menu en donjon = quitter le salon ; franchir la porte seul ferme le salon. Testé par
   `tests/test_server.py` et `node tools/lobby-test.mjs <dossier>` (deux contextes Chromium).
+- **Bénédictions** (`BOONS` dans dungeon.js, `rare` 0 commune / 1 rare / 2 légendaire, `RARITY`, `unique`) : coffre =
+  Potion + 2 tirages par rareté (`rollOffer`, chances `boonOdds(n)` qui montent en profondeur ; rareté épuisée → un
+  cran en dessous ; une unique que tous ont n'est plus proposée). Champs des héros posés par `equip` : pow, maxHp,
+  armor, leech, staMul, guardMul (`guardOf` dans sim.js), runMul, phoenix (`rebirth`), thorns (`thornsHit`),
+  berserk (`FURY`) ; branchés dans `DungeonSim.damage` / `trapHit`. Écran du coffre : classe `r0/r1/r2` des boutons.
+  Tests : `tests/boons.test.js` ; scénario navigateur `benedictions`.
 - **Équilibrage à deux** (`COOP` dans dungeon.js, `coop(np, clé)`) : objectif « aussi dur qu'en solo » par joueur
   (dégâts reçus par héros et durée des salles). Salles normales : ×2 ennemis (max 10), PV ×1,3, dégâts ×1,25 ;
   boss : PV ×2,2, dégâts ×2, attaques spéciales ×0,6 d'attente ; escorte du chef orc ×1,5 + 1 (max 6). Réglé et

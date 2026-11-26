@@ -10,7 +10,7 @@
 //  les IA des ennemis tournent DANS la simulation et sont sauvegardées avec elle, ce qui
 //  permet de jouer en ligne avec le rollback de rollback.js (step(entrée0, entrée1)).
 // =====================================================================
-import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, wpnOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
+import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
 import { hypot, atan2, clamp, sin, cos } from './dmath.js';
 import { AI } from './ai.js';
 
@@ -124,15 +124,33 @@ const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + 
 const SHOP_DIR = 64;   // seuil d'une direction franche (sur 127)
 
 const heal = (p, n) => { p.hp = Math.min(p.maxHp, p.hp + n); };
-// Bénédictions proposées dans le coffre de chaque salle
+// Bénédictions proposées dans le coffre de chaque salle. rare : 0 commune, 1 rare, 2 légendaire (voir
+// rollOffer : la Potion toujours, puis deux tirages par rareté, plus généreux en profondeur) ; unique : on ne
+// la prend qu'une fois.
+export const RARITY = ['Commune', 'Rare', 'Légendaire'];
 export const BOONS = {
-  potion: { name: 'Potion', desc: 'Soigne 40 PV', apply: (p) => heal(p, 40) },
-  force: { name: 'Force du taureau', desc: '+20 % de dégâts', apply: (p) => { p.pow *= 1.2; } },
-  vita: { name: 'Vitalité', desc: '+20 PV max et soigne 20 PV', apply: (p) => { p.maxHp += 20; heal(p, 20); } },
-  souffle: { name: 'Second souffle', desc: '+35 % de récupération d\'endurance', apply: (p) => { p.staMul += 0.35; } },
-  sang: { name: 'Soif de sang', desc: 'Chaque coup porté soigne 2 PV', apply: (p) => { p.leech += 2; } },
-  peau: { name: 'Peau de bronze', desc: '−15 % de dégâts subis', apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.85; } },
+  potion: { name: 'Potion', desc: 'Soigne 40 PV', rare: 0, apply: (p) => heal(p, 40) },
+  force: { name: 'Force du taureau', desc: '+20 % de dégâts', rare: 0, apply: (p) => { p.pow *= 1.2; } },
+  vita: { name: 'Vitalité', desc: '+20 PV max et soigne 20 PV', rare: 0, apply: (p) => { p.maxHp += 20; heal(p, 20); } },
+  souffle: { name: 'Second souffle', desc: '+35 % de récupération d\'endurance', rare: 0, apply: (p) => { p.staMul += 0.35; } },
+  sang: { name: 'Soif de sang', desc: 'Chaque coup porté soigne 2 PV', rare: 0, apply: (p) => { p.leech += 2; } },
+  peau: { name: 'Peau de bronze', desc: '−15 % de dégâts subis', rare: 0, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.85; } },
+  // rares
+  lame: { name: 'Lame affûtée', desc: '+35 % de dégâts', rare: 1, apply: (p) => { p.pow *= 1.35; } },
+  cuirasse: { name: 'Cuirasse', desc: '+40 PV max et soigne 40 PV', rare: 1, apply: (p) => { p.maxHp += 40; heal(p, 40); } },
+  vampire: { name: 'Vampirisme', desc: 'Chaque coup porté soigne 4 PV', rare: 1, apply: (p) => { p.leech += 4; } },
+  fer: { name: 'Garde de fer', desc: 'Bloquer coûte 40 % de garde en moins', rare: 1, apply: (p) => { p.guardMul *= 0.6; } },
+  vent: { name: 'Pieds de vent', desc: '+20 % de vitesse de course', rare: 1, apply: (p) => { p.runMul *= 1.2; } },
+  // légendaires
+  phenix: { name: 'Plume de phénix', desc: 'Une fois : au lieu de tomber, tu renais à 60 % PV', rare: 2, unique: true, apply: (p) => { p.phoenix = 1; } },
+  egide: { name: 'Égide divine', desc: '−30 % de dégâts subis', rare: 2, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.7; } },
+  epines: { name: 'Épines de bronze', desc: 'Renvoie 60 % des dégâts reçus à l\'attaquant', rare: 2, apply: (p) => { p.thorns += 0.6; } },
+  fureur: { name: 'Fureur', desc: '+70 % de dégâts sous 40 % de PV', rare: 2, unique: true, apply: (p) => { p.berserk = 1; } },
 };
+// chances de rare et de légendaire pour une place du coffre, salle n
+export const boonOdds = (n) => ({ rare: Math.min(0.4, 0.2 + 0.012 * n), legend: Math.min(0.12, 0.03 + 0.005 * n) });
+const PHOENIX = 0.6;            // PV rendus par la Plume de phénix
+const FURY = { below: 0.4, mul: 1.7 };
 
 // Choix d'une bénédiction transmis comme une entrée (pour qu'il passe par le rollback en ligne) :
 // pendant la phase 'reward', mx = PICK + 1 + n, mz = 127, blk = vrai. Un déplacement au clavier ne
@@ -148,7 +166,7 @@ const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteu
 export function equip(p, kind, wpn = defaultWeapon(kind)) {
   if (!HEROES[kind]) kind = 'soldier';
   if (!WEAPONS[wpn]) wpn = defaultWeapon(kind);
-  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1 });
+  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, runMul: 1, phoenix: 0, thorns: 0, berserk: 0 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
   const tank = wpnOf(p).tank;                   // gants de boxe : se cumule avec l'armure du héros
@@ -560,13 +578,37 @@ export class DungeonSim extends Sim {
 
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
     if (def.god) { this.emit('pop', 'INVINCIBLE', def.x, def.y + 1.8, def.z, 'miss'); return; }
-    dmg = Math.max(1, Math.round(dmg * att.pow * (1 - def.armor)));
+    const fury = att.berserk && att.hp < att.maxHp * FURY.below ? FURY.mul : 1;     // bénédiction « Fureur »
+    dmg = Math.max(1, Math.round(dmg * att.pow * fury * (1 - def.armor)));
     if (att.leech) heal(att, att.leech);
+    // « Plume de phénix » : le coup qui l'aurait mis à terre le fait renaître (une fois)
+    if (def.phoenix && def.hp - dmg <= 0) { this.rebirth(def); return; }
     if (def.boss) knock *= 0.4;               // le chef ne recule presque pas
     if (def.sp) this.armorHit(att, def, dmg, cx, cy, cz);
     else super.damage(att, def, dmg, knock, dur, cx, cy, cz);
-    // le colosse enrage à la moitié de ses PV
-    if (def.sp !== undefined && !def.rage && def.state !== 'dead' && def.hp <= def.maxHp * BOSS.rage) this.startSpecial(def, 'roar');
+    this.enrage(def);
+    // « Épines de bronze » : une part des dégâts revient à l'attaquant
+    if (def.thorns && att !== def && att.team !== def.team && att.state !== 'dead') this.thornsHit(def, att, Math.max(1, Math.round(dmg * def.thorns)));
+  }
+  // le colosse (et Cerbère) enrage à la moitié de ses PV
+  enrage(e) { if (e.sp !== undefined && !e.rage && e.state !== 'dead' && e.hp <= e.maxHp * BOSS.rage) this.startSpecial(e, 'roar'); }
+  rebirth(p) {
+    p.phoenix = 0;
+    p.hp = Math.round(p.maxHp * PHOENIX);
+    if (p.state !== 'air') this.toIdle(p);
+    this.emit('pop', 'PHÉNIX !', p.x, p.y + 2.1, p.z, 'parry');
+    this.emit('sfx', 'roar');
+    this.emit('ring', p.x, p.y + 0.1, p.z, 0xffa020, 2.6, 0.6, true);
+    this.emit('emit', p.x, p.y + 0.8, p.z, 40, { color: [0xffa020, 0xffe27a, 0xff5a20], speed: 3, up: 4, size: 0.1, life: 1, grav: -1 });
+    this.emit('shake', 0.25);
+  }
+  thornsHit(def, att, back) {
+    att.hp = Math.max(0, att.hp - back);
+    this.emit('fx', att.idx, 'hit');
+    this.emit('pop', `-${back}`, att.x, att.y + 1.75 * (att.size ?? 1), att.z, 'dmg');
+    this.emit('emit', att.x, att.y + 1, att.z, 8, { color: [0xd9a441, 0xffe27a], speed: 2.5, up: 2, size: 0.06, life: 0.4, grav: 8 });
+    if (att.hp <= 0) { if (att.sp) att.sp = ''; this.die(att); this.onKO(def, att); return; }
+    this.enrage(att);
   }
   // coup encaissé sans broncher (boss pendant une attaque spéciale)
   armorHit(att, def, dmg, cx, cy, cz) {
@@ -728,7 +770,7 @@ export class DungeonSim extends Sim {
       if ((dx * fx + dz * fz) / dist < cos(F.half)) continue;          // hors du cône
       if (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36) continue;
       if (d.state === 'block' && sin(d.yaw) * fx + cos(d.yaw) * fz < -0.2) {
-        d.guard -= F.guard * wpnOf(d).guard; d.guardT = 0;
+        d.guard -= F.guard * guardOf(d); d.guardT = 0;
         this.emit('fx', d.idx, 'blocked');
         if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
         continue;
@@ -755,7 +797,7 @@ export class DungeonSim extends Sim {
       }
       const nx = dist > 0.05 ? dx / dist : sin(e.yaw), nz = dist > 0.05 ? dz / dist : cos(e.yaw);
       if (d.state === 'block') {
-        d.guard -= S.guard * wpnOf(d).guard; d.guardT = 0;
+        d.guard -= S.guard * guardOf(d); d.guardT = 0;
         d.vx = nx * 3; d.vz = nz * 3;
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
@@ -779,7 +821,7 @@ export class DungeonSim extends Sim {
       const side = dx * e.spZ - dz * e.spX >= 0 ? 1 : -1;
       const kx = e.spX * 0.8 + e.spZ * side * 0.6, kz = e.spZ * 0.8 - e.spX * side * 0.6;
       if (d.state === 'block' && sin(d.yaw) * e.spX + cos(d.yaw) * e.spZ < -0.2) {
-        d.guard -= C.guard * wpnOf(d).guard; d.guardT = 0;
+        d.guard -= C.guard * guardOf(d); d.guardT = 0;
         d.vx = kx * 4; d.vz = kz * 4;
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
@@ -805,6 +847,7 @@ export class DungeonSim extends Sim {
     if (f.god) return;
     const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor)));
     f.trapT = 1.0;
+    if (f.phoenix && f.hp - dmg <= 0) { this.rebirth(f); return; }
     f.hp = Math.max(0, f.hp - dmg);
     this.emit('fx', f.idx, 'hit');
     this.emit('pop', `-${dmg}`, f.x, f.y + 1.75, f.z, 'dmg');
@@ -867,21 +910,33 @@ export class DungeonSim extends Sim {
 
   // ---------------- coffre et bénédictions ----------------
   rollOffer() {
-    const pool = Object.keys(BOONS).filter((k) => k !== 'potion');
+    const g = this.g, r = this.rng, odds = boonOdds(Math.max(1, g.room));
+    // une bénédiction unique que tous les héros ont déjà n'est plus proposée
+    const owned = (id) => BOONS[id].unique && this.heroes.every((p) => p.boons.split(',').includes(id));
     const out = ['potion'];
-    while (out.length < 3 && pool.length) out.push(pool.splice((this.rng.next() * pool.length) | 0, 1)[0]);
-    [this.g.o0, this.g.o1, this.g.o2] = out;
+    for (let k = 1; k < 3; k++) {
+      const u = r.next(), tier = u < odds.legend ? 2 : u < odds.legend + odds.rare ? 1 : 0;
+      // rareté tirée ; s'il n'en reste aucune de ce niveau, on descend d'un cran
+      for (let t = tier; t >= 0; t--) {
+        const pool = Object.keys(BOONS).filter((id) => id !== 'potion' && BOONS[id].rare === t && !out.includes(id) && !owned(id));
+        if (pool.length) { out.push(pool[(r.next() * pool.length) | 0]); break; }
+      }
+    }
+    [g.o0, g.o1, g.o2] = out;
   }
   // le héros h prend la bénédiction n° c du coffre
   choose(h, c) {
     const g = this.g, p = this.f[h], id = this.offer[c];
     if (g.phase !== 'reward' || !BOONS[id] || g['pick' + h] >= 0) return false;
+    if (BOONS[id].unique && p.boons.split(',').includes(id)) return false;     // déjà prise
     BOONS[id].apply(p);
     p.boons += (p.boons ? ',' : '') + id;
     g['pick' + h] = c;
+    const rare = BOONS[id].rare;
     this.emit('pop', BOONS[id].name, p.x, p.y + 2.1, p.z, 'parry');
-    this.emit('sfx', 'parry');
-    this.emit('ring', p.x, p.y + 1, p.z, 0xffd34a, 2.2, 0.5);
+    this.emit('sfx', rare ? 'spell' : 'parry');
+    this.emit('ring', p.x, p.y + 1, p.z, [0xffd34a, 0x6fb8ff, 0xffa020][rare], 2.2 + rare * 0.6, 0.5);
+    if (rare) this.emit('emit', p.x, p.y + 1, p.z, 18 + 12 * rare, { color: rare > 1 ? [0xffa020, 0xffe27a, 0xffffff] : [0x6fb8ff, 0xc8e4ff], speed: 2.5, up: 3, size: 0.08, life: 0.9, grav: 4 });
     return true;
   }
   // vrai si le héros h doit encore choisir

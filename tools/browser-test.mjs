@@ -251,6 +251,23 @@ if (scenario === 'biomes') {
   ws.close();
   process.exit(0);
 }
+if (scenario === 'benedictions') {
+  // écran du coffre avec une bénédiction de chaque rareté, puis choix de la légendaire (touche 3)
+  await evalJs(`spartiate.debugGoto(1); true`);
+  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
+  await evalJs(`(() => { const s = spartiate.sim; s.debugKill(); s.g.phase = 'reward'; s.g.pick0 = -1; s.g.o0 = 'potion'; s.g.o1 = 'lame'; s.g.o2 = 'phenix'; return true; })()`);
+  await waitFor(`!document.getElementById('reward').classList.contains('hidden')`, 20000);
+  await sleep(800);
+  console.log('BOUTONS', await evalJs(`[...document.querySelectorAll('#reward button')].map((b) => b.className + ':' + b.textContent.slice(0, 40)).join(' | ')`));
+  await shot('coffre-raretes');
+  await evalJs(`document.querySelectorAll('#reward button')[2].click(); true`);
+  await sleep(1500);
+  console.log('CHOIX', await evalJs(`spartiate.sim.f[0].boons + ' phénix=' + spartiate.sim.f[0].phoenix`));
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
 if (scenario === 'invite') {
   // menu sans compte : bloc Compte avec l'explication du jeu en invité, puis partie lancée en invité
   await send('Page.navigate', { url: GAME + '/?debug' });
