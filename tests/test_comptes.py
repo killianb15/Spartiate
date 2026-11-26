@@ -17,8 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_server import WS, free_port, ROOT   # noqa: E402
 
 PORT_API = 8125
+PORT_JEU = 8126       # serveur du jeu en conteneur (pile de test)
 PROJET = ['docker', 'compose', '-p', 'spartiate-test']
-ENV = dict(os.environ, SPARTIATE_API_PORT=str(PORT_API), FREIN_INSCRIPTION='1000', FREIN_CONNEXION='10')
+ENV = dict(os.environ, SPARTIATE_API_PORT=str(PORT_API), SPARTIATE_PORT=str(PORT_JEU), FREIN_INSCRIPTION='1000', FREIN_CONNEXION='10')
 
 
 def docker(*args, check=True, timeout=900):
@@ -263,6 +264,35 @@ class IsolementTest(unittest.TestCase):
     def test_api_seulement_en_local(self):
         out = docker('port', 'api', '8124').stdout.strip()
         self.assertTrue(out.startswith('127.0.0.1:'), out)
+
+
+@skip_sans_pile
+class ConteneurJeuTest(unittest.TestCase):
+    """Le serveur du jeu en conteneur : sert le jeu, relaie /api vers l'API, ne joint pas la base."""
+
+    def setUp(self):
+        self.api = Api(PORT_JEU)
+
+    def test_jeu_en_conteneur(self):
+        with urllib.request.urlopen(f'http://127.0.0.1:{PORT_JEU}/index.html', timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual(self.api('/api/etat'), (200, {'comptes': True}))
+        st, r = self.api('/api/inscription', {'pseudo': 'Ulysse', 'mdp': 'ithaque-123'})
+        self.assertEqual(st, 200, r)
+        self.assertEqual(self.api('/api/sante')[0], 404, 'route interne non relayée')
+        for path in ['/.env', '/Dockerfile', '/docker-compose.yml', '/api/src/main.rs', '/tests/test_comptes.py']:
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{PORT_JEU}{path}', timeout=5) as r:
+                    self.fail(f'{path} servi ({r.status})')
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 404, path)
+
+    def test_isole_de_la_base(self):
+        ids = docker('ps', '-q', 'jeu').stdout.split()
+        info = json.loads(subprocess.run(['docker', 'inspect', ids[0]], capture_output=True, text=True, check=True).stdout)[0]
+        self.assertNotIn('spartiate-test_interne', info['NetworkSettings']['Networks'], 'le jeu ne joint pas le réseau de la base')
+        self.assertEqual(info['Config']['User'], 'jeu', 'utilisateur non root')
+        self.assertTrue(info['HostConfig']['ReadonlyRootfs'])
 
 
 @skip_sans_pile

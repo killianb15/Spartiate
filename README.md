@@ -32,6 +32,14 @@ Options :
 - **Fedora** : `sudo dnf install python3`
 - **Arch** : `sudo pacman -S python`
 
+## Tout en conteneurs (Docker)
+
+`docker compose up -d --build` lance **tout** : le serveur du jeu (front, salons, relais des comptes),
+l'API des comptes (Rust) et la base PostgreSQL. Le jeu est alors sur <http://localhost:8123>, et sur
+`http://<adresse de ce PC>:8123` pour les amis du même réseau (variable `SPARTIATE_URLS` dans `.env` pour
+afficher cette adresse dans le jeu). Il faut d'abord le fichier `.env` (voir ci-dessous).
+`jouer.bat` / `jouer.sh` restent là pour jouer **sans Docker** (ne pas lancer les deux à la fois : même port).
+
 ## Comptes joueurs (facultatif)
 
 Un compte (pseudo + mot de passe) garde ton **record et tes statistiques** de donjon, affiche ton
@@ -41,8 +49,9 @@ Il faut **Docker** ; une seule fois, sur le PC qui lance le serveur :
 
 1. copier `.env.exemple` en `.env` et y mettre un mot de passe aléatoire
    (`python -c "import secrets; print(secrets.token_hex(24))"`) ;
-2. `docker compose up -d --build` (la 1re fois, compile l'API : quelques minutes) ;
-3. lancer le jeu comme d'habitude (`jouer.bat`) : la fenêtre indique « Comptes joueurs : activés ».
+2. `docker compose up -d --build` (la 1re fois, compile l'API : quelques minutes) : le jeu, l'API et la base
+   démarrent ensemble, le jeu est sur <http://localhost:8123> ;
+3. ou bien, sans le conteneur du jeu, `jouer.bat` : la fenêtre indique « Comptes joueurs : activés » si l'API tourne.
 
 Architecture et sécurité :
 

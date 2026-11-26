@@ -1,2 +1,4 @@
 *.bat text eol=crlf
 *.sh  text eol=lf
+# migrations : leur empreinte est gardée dans la base (sqlx) ; une fin de ligne différente = migration « modifiée »
+*.sql text eol=lf

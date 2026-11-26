@@ -22,8 +22,15 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   passée : en ajouter une, ex. amis/guildes). Routes : sante (interne), inscription, connexion,
   deconnexion, profil, partie (fin de donjon), classement. Argon2id, jetons (empreinte SHA-256 en base),
   freins par adresse (`FREIN_CONNEXION/INSCRIPTION`, adresse = `X-Real-IP` posé par serveur.py).
-- `docker-compose.yml` : db sans port publié sur réseau `internal`, api sur 127.0.0.1:8124 (lecture seule,
-  cap_drop ALL). Mot de passe dans `.env` (ignoré par git ; modèle `.env.exemple`).
+- `docker-compose.yml` : **tout en conteneurs** : `jeu` (Dockerfile à la racine, python:alpine, utilisateur `jeu`,
+  `.dockerignore` en liste blanche : serveur.py, index.html, *.js, assets), publié sur `SPARTIATE_PORT` (8123, ouvert
+  au réseau local), parle à `http://api:8124` sur le réseau `sortie` (pas sur `interne` : il ne joint pas la base) ;
+  `api` aussi publiée sur 127.0.0.1:8124 (pour jouer.bat hors conteneur) ; `db` sans port publié sur `internal`.
+  Lecture seule, cap_drop ALL. Mot de passe dans `.env` (ignoré par git ; modèle `.env.exemple`). En conteneur,
+  `SPARTIATE_DOCKER=1` : l'adresse « pour ton ami » vient de `SPARTIATE_URLS` (`public_urls()` dans serveur.py).
+  **Fins de ligne** : `*.sql` forcés en LF (.gitattributes) : sqlx garde l'empreinte des migrations, une conversion
+  CRLF (autocrlf de Windows) fait planter l'API (`VersionMismatch`).
+  Pile de test : `docker compose -p spartiate-test` avec API sur 8125 et jeu sur 8126.
 - `serveur.py` reste en bibliothèque standard : il relaie `API_ROUTES` vers `SPARTIATE_API`, répond
   `/api/etat`, met le pseudo vérifié (`pseudo_of(token)`) dans les salons, ne sert pas les fichiers cachés.
   `SPARTIATE_PROXY=1` (VPS derrière nginx) : adresse du joueur lue dans X-Real-IP.

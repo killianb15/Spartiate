@@ -51,6 +51,15 @@ BEHIND_PROXY = os.environ.get('SPARTIATE_PROXY') == '1'
 lock = threading.Lock()
 
 
+def public_urls():
+    """Adresse du jeu à donner à un ami : SPARTIATE_URLS si on la connaît (en conteneur, l'adresse vue
+    par le serveur est celle du conteneur, inutile), sinon celle de ce PC sur le réseau local."""
+    env = os.environ.get('SPARTIATE_URLS', '')
+    if env or os.environ.get('SPARTIATE_DOCKER'):
+        return [u.strip() for u in env.split(',') if u.strip()][:2]
+    return [f'http://{ip}:{PORT}' for ip in lan_ips()[:1]]
+
+
 def lan_ips():
     """Adresses IP de ce PC sur le réseau local (la principale en premier)."""
     ips = []
@@ -187,7 +196,7 @@ def create(c, hall=None):
             code = ''.join(random.choice(LETTERS) for _ in range(4))
         rooms[code] = {'host': c, 'guest': None, 'hall': hall}
         c.room, c.is_host = code, True
-    c.send_json(t='created', code=code, hall=hall is not None, urls=[f'http://{ip}:{PORT}' for ip in lan_ips()[:1]])
+    c.send_json(t='created', code=code, hall=hall is not None, urls=public_urls())
     print(f'  Partie créée : {code}', flush=True)
 
 
@@ -426,7 +435,9 @@ def main():
     print('=' * 60)
     print('  SPARTIATE ARENES')
     print(f'  Sur ce PC       : http://localhost:{PORT}')
-    ips = lan_ips()
+    ips = [] if os.environ.get('SPARTIATE_DOCKER') else lan_ips()
+    for u in public_urls() if os.environ.get('SPARTIATE_DOCKER') else []:
+        print(f'  Pour ton ami    : {u}')
     if ips:
         print(f'  Pour ton ami    : http://{ips[0]}:{PORT}   (même Wi-Fi / réseau)')
     if len(ips) > 1:

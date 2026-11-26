@@ -1,13 +1,17 @@
-# Comptes des joueurs : base PostgreSQL + API Rust (api/).
-#   docker compose up -d --build     # démarre les deux (la 1re fois : compile l'API, quelques minutes)
+# Tout le jeu en conteneurs : serveur du jeu (front + salons + relais /api), API des comptes (Rust), base PostgreSQL.
+#   docker compose up -d --build     # démarre tout (la 1re fois : compile l'API, quelques minutes)
 #   docker compose down              # arrête (les données restent dans le volume spartiate-db)
+# Le jeu est alors sur http://localhost:8123 (et http://<IP de ce PC>:8123 pour les amis du même réseau).
+# Sans Docker, jouer.bat lance toujours le serveur du jeu seul (comptes : seulement si l'API tourne).
+# Ne pas lancer jouer.bat en même temps (même port 8123) ; sinon SPARTIATE_PORT=… dans .env.
 #
 # Sécurité :
 #   - la base n'a AUCUN port publié et vit sur un réseau interne (internal: true) : seule l'API la joint,
 #     elle n'est accessible ni depuis ce PC, ni depuis Internet, et n'a pas d'accès sortant ;
-#   - l'API n'est publiée que sur 127.0.0.1 : seul serveur.py (même machine) la joint et relaie /api/* ;
+#   - le jeu n'est pas sur le réseau de la base : il ne parle qu'à l'API (http://api:8124), et ne relaie
+#     que les routes prévues ; l'API n'est publiée que sur 127.0.0.1 (pour jouer.bat, hors conteneur) ;
 #   - mot de passe de la base dans .env (SPARTIATE_DB_PASSWORD, jamais commité : voir .env.exemple) ;
-#   - conteneurs en lecture seule, sans privilèges (cap_drop ALL, no-new-privileges).
+#   - conteneurs en lecture seule, sans privilèges (cap_drop ALL, no-new-privileges), utilisateurs non root.
 services:
   db:
     image: postgres:16-alpine
@@ -44,10 +48,26 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
 
+  jeu:
+    build: .
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      SPARTIATE_API: http://api:8124
+      SPARTIATE_DOCKER: "1"
+      SPARTIATE_URLS: ${SPARTIATE_URLS:-}            # adresse à donner aux amis (ex. http://192.168.1.20:8123)
+      SPARTIATE_PROXY: ${SPARTIATE_PROXY:-}          # 1 derrière un proxy de confiance (nginx du VPS)
+    ports:
+      - "${SPARTIATE_PORT:-8123}:8123"               # ouvert au réseau local : les amis s'y connectent
+    networks: [sortie]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
 networks:
   interne:
     internal: true      # pas de sortie, pas de port publié : seulement db <-> api
-  sortie: {}            # réseau de l'API pour publier son port sur 127.0.0.1
+  sortie: {}            # réseau de l'API et du jeu (ports publiés)
 
 volumes:
   spartiate-db:

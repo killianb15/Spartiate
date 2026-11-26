@@ -1,0 +1,7 @@
+# Image du jeu : on n'envoie que ce que le serveur sert (liste blanche)
+*
+!serveur.py
+!index.html
+!*.js
+!assets
+# l'API a sa propre image (api/Dockerfile)
