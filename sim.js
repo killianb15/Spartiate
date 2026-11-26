@@ -406,7 +406,7 @@ export class Sim {
       if (d.guard <= 0) this.guardBreak(att, d, a.x, a.y, a.z, 0);
       return true;
     }
-    this.damage(att, d, SHOT.dmg, 1.6, 0.22, a.x, a.y, a.z);
+    this.damage(att, d, Math.round(SHOT.dmg * (a.mul ?? 1)), 1.6, 0.22, a.x, a.y, a.z);
     return true;
   }
   startBreak(f) {
@@ -464,8 +464,9 @@ export class Sim {
   startSpell(f, opp, mx, mz) {
     if (!this.canCastSpell(f) || f.spellCd > 0) return false;
     const S = spellOf(f);
-    f.spellCd = S.cd;
-    f.spellMax = S.cd;
+    const cd = Math.max(1.2, S.cd * (f.spellCdMul ?? 1));
+    f.spellCd = cd;
+    f.spellMax = cd;
     f.spellTick = 0;
     f.spellHit = 0;
     f.airAtk = false;
@@ -569,7 +570,9 @@ export class Sim {
         for (let n = 0; n < S.arrows; n++) {
           const ang = f.yaw + (n - half) * S.spread;
           const sx = sin(ang), sz = cos(ang);
-          this.pr.push({ x: f.x + sx * 0.5, y: y0, z: f.z + sz * 0.5, vx: sx * SHOT.speed, vy, vz: sz * SHOT.speed, o: f.idx, t: 0, k: 0 });
+          const pr = { x: f.x + sx * 0.5, y: y0, z: f.z + sz * 0.5, vx: sx * SHOT.speed, vy, vz: sz * SHOT.speed, o: f.idx, t: 0, k: 0 };
+          if ((f.spellPow ?? 1) !== 1) pr.mul = f.spellPow;
+          this.pr.push(pr);
         }
         this.emit('sfx', 'bow');
         this.emit('emit', f.x + fx(f) * 0.6, y0, f.z + fz(f) * 0.6, 12, { color: [0xffffff, S.color], speed: 2.5, up: 1.5, size: 0.06, life: 0.3, grav: 2 });
@@ -624,6 +627,7 @@ export class Sim {
   // coup de zone radial d'un sort : retourne le nombre de cibles touchées (non bloquées)
   spellAoE(att, radius, dmg, knock, guardCost, opts = {}) {
     if (this.g.phase !== 'fight') return 0;
+    const effDmg = Math.max(1, Math.round(dmg * (att.spellPow ?? 1)));
     let hits = 0;
     for (const d of this.f) {
       if (d === att || d.state === 'dead' || !this.foeOf(att.idx, d)) continue;
@@ -637,7 +641,7 @@ export class Sim {
       }
       const nx = dist > 0.05 ? dx / dist : fx(att), nz = dist > 0.05 ? dz / dist : fz(att);
       if (opts.breakGuard && (d.state === 'block' || d.state === 'parry')) {
-        this.guardBreak(att, d, d.x, d.y + 1, d.z, Math.round(dmg * 0.5));
+        this.guardBreak(att, d, d.x, d.y + 1, d.z, Math.round(effDmg * 0.5));
         hits++;
         continue;
       }
@@ -649,7 +653,7 @@ export class Sim {
         if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
         continue;
       }
-      this.damage(att, d, dmg, 0, opts.dur ?? 0.35, d.x, d.y + 0.9, d.z);
+      this.damage(att, d, effDmg, 0, opts.dur ?? 0.35, d.x, d.y + 0.9, d.z);
       hits++;
       if (d.state !== 'dead') {
         const kMul = d.boss ? 0.4 : 1;
@@ -663,6 +667,7 @@ export class Sim {
   // percée du Mirmillon : touche chaque ennemi traversé une seule fois (masque de bits spellHit)
   spellDashHits(att, S) {
     if (this.g.phase !== 'fight') return;
+    const effDmg = Math.max(1, Math.round(S.dmg * (att.spellPow ?? 1)));
     for (const d of this.f) {
       if (d === att || d.state === 'dead' || !this.foeOf(att.idx, d)) continue;
       const bit = 1 << (d.idx & 31);
@@ -679,7 +684,7 @@ export class Sim {
         if (d.guard <= 0) this.guardBreak(att, d, d.x, d.y + 1, d.z, 0);
         continue;
       }
-      this.damage(att, d, S.dmg, 0, 0.38, d.x, d.y + 0.9, d.z);
+      this.damage(att, d, effDmg, 0, 0.38, d.x, d.y + 0.9, d.z);
       if (d.state !== 'dead') {
         const kMul = d.boss ? 0.4 : 1;
         d.vx = att.spellDx * S.knock * kMul; d.vz = att.spellDz * S.knock * kMul;
@@ -837,7 +842,7 @@ export class Sim {
     this.settle(f);
 
     f.guardT += dt;
-    if (f.state !== 'block' && f.guardT > 0.9) f.guard = Math.min(100, f.guard + 24 * dt);
+    if (f.state !== 'block' && f.guardT > 0.9) f.guard = Math.min(100, f.guard + 24 * (f.guardRegen ?? 1) * dt);
     f.staT += dt;
     f.staFail = Math.max(0, f.staFail - dt);
     if (f.spellCd > 0) f.spellCd = Math.max(0, f.spellCd - dt);
@@ -959,6 +964,12 @@ export class Sim {
     g.slow = 0.4; g.slowT = 0.35;
     this.emit('shake', 0.1);
     this.emit('cheer', 0.7);
+    if (def.riposte > 0 && att.state !== 'dead') {
+      const cap = def.maxHp ?? 100;
+      const gain = Math.min(cap - def.hp, 12 * def.riposte);
+      if (gain > 0) { def.hp += gain; this.emit('pop', `+${Math.round(gain)} PV`, def.x, def.y + 1.65, def.z, 'heal'); }
+      this.damage(def, att, 16 * def.riposte, 2.5, 0.25, cx, cy, cz); // ×1,25 sur cible étourdie = 20 dégâts exacts
+    }
   }
 }
 

@@ -128,24 +128,46 @@ const heal = (p, n) => { p.hp = Math.min(p.maxHp, p.hp + n); };
 // rollOffer : la Potion toujours, puis deux tirages par rareté, plus généreux en profondeur) ; unique : on ne
 // la prend qu'une fois.
 export const RARITY = ['Commune', 'Rare', 'Légendaire'];
+// Équilibrage par rareté :
+// - Commune (~+20 % valeur de combat) : bonus francs et lisibles pour démarrer un build.
+// - Rare (~+35-40 % valeur, ≈ ×1,8-2 Commune) : évolutions directes et synergies tactiques.
+// - Légendaire (~+60-75 % valeur, ≈ ×3 Commune) : effets majeurs ou uniques transformant le style de jeu.
 export const BOONS = {
+  // ---- Communes (rare: 0) ----
   potion: { name: 'Potion', desc: 'Soigne 40 PV', rare: 0, apply: (p) => heal(p, 40) },
   force: { name: 'Force du taureau', desc: '+20 % de dégâts', rare: 0, apply: (p) => { p.pow *= 1.2; } },
   vita: { name: 'Vitalité', desc: '+20 PV max et soigne 20 PV', rare: 0, apply: (p) => { p.maxHp += 20; heal(p, 20); } },
-  souffle: { name: 'Second souffle', desc: '+35 % de récupération d\'endurance', rare: 0, apply: (p) => { p.staMul += 0.35; } },
-  sang: { name: 'Soif de sang', desc: 'Chaque coup porté soigne 2 PV', rare: 0, apply: (p) => { p.leech += 2; } },
   peau: { name: 'Peau de bronze', desc: '−15 % de dégâts subis', rare: 0, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.85; } },
-  // rares
+  sang: { name: 'Soif de sang', desc: 'Chaque coup porté soigne 2 PV', rare: 0, apply: (p) => { p.leech += 2; } },
+  souffle: { name: 'Second souffle', desc: '+40 % de récupération d\'endurance', rare: 0, apply: (p) => { p.staMul += 0.4; } },
+  precision: { name: 'Œil de lynx', desc: '+20 % de chances de coup critique (×2 dégâts)', rare: 0, apply: (p) => { p.crit += 0.2; } },
+  hate: { name: 'Hâte arcanique', desc: '−15 % de temps de recharge du sort', rare: 0, apply: (p) => { p.spellCdMul *= 0.85; } },
+  elan: { name: 'Élan agile', desc: '+12 % de vitesse de course', rare: 0, apply: (p) => { p.runMul *= 1.12; } },
+  pavois: { name: 'Bouclier ferme', desc: 'Bloquer coûte 25 % de garde en moins', rare: 0, apply: (p) => { p.guardMul *= 0.75; } },
+
+  // ---- Rares (rare: 1) ----
   lame: { name: 'Lame affûtée', desc: '+35 % de dégâts', rare: 1, apply: (p) => { p.pow *= 1.35; } },
   cuirasse: { name: 'Cuirasse', desc: '+40 PV max et soigne 40 PV', rare: 1, apply: (p) => { p.maxHp += 40; heal(p, 40); } },
+  carapace: { name: 'Carapace d\'airain', desc: '−22 % de dégâts subis', rare: 1, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.78; } },
   vampire: { name: 'Vampirisme', desc: 'Chaque coup porté soigne 4 PV', rare: 1, apply: (p) => { p.leech += 4; } },
-  fer: { name: 'Garde de fer', desc: 'Bloquer coûte 40 % de garde en moins', rare: 1, apply: (p) => { p.guardMul *= 0.6; } },
-  vent: { name: 'Pieds de vent', desc: '+20 % de vitesse de course', rare: 1, apply: (p) => { p.runMul *= 1.2; } },
-  // légendaires
+  fer: { name: 'Garde de fer', desc: 'Bloquer coûte 40 % de garde en moins et +40 % régén. garde', rare: 1, apply: (p) => { p.guardMul *= 0.6; p.guardRegen += 0.4; } },
+  vent: { name: 'Pieds de vent', desc: '+20 % de vitesse de course et +25 % d\'endurance', rare: 1, apply: (p) => { p.runMul *= 1.2; p.staMul += 0.25; } },
+  maitrise: { name: 'Maîtrise arcanique', desc: '−25 % de recharge du sort et +25 % dégâts de sort', rare: 1, apply: (p) => { p.spellCdMul *= 0.75; p.spellPow *= 1.25; } },
+  bourreau: { name: 'Coup de grâce', desc: '+50 % de dégâts contre les ennemis sous 45 % PV', rare: 1, apply: (p) => { p.execPow += 0.5; } },
+  tueur: { name: 'Chasseur de géants', desc: '+15 % de dégâts (+45 % contre les boss)', rare: 1, apply: (p) => { p.pow *= 1.15; p.bossPow *= 1.45; } },
+  riposte: { name: 'Contre-riposte', desc: 'Parer soigne 12 PV et inflige 20 dégâts à l\'attaquant', rare: 1, apply: (p) => { p.riposte += 1; } },
+  pillage: { name: 'Trophée de victoire', desc: 'Chaque ennemi vaincu soigne 6 PV et réduit le CD du sort de 1,2 s', rare: 1, apply: (p) => { p.onKillHeal += 6; p.onKillCd += 1.2; } },
+
+  // ---- Légendaires (rare: 2) ----
   phenix: { name: 'Plume de phénix', desc: 'Une fois : au lieu de tomber, tu renais à 60 % PV', rare: 2, unique: true, apply: (p) => { p.phoenix = 1; } },
   egide: { name: 'Égide divine', desc: '−30 % de dégâts subis', rare: 2, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.7; } },
   epines: { name: 'Épines de bronze', desc: 'Renvoie 60 % des dégâts reçus à l\'attaquant', rare: 2, apply: (p) => { p.thorns += 0.6; } },
   fureur: { name: 'Fureur', desc: '+70 % de dégâts sous 40 % de PV', rare: 2, unique: true, apply: (p) => { p.berserk = 1; } },
+  olympe: { name: 'Lame de l\'Olympe', desc: '+55 % de dégâts et +15 % de chances de critique (×2)', rare: 2, apply: (p) => { p.pow *= 1.55; p.crit += 0.15; } },
+  titan: { name: 'Cœur de Titan', desc: '+75 PV max, soigne 75 PV et −15 % de dégâts subis', rare: 2, apply: (p) => { p.maxHp += 75; heal(p, 75); p.armor = 1 - (1 - p.armor) * 0.85; } },
+  cataclysme: { name: 'Cataclysme', desc: '−38 % de recharge du sort et +65 % dégâts de sort', rare: 2, apply: (p) => { p.spellCdMul *= 0.62; p.spellPow *= 1.65; } },
+  assassin: { name: 'Faucheur', desc: '+35 % de chances de critique (×2,25) et +5 PV par critique', rare: 2, unique: true, apply: (p) => { p.crit += 0.35; p.critMul = Math.max(p.critMul, 2.25); p.critHeal += 5; } },
+  source: { name: 'Source d\'immortalité', desc: '+2 PV/s en combat et restaure 35 % PV à chaque salle', rare: 2, unique: true, apply: (p) => { p.regen += 2; p.roomHeal += 0.35; } },
 };
 // chances de rare et de légendaire pour une place du coffre, salle n
 export const boonOdds = (n) => ({ rare: Math.min(0.4, 0.2 + 0.012 * n), legend: Math.min(0.12, 0.03 + 0.005 * n) });
@@ -170,7 +192,9 @@ const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteu
 export function equip(p, kind, wpn = defaultWeapon(kind)) {
   if (!HEROES[kind]) kind = 'soldier';
   if (!WEAPONS[wpn]) wpn = defaultWeapon(kind);
-  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, runMul: 1, phoenix: 0, thorns: 0, berserk: 0,
+  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, guardRegen: 1, runMul: 1,
+    phoenix: 0, thorns: 0, berserk: 0, crit: 0, critMul: 2, critHeal: 0, spellCdMul: 1, spellPow: 1,
+    execPow: 0, bossPow: 1, riposte: 0, onKillHeal: 0, onKillCd: 0, regen: 0, roomHeal: 0,
     spellCd: 0, spellMax: spellOf({ kind }).cd, spellBuffT: 0 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
@@ -403,7 +427,9 @@ export class DungeonSim extends Sim {
       const off = np > 1 ? (i ? 0.8 : -0.8) : 0;
       const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
       if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
-      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
+      else if (p.roomHeal > 0) heal(p, Math.round(p.maxHp * p.roomHeal));
+      const smax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
+      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: smax });
       p.resetN++;
       this.toIdle(p);
     });
@@ -592,8 +618,16 @@ export class DungeonSim extends Sim {
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
     if (def.god) { this.emit('pop', 'INVINCIBLE', def.x, def.y + 1.8, def.z, 'miss'); return; }
     const fury = att.berserk && att.hp < att.maxHp * FURY.below ? FURY.mul : 1;     // bénédiction « Fureur »
+    const exec = att.execPow && def.hp < def.maxHp * 0.45 ? 1 + att.execPow : 1;    // bénédiction « Coup de grâce »
+    const vsBoss = def.boss && att.bossPow > 1 ? att.bossPow : 1;                   // bénédiction « Chasseur de géants »
+    const isCrit = att.crit > 0 && this.rng.next() < Math.min(0.85, att.crit);      // coups critiques (Œil de lynx, Olympe, Faucheur)
+    const critK = isCrit ? (att.critMul ?? 2) : 1;
     const aegis = def.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;                // sort Rempart sacré
-    dmg = Math.max(1, Math.round(dmg * att.pow * fury * (1 - def.armor) * aegis));
+    dmg = Math.max(1, Math.round(dmg * att.pow * fury * exec * vsBoss * critK * (1 - def.armor) * aegis));
+    if (isCrit) {
+      this.emit('pop', 'CRIT !', def.x, def.y + 2.15, def.z, 'spell');
+      if (att.critHeal > 0) heal(att, att.critHeal);
+    }
     if (att.leech) heal(att, att.leech);
     // « Plume de phénix » : le coup qui l'aurait mis à terre le fait renaître (une fois)
     if (def.phoenix && def.hp - dmg <= 0) { this.rebirth(def); return; }
@@ -921,7 +955,16 @@ export class DungeonSim extends Sim {
     g.kills++;
     // victime d'un héros ou de son chien : comptée pour ses défis (kills, remis à zéro à chaque donjon)
     const k = att ? (this.isHero(att) ? att.idx : att.owner) : -1;
-    if (k >= 0 && this.f[k]) this.f[k].kills++;
+    if (k >= 0 && this.f[k]) {
+      const hero = this.f[k];
+      hero.kills++;
+      // bénédiction « Trophée de victoire » : soin et réduction du temps de recharge du sort par élimination
+      if (hero.onKillHeal > 0 && hero.state !== 'dead') {
+        const gain = Math.min(hero.maxHp - hero.hp, hero.onKillHeal);
+        if (gain > 0) { hero.hp += gain; this.emit('pop', `+${Math.round(gain)} PV`, hero.x, hero.y + 1.9, hero.z, 'heal'); }
+      }
+      if (hero.onKillCd > 0 && hero.spellCd > 0) hero.spellCd = Math.max(0, hero.spellCd - hero.onKillCd);
+    }
     this.emit('sfx', 'coin');
     this.emit('emit', def.x, def.y + 1, def.z, 18, { color: [0xffd34a, 0xffe27a, 0xfff0a0], speed: 2.5, up: 4, size: 0.08, life: 0.9, grav: 9 });
     if (this.foesLeft === 0 && g.phase === 'fight') {
@@ -944,6 +987,8 @@ export class DungeonSim extends Sim {
     const f = this.f[i];
     // bénédiction « Second souffle » : récupération d'endurance supplémentaire
     if (f.staMul > 1 && f.staT > STA.delay && f.state !== 'roll') f.sta = Math.min(100, f.sta + STA.regen * this.dt * (f.staMul - 1));
+    // bénédiction « Source d'immortalité » : régénération continue pendant les combats
+    if (f.regen > 0 && this.g.phase === 'fight' && f.state !== 'dead' && f.hp < f.maxHp) f.hp = Math.min(f.maxHp, f.hp + f.regen * this.dt);
   }
 
   // ---------------- coffre et bénédictions ----------------
@@ -968,6 +1013,7 @@ export class DungeonSim extends Sim {
     if (g.phase !== 'reward' || !BOONS[id] || g['pick' + h] >= 0) return false;
     if (BOONS[id].unique && p.boons.split(',').includes(id)) return false;     // déjà prise
     BOONS[id].apply(p);
+    p.spellMax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
     p.boons += (p.boons ? ',' : '') + id;
     g['pick' + h] = c;
     const rare = BOONS[id].rare;

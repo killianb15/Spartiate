@@ -103,3 +103,96 @@ test('même graine + mêmes choix : mêmes coffres (en ligne)', () => {
   const run = () => { const s = fight(9); const seen = []; for (let n = 1; n <= 30; n++) { s.g.room = n; s.rollOffer(); seen.push(s.offer.join()); } return seen; };
   assert.deepEqual(run(), run());
 });
+
+test('équilibrage des raretés : progression nette Commune < Rare < Légendaire sur chaque axe', () => {
+  const byRare = [0, 1, 2].map((r) => Object.values(BOONS).filter((b) => b.rare === r));
+  assert.ok(byRare[0].length >= 9, 'au moins 9 communes');
+  assert.ok(byRare[1].length >= 10, 'au moins 10 rares');
+  assert.ok(byRare[2].length >= 9, 'au moins 9 légendaires');
+
+  const stat = (id, fn) => { const p = fight(10).f[0]; BOONS[id].apply(p); return fn(p); };
+  // Dégâts : Force (+20 %) < Lame (+35 %) < Olympe (+55 % + crit)
+  assert.ok(stat('force', (p) => p.pow) < stat('lame', (p) => p.pow));
+  assert.ok(stat('lame', (p) => p.pow) < stat('olympe', (p) => p.pow));
+  // Armure : Peau (15 %) < Carapace (22 %) < Égide (30 %)
+  assert.ok(stat('peau', (p) => p.armor) < stat('carapace', (p) => p.armor));
+  assert.ok(stat('carapace', (p) => p.armor) < stat('egide', (p) => p.armor));
+  // PV max : Vitalité (120) < Cuirasse (140) < Titan (175)
+  assert.ok(stat('vita', (p) => p.maxHp) < stat('cuirasse', (p) => p.maxHp));
+  assert.ok(stat('cuirasse', (p) => p.maxHp) < stat('titan', (p) => p.maxHp));
+  // Recharge sort : Hâte (0,85) > Maîtrise (0,75) > Cataclysme (0,62)
+  assert.ok(stat('hate', (p) => p.spellCdMul) > stat('maitrise', (p) => p.spellCdMul));
+  assert.ok(stat('maitrise', (p) => p.spellCdMul) > stat('cataclysme', (p) => p.spellCdMul));
+  // Vitesse / garde : Élan < Vent, Bouclier ferme > Garde de fer
+  assert.ok(stat('elan', (p) => p.runMul) < stat('vent', (p) => p.runMul));
+  assert.ok(stat('pavois', (p) => p.guardMul) > stat('fer', (p) => p.guardMul));
+});
+
+test('nouvelles bénédictions : critiques, sorts, exécution, boss, riposte, trophée et immortalité', () => {
+  // Critiques + soin par critique (Faucheur)
+  const s1 = fight(11), p1 = s1.f[0], e1 = foe(s1);
+  BOONS.assassin.apply(p1);
+  p1.hp = 50; e1.hp = e1.maxHp = 9999;
+  let crits = 0;
+  for (let i = 0; i < 60; i++) {
+    const before = e1.hp;
+    s1.damage(p1, e1, 10, 0, 0.2, 0, 1, 0);
+    if (before - e1.hp >= 22) crits++;
+  }
+  assert.ok(crits > 5 && crits < 45, `coups critiques déclenchés (${crits}/60)`);
+  assert.ok(p1.hp > 50, 'Faucheur soigne sur critique');
+
+  // Exécution (Coup de grâce) et Chasseur de géants (boss)
+  const s2 = fight(12), p2 = s2.f[0], e2 = foe(s2);
+  BOONS.bourreau.apply(p2);
+  e2.maxHp = 100; e2.hp = 80;
+  s2.damage(p2, e2, 10, 0, 0.2, 0, 1, 0);
+  assert.equal(80 - e2.hp, 10, 'pas d’exécution au-dessus de 45 % PV');
+  e2.hp = 40;
+  s2.damage(p2, e2, 10, 0, 0.2, 0, 1, 0);
+  assert.equal(40 - e2.hp, 15, '+50 % dégâts sous 45 % PV');
+
+  const sBoss = fight(13); sBoss.debugGoto(5);
+  while (sBoss.g.phase !== 'fight') sBoss.step();
+  const pb = sBoss.f[0], boss = sBoss.f.find((x) => x.boss);
+  BOONS.tueur.apply(pb);
+  const bHp = boss.hp;
+  sBoss.damage(pb, boss, 10, 0, 0.2, 0, 1, 0);
+  assert.equal(bHp - boss.hp, Math.round(10 * 1.15 * 1.45), 'bonus contre les boss appliqué');
+
+  // Sort : Cataclysme réduit le CD et augmente les dégâts du sort
+  const sSp = fight(14), pSp = sSp.f[0], eSp = foe(sSp);
+  BOONS.cataclysme.apply(pSp);
+  pSp.x = 0; pSp.z = 0; eSp.x = 1.2; eSp.z = 0; eSp.hp = eSp.maxHp = 500;
+  sSp.startSpell(pSp, eSp, 0, 0);
+  assert.ok(pSp.spellCd < 5, `cooldown réduit par Cataclysme (${pSp.spellCd.toFixed(2)} s)`);
+  for (let i = 0; i < 60; i++) sSp.step();
+  assert.ok(500 - eSp.hp > 25, 'dégâts du Tourbillon amplifiés par Cataclysme');
+
+  // Contre-riposte : parer soigne 12 PV et inflige 20 dégâts
+  const sRip = fight(15), pRip = sRip.f[0], eRip = foe(sRip);
+  BOONS.riposte.apply(pRip);
+  pRip.hp = 70; eRip.hp = eRip.maxHp = 100;
+  sRip.parried(eRip, pRip, 0, 1, 0);
+  assert.equal(pRip.hp, 82, 'parade soigne +12 PV');
+  assert.equal(eRip.hp, 80, 'parade inflige 20 dégâts à l’attaquant');
+
+  // Trophée de victoire : élimination soigne +6 PV et réduit le CD du sort de 1,2 s
+  const sKill = fight(16), pKill = sKill.f[0], eKill = foe(sKill);
+  BOONS.pillage.apply(pKill);
+  pKill.hp = 60; pKill.spellCd = 5; eKill.hp = 1;
+  sKill.damage(pKill, eKill, 20, 0, 0.2, 0, 1, 0);
+  assert.equal(pKill.hp, 66, '+6 PV à l’élimination');
+  assert.ok(Math.abs(pKill.spellCd - 3.8) < 1e-6, '−1,2 s sur le cooldown du sort');
+
+  // Source d'immortalité : régén en combat + soin entre les salles
+  const sSrc = fight(17), pSrc = sSrc.f[0];
+  BOONS.source.apply(pSrc);
+  pSrc.hp = 50;
+  for (const e of sSrc.f) if (e.team === 1) { e.x = 5; e.z = 5; }
+  for (let i = 0; i < 60; i++) sSrc.step();
+  assert.ok(pSrc.hp > 51.5, 'régénération +2 PV/s active en combat');
+  pSrc.hp = 40;
+  sSrc.newRoom();
+  assert.equal(pSrc.hp, 75, '+35 % PV max restaurés à la nouvelle salle');
+});

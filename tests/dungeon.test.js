@@ -78,11 +78,17 @@ test('salle nettoyée => coffre, bénédiction (choisie par une entrée), porte,
   run(s, 40);
   assert.equal(s.g.phase, 'reward');
   assert.equal(s.offer[0], 'potion');
-  const before = { pow: p.pow, maxHp: p.maxHp, staMul: p.staMul, leech: p.leech, armor: p.armor };
+  const statsOf = (h) => ({
+    pow: h.pow, maxHp: h.maxHp, staMul: h.staMul, leech: h.leech, armor: h.armor,
+    crit: h.crit, spellCdMul: h.spellCdMul, spellPow: h.spellPow, runMul: h.runMul, guardMul: h.guardMul,
+    execPow: h.execPow, bossPow: h.bossPow, riposte: h.riposte, onKillHeal: h.onKillHeal,
+    phoenix: h.phoenix, thorns: h.thorns, berserk: h.berserk, regen: h.regen,
+  });
+  const before = statsOf(p);
   run(s, 3, () => pickInput(1));
   assert.equal(s.g.phase, 'clear');
   assert.equal(p.boons, s.offer[1]);
-  assert.notDeepEqual({ pow: p.pow, maxHp: p.maxHp, staMul: p.staMul, leech: p.leech, armor: p.armor }, before);
+  assert.notDeepEqual(statsOf(p), before);
   // un choix qui arrive encore après la phase ne fait pas bouger le héros
   const [x0, z0] = [p.x, p.z];
   run(s, 3, () => pickInput(1));
