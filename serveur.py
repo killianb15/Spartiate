@@ -6,6 +6,7 @@ seule à parler à la base PostgreSQL. Sans elle, le jeu marche comme avant (com
 import base64
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import random
@@ -46,8 +47,20 @@ API_ROUTES = {('GET', '/api/profil'), ('GET', '/api/classement'), ('GET', '/api/
               ('POST', '/api/connexion'), ('POST', '/api/deconnexion'), ('POST', '/api/partie')}
 API_DOWN = 'Comptes indisponibles : le service des comptes ne répond pas (docker compose up -d).'
 TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
-# derrière un proxy de confiance (nginx du VPS) : l'adresse du joueur est dans X-Real-IP
+# derrière un proxy de confiance (nginx du VPS) : l'adresse du joueur est dans X-Real-IP, mais seulement
+# quand la connexion vient d'une adresse privée (nginx, Docker) : sinon n'importe qui pourrait l'inventer
 BEHIND_PROXY = os.environ.get('SPARTIATE_PROXY') == '1'
+
+
+def private_peer(ip):
+    """Vrai pour une adresse locale ou privée (proxy de la même machine ou du réseau Docker)."""
+    try:
+        a = ipaddress.ip_address(ip)
+        if a.version == 6 and a.ipv4_mapped:
+            a = a.ipv4_mapped
+        return a.is_private or a.is_loopback
+    except ValueError:
+        return False
 lock = threading.Lock()
 
 
@@ -322,7 +335,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def client_ip(self):
-        if BEHIND_PROXY:
+        if BEHIND_PROXY and private_peer(self.client_address[0]):
             ip = self.headers.get('X-Real-IP', '').strip()
             if re.match(r'^[0-9A-Fa-f:.]{2,45}$', ip):
                 return ip

@@ -278,5 +278,18 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(h.recv_json()['t'], 'created')
 
 
+
+class ProxyTest(unittest.TestCase):
+    """X-Real-IP n'est cru que si la connexion vient d'une adresse privée (nginx, Docker)."""
+
+    def test_private_peer(self):
+        sys.path.insert(0, ROOT)
+        import serveur
+        for ip in ['127.0.0.1', '::1', '172.17.0.1', '10.0.0.5', '192.168.1.20', '::ffff:172.18.0.3']:
+            self.assertTrue(serveur.private_peer(ip), ip)
+        for ip in ['51.210.150.192', '8.8.8.8', '::ffff:8.8.8.8', '2001:4860::8888', 'pas une ip', '']:
+            self.assertFalse(serveur.private_peer(ip), ip)
+
+
 if __name__ == '__main__':
     unittest.main()

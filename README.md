@@ -62,8 +62,9 @@ Architecture et sécurité :
   PC comme depuis Internet ; l'API n'écoute que sur `127.0.0.1:8124` ;
 - `serveur.py` relaie seulement les routes prévues (`/api/inscription`, `connexion`, `deconnexion`,
   `profil`, `partie`, `classement`) ; il ne sert jamais les fichiers cachés (`.env`, `.git`…).
-- Derrière nginx (VPS) : `SPARTIATE_PROXY=1` (déjà dans `deploy/spartiate.service`) pour lire
-  l'adresse du joueur dans `X-Real-IP`.
+- En ligne (VPS) : le déploiement automatique (push sur `master`) lance tout en conteneurs ; le `.env` est créé
+  une fois sur le serveur, avec `SPARTIATE_PROXY=1` pour lire l'adresse du joueur dans `X-Real-IP` (envoyé par
+  nginx, cru seulement depuis une adresse privée).
 - Tests : `cargo test` dans `api/`, et `python tests/test_comptes.py` (pile Docker de test séparée,
   détruite à la fin).
 

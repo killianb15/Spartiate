@@ -33,7 +33,13 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Pile de test : `docker compose -p spartiate-test` avec API sur 8125 et jeu sur 8126.
 - `serveur.py` reste en bibliothèque standard : il relaie `API_ROUTES` vers `SPARTIATE_API`, répond
   `/api/etat`, met le pseudo vérifié (`pseudo_of(token)`) dans les salons, ne sert pas les fichiers cachés.
-  `SPARTIATE_PROXY=1` (VPS derrière nginx) : adresse du joueur lue dans X-Real-IP.
+  `SPARTIATE_PROXY=1` (VPS derrière nginx) : adresse du joueur lue dans X-Real-IP, seulement si la connexion vient
+  d'une adresse privée (`private_peer` : nginx, Docker), sinon l'en-tête pourrait être inventé.
+- **Déploiement** (`.github/workflows/deploy.yml`, push sur master) : tests, rsync vers `/home/ubuntu/spartiate`
+  (sans `.env`, ni effacé ni envoyé), puis sur le VPS : `.env` créé une seule fois (mot de passe aléatoire +
+  `SPARTIATE_PROXY=1`), `docker compose build` (avant la bascule), arrêt de l'ancien service systemd `spartiate`,
+  `docker compose up -d`, vérification de `/api/etat` (`comptes: true`) ; en cas d'échec : `stop jeu` et retour au
+  service systemd (toujours installé, `deploy/spartiate.service`). nginx (Docker) → `host.docker.internal:8123`.
 - game.js : `compte`, `api()`, `setupAccount`, `accountRun` (appelé par `endDungeon`), `myName()`,
   `net.peerName` (pseudo de l'équipier, reçu dans `hello`). Bloc `#acctSec` du menu, masqué sans API.
 - **Défis des héros** : définis et comptés côté serveur (`api/src/defis.rs` : `DEFIS`, 4 par héros, mesures

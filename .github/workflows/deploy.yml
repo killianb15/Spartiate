@@ -26,14 +26,20 @@ jobs:
       - name: Tests du serveur
         run: python3 -m unittest discover -s tests -v
 
+  # Déploiement en conteneurs (docker-compose.yml) : jeu + API des comptes + PostgreSQL.
+  # Le .env (mot de passe de la base) est créé une fois sur le serveur et n'en sort jamais.
+  # Si le jeu ne répond pas après la bascule, on revient à l'ancien service systemd (python sans conteneur).
   deploy:
     needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 40          # la 1re fois, le VPS compile l'API Rust (plusieurs minutes)
     steps:
       - uses: actions/checkout@v4
 
-      - name: Vérifier la syntaxe Python
-        run: python3 -m py_compile serveur.py
+      - name: Vérifier la syntaxe Python et le fichier compose
+        run: |
+          python3 -m py_compile serveur.py
+          SPARTIATE_DB_PASSWORD=verification docker compose config --quiet
 
       - name: Configurer SSH
         run: |
@@ -43,31 +49,49 @@ jobs:
           ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Synchroniser les fichiers
+        # .env exclu : il n'est ni envoyé ni effacé (--delete ne touche pas aux fichiers exclus)
         run: |
           rsync -az --delete \
-            --exclude '.git' --exclude '.github' --exclude 'deploy' \
-            --exclude '*.zip' --exclude '*.bat' \
+            --exclude '.git' --exclude '.github' --exclude 'deploy' --exclude '.env' \
+            --exclude '*.zip' --exclude '*.bat' --exclude 'api/target' \
             --exclude 'tests' --exclude 'package.json' --exclude '__pycache__' --exclude 'node_modules' \
             ./ "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${APP_DIR}/"
 
-      - name: Installer le service et redémarrer
+      - name: Construire et démarrer les conteneurs
         run: |
-          scp deploy/spartiate.service "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/spartiate.service"
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
-            set -e
-            sudo install -m 644 /tmp/spartiate.service /etc/systemd/system/spartiate.service
-            sudo systemctl daemon-reload
-            sudo systemctl enable spartiate
-            sudo systemctl restart spartiate
-          '
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "APP_DIR=${APP_DIR} bash -s" <<'EOF'
+          set -e
+          cd "$APP_DIR"
+          sudo docker compose version >/dev/null || { echo "docker compose est absent du VPS"; exit 1; }
+          # secrets : créés une seule fois, ici, jamais dans le dépôt ni dans GitHub
+          if [ ! -f .env ]; then
+            umask 077
+            printf 'SPARTIATE_DB_PASSWORD=%s\nSPARTIATE_PROXY=1\n' "$(python3 -c 'import secrets; print(secrets.token_hex(24))')" > .env
+            echo ".env créé sur le serveur"
+          fi
+          # images construites avant de couper l'ancien serveur : le site reste en ligne pendant la compilation
+          sudo docker compose build
+          # l'ancien service (python hors conteneur) libère le port du jeu ; il reste installé, en secours
+          sudo systemctl disable --now spartiate 2>/dev/null || true
+          sudo docker compose up -d --remove-orphans
+          EOF
 
-      - name: Vérifier que le jeu répond
+      - name: Vérifier que le jeu et les comptes répondent (sinon, retour à l'ancien service)
         run: |
-          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" '
-            for i in $(seq 1 90); do
-              curl -fsS -o /dev/null http://127.0.0.1:'"${APP_PORT}"'/ && echo "OK" && exit 0
-              sleep 1
-            done
-            sudo journalctl -u spartiate -n 30 --no-pager
-            exit 1
-          '
+          ssh "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" "APP_DIR=${APP_DIR} APP_PORT=${APP_PORT} bash -s" <<'EOF'
+          cd "$APP_DIR"
+          for i in $(seq 1 120); do
+            if curl -fsS "http://127.0.0.1:${APP_PORT}/api/etat" 2>/dev/null | grep -q '"comptes": true'; then
+              echo "OK : jeu et comptes en ligne"
+              sudo docker compose ps
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Le jeu ou les comptes ne répondent pas : journaux, puis retour à l'ancien service"
+          sudo docker compose ps
+          sudo docker compose logs --tail 40
+          sudo docker compose stop jeu || true
+          sudo systemctl enable --now spartiate || true
+          exit 1
+          EOF
