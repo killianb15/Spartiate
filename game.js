@@ -3697,6 +3697,11 @@ function setupDebug() {
     else if (b.id === 'dbgTp') dbg.tp = !dbg.tp;
     dbgRefresh();
   });
+  $('dbgCodeGo').onclick = dbgUnlock;
+  $('dbgCode').addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') dbgUnlock();
+    else if (ev.key === 'Escape') dbgLock(false);
+  });
   $('dbgRoom').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { dbgGoto(+$('dbgRoom').value || 0); $('dbgRoom').blur(); } });
   // clic sur le sol : le héros y est téléporté
   renderer.domElement.addEventListener('pointerdown', (ev) => {
@@ -3723,7 +3728,32 @@ function dbgGoto(n) {
   $('help').classList.remove('hidden');
   acc = 0;
 }
+// Le panneau demande un code d'accès (une fois par onglet). Seule l'empreinte du code est ici, pas le code
+// lui-même : c'est une simple porte (tout se passe dans le navigateur), et le panneau n'agit de toute façon
+// que hors ligne, sur sa propre partie.
+const DBG_CODE = 0x4b19fba2;
+const fnv = (t) => { let h = 0x811c9dc5; for (const c of t) h = Math.imul(h ^ c.codePointAt(0), 16777619); return h >>> 0; };
+try { dbg.unlocked = sessionStorage.getItem('spartiate-dbg') === '1'; } catch (e) { dbg.unlocked = false; }
+function dbgLock(show) {
+  $('dbgLock').classList.toggle('hidden', !show);
+  if (!show) { $('dbgCode').blur(); return; }
+  $('dbgCode').value = '';
+  $('dbgCodeMsg').textContent = '';
+  $('dbgCode').focus();
+}
+function dbgUnlock() {
+  if (fnv($('dbgCode').value.trim().toLowerCase()) !== DBG_CODE) {
+    $('dbgCodeMsg').textContent = 'Code incorrect.';
+    $('dbgCode').value = '';
+    return;
+  }
+  dbg.unlocked = true;
+  try { sessionStorage.setItem('spartiate-dbg', '1'); } catch (e) { /* ignoré */ }
+  dbgLock(false);
+  toggleDebug();
+}
 function toggleDebug() {
+  if (!dbg.unlocked) { dbgLock($('dbgLock').classList.contains('hidden')); return; }
   dbg.open = !dbg.open;
   $('dbg').classList.toggle('hidden', !dbg.open);
   dbgRefresh();

@@ -302,7 +302,7 @@
   @keyframes bbGlow { to { box-shadow: 0 0 0 1px #1b0f05, 0 4px 14px rgba(0,0,0,.65), 0 0 38px rgba(255,120,30,.95); } }
 
   /* ---------- Outil de débogage (F2) ---------- */
-  #dbg { position: fixed; right: 12px; top: 140px; z-index: 30; width: 300px; max-width: calc(100vw - 32px); padding: 10px 12px;
+  #dbg { position: fixed; right: 12px; top: 230px; z-index: 30; width: 300px; max-width: calc(100vw - 32px); padding: 10px 12px;
     background: rgba(10,8,14,.9); border: 1px solid #5a6aa0; border-radius: 10px; font-size: 15px; color: #dfe4ff;
     box-shadow: 0 6px 20px rgba(0,0,0,.6); }
   #dbg h4 { margin: 0 0 6px; font-family: Cinzel, serif; font-size: 14px; letter-spacing: .2em; color: #9fb4ff; }
@@ -315,6 +315,15 @@
   #dbg input { width: 56px; padding: 2px 6px; border-radius: 5px; border: 1px solid #3c4670; background: #0c0f1c; color: inherit; font: inherit; }
   #dbg.off .grid, #dbg.off .row { opacity: .4; pointer-events: none; }
   #dbg .row { display: flex; gap: 4px; align-items: center; }
+  #dbgLock { position: fixed; right: 12px; top: 230px; z-index: 30; width: 260px; max-width: calc(100vw - 32px); padding: 10px 12px;
+    background: rgba(12,15,28,.94); border: 1px solid #3c4670; border-radius: 10px; font-family: 'Barlow Condensed', sans-serif; color: #dfe6ff; }
+  #dbgLock h4 { margin: 0 0 8px; font-family: Cinzel, serif; font-size: 14px; letter-spacing: .2em; color: #9fb4ff; }
+  #dbgLock h4 small { float: right; font-family: 'Barlow Condensed'; letter-spacing: 0; color: #7a84a8; }
+  #dbgLock .row { display: flex; gap: 6px; }
+  #dbgLock input { flex: 1; min-width: 0; padding: 4px 8px; border-radius: 5px; border: 1px solid #3c4670; background: #0c0f1c; color: inherit; font: inherit; font-size: 16px; }
+  #dbgLock button { padding: 3px 10px; border-radius: 5px; border: 1px solid #3c4670; background: #1c2138; font-size: 15px; color: inherit; }
+  #dbgLock button:hover { border-color: #9fb4ff; background: #283056; }
+  #dbgCodeMsg { margin-top: 6px; font-size: 14px; color: #ff8a7a; min-height: 1em; }
   #dbgInfo { margin-top: 8px; font-size: 13px; color: #aab4d8; min-height: 1em; }
 
   @media (max-width: 720px) {
@@ -461,6 +470,11 @@
     <i class="bb-mark" id="bbMark"></i><span id="bbHp"></span>
   </div></div>
   <div class="bb-sub" id="bbSub"></div>
+</div>
+<div id="dbgLock" class="hidden">
+  <h4>DÉBOGAGE <small>F2 pour fermer</small></h4>
+  <div class="row"><input id="dbgCode" type="password" maxlength="32" autocomplete="off" spellcheck="false" placeholder="Code d'accès"><button id="dbgCodeGo">Valider</button></div>
+  <div id="dbgCodeMsg"></div>
 </div>
 <div id="dbg" class="hidden">
   <h4>DÉBOGAGE <small>F2 pour fermer</small></h4>

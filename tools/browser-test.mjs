@@ -93,6 +93,8 @@ if (scenario === 'compte') {
 }
 const wpn = { tome: 'tome', staff: 'staff', shop: 'sword', gloves: 'gloves' }[scenario] ?? 'tome';
 await evalJs(`localStorage.setItem('spartiate-cfg', JSON.stringify({ game: 'dungeon', mode: 'solo', diff: '1', p1: '${scenario === 'gloves' ? 'soldier' : 'archer'}', p2: 'orc', w1: '${wpn}', arena: 'colisee' })); true`);
+// le panneau F2 demande un code : déverrouillé pour cet onglet (sauf dans le scénario qui teste ce verrou)
+if (scenario !== 'code') await evalJs(`sessionStorage.setItem('spartiate-dbg', '1'); true`);
 await send('Page.navigate', { url: GAME + '/?dungeon&debug' });
 const ok = await waitFor(`document.getElementById('loading').classList.contains('hidden') && !document.getElementById('hud').classList.contains('hidden')`);
 console.log('CHARGE', ok);
@@ -243,6 +245,28 @@ if (scenario === 'biomes') {
     await sleep(1900);
     await shot('salle-' + n);
     console.log('SALLE', n, 'titre:', titre, 'obstacles:', await evalJs(`JSON.stringify(spartiate.sim.room.obs.map((o) => o.kind))`));
+  }
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
+if (scenario === 'code') {
+  // F2 : le panneau de débogage demande un code ; un mauvais code est refusé (le bon : CODE_DBG=… dans l'environnement)
+  const f2 = async () => { await send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 }); await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'F2', key: 'F2', windowsVirtualKeyCode: 113 }); await sleep(300); };
+  const vis = (id) => evalJs(`!document.getElementById('${id}').classList.contains('hidden')`);
+  const typeCode = async (c) => { await evalJs(`(() => { const i = document.getElementById('dbgCode'); i.value = ${JSON.stringify(c)}; document.getElementById('dbgCodeGo').click(); return true; })()`); await sleep(300); };
+  await f2();
+  console.log('F2 : verrou', await vis('dbgLock'), '| panneau', await vis('dbg'));
+  await typeCode('mauvais');
+  console.log('mauvais code : verrou', await vis('dbgLock'), '| panneau', await vis('dbg'), '|', await evalJs(`document.getElementById('dbgCodeMsg').textContent`));
+  await shot('code-refuse');
+  if (process.env.CODE_DBG) {
+    await typeCode(process.env.CODE_DBG);
+    console.log('bon code : verrou', await vis('dbgLock'), '| panneau', await vis('dbg'));
+    await shot('panneau-ouvert');
+    await f2(); await f2();
+    console.log('F2 F2 (sans redemander le code) : verrou', await vis('dbgLock'), '| panneau', await vis('dbg'));
   }
   console.log('ERREURS', errors.length);
   for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);

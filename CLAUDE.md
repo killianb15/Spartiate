@@ -116,7 +116,10 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - **Salle d'armes en plein air** : `BIOME.hub` (murs des cryptes, ciel de jour) et `outsideDecor('meadow')` :
   2 rangées de dalles d'herbe seulement (≈ 400-950 triangles chacune !), puis sol vert, touffes et fleurs
   instanciées, arbres (côtés vus par la caméra), buissons, rochers, collines.
-- **Outil de débogage** (F2, hors ligne) : `#dbg` dans index.html, `setupDebug`/`dbgGoto` dans game.js,
+- **Outil de débogage** (F2, hors ligne) : protégé par un **code d'accès** demandé une fois par onglet (`#dbgLock`,
+  `dbgUnlock` ; seule son empreinte FNV `DBG_CODE` est dans le code, le code lui-même est connu de l'utilisateur :
+  ne jamais l'écrire dans le dépôt ; déverrouillage gardé dans `sessionStorage['spartiate-dbg']`, que
+  browser-test.mjs pose lui-même ; scénario `code` avec `CODE_DBG=…`). `#dbg` dans index.html, `setupDebug`/`dbgGoto` dans game.js,
   méthodes `debugGoto/Kill/Heal/God/Spawn/Tp/Boss` de DungeonSim (testées dans tests/boss.test.js). Bouton
   « Antre de Cerbère » (salle 15) ; `debugBoss(kind)` ne lance que les attaques de `moves` du boss présent.
   `dng.room = -1` force la reconstruction de la salle.
