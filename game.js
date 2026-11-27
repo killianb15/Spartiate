@@ -88,20 +88,35 @@ function readSavedGfx() {
   } catch (e) { /* stockage indisponible */ }
   return null;
 }
-function detectQuality(gl) {
-  let gpu = '';
+let gpuName = '';
+function readGpuName(gl) {
   try {
     const ext = gl?.getExtension('WEBGL_debug_renderer_info');
-    if (ext) gpu = String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '').toLowerCase();
+    if (ext) return String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) || '');
   } catch (e) { /* ignoré */ }
+  return '';
+}
+function probeGpu() {
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = 1;
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    const name = readGpuName(gl);
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    return name;
+  } catch (e) { return ''; }
+}
+function detectQuality(name) {
+  const gpu = String(name || '').toLowerCase();
   const cores = navigator.hardwareConcurrency || 4;
   const mobile = navigator.maxTouchPoints > 1 && Math.min(innerWidth, innerHeight) < 900;
   if (mobile || /swiftshader|llvmpipe|software|basic render|mali|adreno|powervr|intel.*hd graphics [2-5]\d\d/.test(gpu) || cores <= 4) return 'low';
   if (/nvidia|geforce|rtx|gtx|radeon rx|arc a|apple m[2-9]|apple m1 (pro|max|ultra)/.test(gpu) && cores >= 8) return 'high';
   return 'med';
 }
+gpuName = probeGpu();
 let savedGfx = readSavedGfx();
-let gfxId = savedGfx || 'med';
+let gfxId = savedGfx || detectQuality(gpuName);
 let gfx = GFX[gfxId];
 
 // En ligne : les deux navigateurs font tourner la même simulation (sim.js) et s'échangent
@@ -235,7 +250,10 @@ const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc', archer: '
 //  Rendu
 // =====================================================================
 const renderer = new THREE.WebGLRenderer({ antialias: gfxId !== 'low', powerPreference: 'high-performance' });
-if (!savedGfx) { gfxId = detectQuality(renderer.getContext()); gfx = GFX[gfxId]; }
+if (!gpuName) {
+  gpuName = readGpuName(renderer.getContext());
+  if (!savedGfx) { gfxId = detectQuality(gpuName); gfx = GFX[gfxId]; }
+}
 renderer.setPixelRatio(Math.min(devicePixelRatio, gfx.maxPR));
 renderer.setSize(innerWidth, innerHeight, false);
 renderer.shadowMap.enabled = gfx.shadows;
@@ -255,9 +273,10 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight, false);
+  dirtyRender = true;
 });
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { last = performance.now(); resSkip = 12; }
+  if (!document.hidden) { last = performance.now(); resSkip = 12; dirtyRender = true; }
 });
 
 // =====================================================================
@@ -2938,15 +2957,35 @@ function updateCamera(dt) {
 // =====================================================================
 //  Boucle
 // =====================================================================
-let last = performance.now(), clockT = 0, acc = 0;
+let last = performance.now(), clockT = 0, acc = 0, renderAcc = 0, dirtyRender = true;
 function frame(now) {
   requestAnimationFrame(frame);
+  if (document.hidden) { last = now; return; }
   const raw = (now - last) / 1000;
   const rdt = Math.min(0.05, raw);
   last = now;
   if (game.phase === 'loading') return;
+  // en pause hors ligne : inutile de recalculer la 3D 60 à 144 fois par seconde pour une image figée
+  const frozen = game.paused && !net.live;
+  if (frozen) {
+    if (dirtyRender) { dirtyRender = false; renderer.render(scene, camera); }
+    return;
+  }
+  // sur écran > 60 Hz en qualité Bas/Moyen : plafond à 60 FPS (la sim tourne à 60 Hz) pour soulager CPU/GPU
+  if (gfxId !== 'high') {
+    renderAcc += rdt;
+    if (renderAcc < 1 / 62 && !dirtyRender) return;
+    const dt = Math.min(0.05, renderAcc);
+    renderAcc = 0;
+    dirtyRender = false;
+    adaptResolution(raw);
+    step(dt);
+    renderer.render(scene, camera);
+    return;
+  }
+  dirtyRender = false;
   adaptResolution(raw);
-  if (!game.paused || net.live) step(rdt);
+  step(rdt);
   renderer.render(scene, camera);
 }
 
@@ -5000,6 +5039,7 @@ function setQuality(id, rebuild = true) {
   renderer.shadowMap.enabled = gfx.shadows;
   renderer.shadowMap.type = gfx.shadowType;
   renderer.shadowMap.needsUpdate = true;
+  dirtyRender = true;
   resetResolution();
   applyQualityMaterials();
   scene.traverse((o) => {
@@ -5962,7 +6002,9 @@ function dbgRefresh() {
   if (dbg.msgT > 0) return;
   if (!s) { $('dbgInfo').textContent = net.live ? 'Indisponible en ligne.' : 'Lance une partie de donjon.'; return; }
   const e = s.f.find((o) => o.boss && o.team === 1 && o.state !== 'dead');
-  $('dbgInfo').textContent = `salle ${s.g.room} · ${s.g.phase} · ${s.foesLeft} ennemi(s)` + (e ? ` · boss ${Math.ceil(e.hp)}/${e.maxHp}${e.sp ? ' · ' + e.sp : ''}` : '');
+  const fps = Math.round(1000 / Math.max(1, resAvg));
+  const sw = /swiftshader|llvmpipe|software/i.test(gpuName) ? ' · LOGICIEL' : '';
+  $('dbgInfo').textContent = `salle ${s.g.room} · ${s.g.phase} · ${s.foesLeft} ennemi(s)` + (e ? ` · boss ${Math.ceil(e.hp)}/${e.maxHp}${e.sp ? ' · ' + e.sp : ''}` : '') + ` · ~${fps} FPS${sw}`;
 }
 setInterval(() => { if (dbg.msgT > 0) dbg.msgT -= 0.25; dbgRefresh(); }, 250);
 
