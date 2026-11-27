@@ -48,6 +48,8 @@ export const WEAPONS = {
   // les trois gueules de Cerbère : un enchaînement de 3 morsures (une par tête), de loin (il est grand) ;
   // windup : il se ramasse avant chaque morsure (fenêtre d'esquive), puis se lance (lunge : vitesse du bond)
   fangs: { name: 'Trois gueules', desc: '', reach: 2.0, dmg: 13, combo: 3, run: 1.05, guard: 1, hidden: true, windup: 0.5, lunge: 6 },
+  // grande faux du Souverain d'Os (boss final) : large portée, préparation lisible avant chaque coup
+  scythe: { name: "Faux d'os", desc: '', reach: 2.25, dmg: 14, combo: 2, run: 1.0, guard: 1, hidden: true, windup: 0.42, lunge: 4.5 },
   bow: { name: 'Arc', desc: 'Tire des flèches ; on court plus vite, mais on bloque mal', reach: 1.45, dmg: SHOT.bash, combo: 3, run: SHOT.run, guard: 1.6, bow: true },
 };
 export const wpnOf = (f) => WEAPONS[f.wpn] ?? WEAPONS.sword;
@@ -402,7 +404,7 @@ export class Sim {
       if (!gone && this.arrowWall(a)) {
         gone = true; boom = fb;
         if (!fb) {
-          this.emit('emit', a.x, a.y, a.z, 5, { color: [0xc8a070, 0x8a5a2b], speed: 1.2, up: 1.2, size: 0.05, life: 0.4, grav: 6 });
+          this.emit('emit', a.x, a.y, a.z, 5, { color: a.k === 3 ? [0x6effb8, 0xd8cdb0] : [0xc8a070, 0x8a5a2b], speed: 1.2, up: 1.2, size: 0.05, life: 0.4, grav: 6 });
           this.emit('sfx', 'thunk');
         }
       }

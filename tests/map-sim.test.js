@@ -9,7 +9,7 @@ import { NEUTRAL, DT } from '../sim.js';
 
 const run = (s, n, i0 = () => NEUTRAL, i1 = () => NEUTRAL) => { for (let k = 0; k < n; k++) s.step(i0(k), i1(k)); };
 
-test('parcours complet d’un acte avec la carte : salle d’armes → carte → 6 étages → boss → acte 2', () => {
+test('parcours complet d’un acte avec la carte : salle d’armes → carte → 4 étages → boss → acte 2', () => {
   const s = new DungeonSim(42, ['soldier'], ['sword'], null, { useMap: true });
   s.startHub();
   assert.equal(s.g.phase, 'hub');
@@ -21,9 +21,9 @@ test('parcours complet d’un acte avec la carte : salle d’armes → carte →
   assert.equal(s.g.phase, 'map');
   assert.ok(availableNextIds(s.map).length >= 2);
 
-  // Remonte les 6 étages + le boss (7 salles)
+  // Remonte les 4 étages + le boss (5 salles)
   const visitedTypes = [];
-  for (let stepIdx = 0; stepIdx < 7; stepIdx++) {
+  for (let stepIdx = 0; stepIdx < 5; stepIdx++) {
     assert.equal(s.g.phase, 'map', `attend phase map à l'étape ${stepIdx}`);
     s.step(mapInput(0));
     visitedTypes.push(s.g.roomType);
@@ -44,13 +44,13 @@ test('parcours complet d’un acte avec la carte : salle d’armes → carte →
   }
 
   assert.equal(visitedTypes[0], 'combat');
-  assert.equal(visitedTypes[6], 'boss');
+  assert.equal(visitedTypes[4], 'boss');
   // Après le boss de l'acte 1, on est passé à l'acte 2 avec une nouvelle carte
   assert.equal(s.g.phase, 'map');
   assert.equal(s.g.act, 2);
   assert.equal(s.map.act, 2);
   assert.equal(s.map.currentId, null);
-  assert.equal(s.g.room, 7);
+  assert.equal(s.g.room, 5);
 });
 
 test('reproductibilité complète : même seed + mêmes choix de carte => même suite de salles et même état', () => {

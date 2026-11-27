@@ -27,12 +27,28 @@ const LANE = 0.55;                 // demi-largeur du passage de la porte
 const LOCK_R = 5.5;                // un héros se tourne vers l'ennemi le plus proche à cette distance
 const STEP = 0.35;                 // hauteur qu'on franchit sans sauter
 const BOSS_EVERY = 5;
+export const FINAL_ACT = 4;        // victoire officielle au bout de 4 actes (20 salles)
+export const FINAL_ROOM = 20;
 
-// Biomes : un par tranche de BOSS_EVERY salles (le boss ferme la tranche), puis on recommence.
-// Purement décoratif pour l'instant (game.js), mais déduit de l'état : identique chez les deux joueurs.
-export const BIOMES = ['crypt', 'mine', 'ruins', 'forge'];
-export const biomeOf = (n) => (n <= 0 ? 'crypt' : BIOMES[Math.floor((n - 1) / BOSS_EVERY) % BIOMES.length]);
-export const biomeOfAct = (act) => BIOMES[(Math.max(1, act) - 1) % BIOMES.length];
+// Biomes : 6 décors au total (cryptes, mines, ruines, forge, nécropole d'émeraude, citadelle gelée).
+// L'ordre des biomes est mélangé de façon déterministe à partir de runSeed (sans doublon avant d'avoir fait
+// le tour des 6) ; sans runSeed (= 0), l'ordre historique reste inchangé pour les tests.
+export const BIOMES = ['crypt', 'mine', 'ruins', 'forge', 'necropole', 'citadelle'];
+export function biomeOrder(runSeed = 0) {
+  const arr = BIOMES.slice();
+  if (!runSeed) return arr;
+  const r = new Rng((((runSeed >>> 0) ^ 0x51a7b3d1) >>> 0) || 1);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = (r.next() * (i + 1)) | 0;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+export const biomeOfAct = (act, runSeed = 0) => {
+  const order = biomeOrder(runSeed);
+  return order[(Math.max(1, act) - 1) % order.length];
+};
+export const biomeOf = (n, runSeed = 0) => (n <= 0 ? 'crypt' : biomeOfAct(Math.floor((n - 1) / BOSS_EVERY) + 1, runSeed));
 
 // Pièges à pics : cycle de TRAP.period s, pics sortis entre up0 et up1 (décalé par piège)
 export const TRAP = { period: 2.6, up0: 1.7, up1: 2.3, warn: 0.45, dmg: 12 };
@@ -57,21 +73,25 @@ export const FOES = {
   // Cerbère : chien géant à trois têtes, gardien des enfers, dans son antre (salle dédiée, room.lair)
   // brute : ni parade ni blocage (son IA fonce et mord ; ses morsures se préparent : voir l'arme fangs)
   cerbere: { kind: 'cerbere', name: 'Cerbère', hp: 230, pow: 0.7, lv: 2, size: 2.8, boss: true, wpn: 'fangs', moves: ['fire', 'slam', 'charge'], adds: 'hound', brute: true },
+  // petit squelette rapide invoqué par le Souverain d'Os
+  skel: { kind: 'squelette', name: 'Squelette', hp: 28, pow: 0.5, lv: 1, size: 0.92, wpn: 'sword' },
+  // Souverain d'Os : boss final (salle 20 / Acte 4), dans son Sanctuaire mouvant (room.lair = 'squelette')
+  // moves : shift (tremblement + mutation d'arène), reap (fauchage tournoyant), bones (salve spectrale)
+  squelette: { kind: 'squelette', name: "Souverain d'Os", hp: 280, pow: 0.72, lv: 2, size: 2.05, boss: true, wpn: 'scythe', moves: ['shift', 'reap', 'bones'], adds: 'skel' },
 };
-// boss de la salle n (une salle sur BOSS_EVERY) : chef orc, colosse, Cerbère, puis on recommence
-const BOSS_ORDER = ['boss', 'colosse', 'cerbere'];
+// boss de la salle n (une salle sur BOSS_EVERY) : chef orc (5), colosse (10), Cerbère (15), Souverain d'Os (20), puis on recommence en Infini
+const BOSS_ORDER = ['boss', 'colosse', 'cerbere', 'squelette'];
 export const bossOf = (n) => BOSS_ORDER[(Math.max(1, Math.floor(n / BOSS_EVERY)) - 1) % BOSS_ORDER.length];
 
-// Attaques spéciales du colosse (state 'special', f.sp = 'slam' | 'charge' | 'roar') :
-//  - slam : il s'accroupit (wind), bondit et retombe sur la position visée (spX, spZ) : onde de choc de
-//    rayon R (Rrage une fois enragé) ; on l'évite en sautant, en roulant ou en sortant de la zone ; bloquer
-//    coûte de la garde ; il reste ensuite planté un instant (rest) ;
-//  - charge : il gratte le sol (wind) puis fonce tout droit (dur) ; s'il heurte un mur ou un obstacle, il
-//    reste sonné (stun) : c'est le moment de frapper ;
+// Attaques spéciales des boss (state 'special', f.sp = 'slam' | 'charge' | 'roar' | 'fire' | 'shift' | 'reap' | 'bones') :
+//  - slam : il s'accroupit (wind), bondit et retombe sur la position visée (spX, spZ) : onde de choc ;
+//  - charge : il gratte le sol (wind) puis fonce tout droit (dur) ; s'il heurte un mur ou un obstacle, sonné ;
 //  - roar : à la moitié de ses PV (rage), il rugit, repousse tout le monde et appelle des renforts ;
-//  - fire (Cerbère) : les trois têtes se dressent (wind) puis crachent le feu dans un cône devant lui
-//    (dur) en pivotant lentement vers sa cible ; brûlure toutes les tick s. On l'évite en passant
-//    derrière ou sur le côté, en roulant ; bloquer face à lui coûte de la garde.
+//  - fire (Cerbère) : souffle de feu en cône devant lui ;
+//  - shift (Souverain d'Os) : fait trembler l'arène (wind) avec télégraphes au sol, puis change la disposition
+//    entière des piliers, estrades et pièges (ARENA_LAYOUTS) ;
+//  - reap (Souverain d'Os) : double fauchage tournoyant à 360° autour de lui ;
+//  - bones (Souverain d'Os) : éventail de 3 (ou 5 en rage) projectiles spectraux renvoyables à la parade.
 // Pendant une attaque spéciale, il encaisse les coups sans broncher (pas d'interruption).
 export const BOSS = {
   cd: 4.2, cdRage: 2.8, first: 2.5, rage: 0.5, speedRage: 1.25,
@@ -79,7 +99,54 @@ export const BOSS = {
   charge: { wind: 0.75, windRage: 0.5, dur: 0.9, speed: 10.5, dmg: 18, knock: 7, guard: 40, hitR: 0.6, stun: 1.7 },
   roar: { dur: 1.4, at: 0.45, R: 3.6, knock: 7.5 },
   fire: { wind: 0.75, windRage: 0.5, dur: 1.6, R: 4.8, half: 0.62, turn: 1.0, turnRage: 1.5, tick: 0.2, dmg: 6, guard: 9, knock: 1.2 },
+  shift: { wind: 1.75, windRage: 1.45, recover: 0.55, pillarR: 1.15, dmg: 16, knock: 6.5 },
+  reap: { wind: 0.65, windRage: 0.48, dur: 0.85, hits: [0.22, 0.62], R: 3.3, dmg: 17, knock: 5.5, guard: 34 },
+  bones: { wind: 0.55, windRage: 0.4, count: 3, countRage: 5, spread: 0.28, speed: 9.5, dmg: 13, life: 2.0, rest: 0.4 },
 };
+
+// Les 4 configurations d'arène du Sanctuaire mouvant (Souverain d'Os, salle 20)
+const mkObs = (pts) => pts.map(([i, j]) => ({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' }));
+const mkTraps = (pts) => pts.map(([i, j]) => ({ x: i * TILE, z: j * TILE }));
+export const ARENA_LAYOUTS = [
+  {
+    id: 'nef', name: 'La Nef des Os',
+    obs: [[-2, -2], [2, -2], [-2, 2], [2, 2]],
+    surf: [],
+    traps: [],
+  },
+  {
+    id: 'labyrinthe', name: "Le Labyrinthe d'Os",
+    obs: [[-2, -1], [0, -2], [2, -1], [-2, 1], [0, 2], [2, 1]],
+    surf: [],
+    traps: [[0, 0], [-1, -1], [1, 1]],
+  },
+  {
+    id: 'estrades', name: 'Les Estrades du Jugement',
+    obs: [[-3, -3], [3, 3]],
+    surf: [
+      { x0: -5.25, x1: -2.25, z0: -2.25, z1: 2.25, h: PLAT_H, ramp: '' },
+      { x0: -2.25, x1: -0.75, z0: -2.25, z1: 2.25, h: PLAT_H, ramp: 'x', from: -0.75, to: -2.25 },
+      { x0: 2.25, x1: 5.25, z0: -2.25, z1: 2.25, h: PLAT_H, ramp: '' },
+      { x0: 0.75, x1: 2.25, z0: -2.25, z1: 2.25, h: PLAT_H, ramp: 'x', from: 0.75, to: 2.25 },
+    ],
+    traps: [[0, -2], [0, -1], [0, 1], [0, 2]],
+  },
+  {
+    id: 'cercle', name: 'Le Cercle Maudit',
+    obs: [[-1.5, -1.5], [1.5, -1.5], [-1.5, 1.5], [1.5, 1.5]],
+    surf: [],
+    traps: [[-3, -3], [0, -3], [3, -3], [3, 0], [3, 3], [0, 3], [-3, 3], [-3, 0]],
+  },
+];
+export function arenaLayoutData(idx) {
+  const L = ARENA_LAYOUTS[((idx | 0) % ARENA_LAYOUTS.length + ARENA_LAYOUTS.length) % ARENA_LAYOUTS.length];
+  return {
+    name: L.name,
+    obs: mkObs(L.obs),
+    surf: L.surf.map((s) => ({ ...s })),
+    traps: mkTraps(L.traps),
+  };
+}
 
 // Adaptation au nombre de joueurs (à deux) : un peu plus d'ennemis et de PV sans multiplier les dégâts
 // par deux, pour que le joueur au corps à corps reste jouable face à l'aggro (notamment avec un allié à distance).
@@ -217,11 +284,13 @@ export class DungeonSim extends Sim {
     this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i], spells?.[i] ?? ''));
     this.inp = this.f.map(() => newInput());
     this.g = { phase: 'menu', np: kinds.length, room: 0, act: 1, roomType: 'hub', kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
-      exitOpen: false, flagEnd: false,
+      exitOpen: false, flagEnd: false, victory: false, endless: false,
       // rn : numéro de la salle construite (change aussi pour une salle au trésor, qui garde g.room) ;
       // vault : on est dans une salle au trésor ; vaultNext : la prochaine porte y mène ;
       // pkN : numéro du prochain objet ramassable ; seen : objets déjà sortis (pas de doublon dans une partie)
+      // arenaLayout/Next/Quake/Ver : état de l'arène mouvante du Souverain d'Os (salle 20)
       rn: 0, vault: false, vaultNext: false, pkN: 0, seen: '',
+      arenaLayout: 0, arenaNext: -1, arenaQuake: 0, arenaVer: 0,
       // carte : lootKind = butin de la salle une fois nettoyée ('combat' | 'elite') ; votes et événements '?'
       lootKind: 'combat', mapVote0: '', mapVote1: '', eventId: '', evPick0: -1, evPick1: -1, eventLog: '' };
     // objets à ramasser : { n, t: 'item' | 'heart' | 'minor', v : identifiant, x, z, grp, q : qualité, arm }
@@ -240,12 +309,13 @@ export class DungeonSim extends Sim {
   // chiens vivants invoqués par le héros h
   dogsOf(h) { let n = 0; for (const e of this.f) if (e.owner === h && e.state !== 'dead') n++; return n; }
 
-  start() { this.g.room = 0; this.g.kills = 0; this.g.seen = ''; for (const p of this.heroes) p.kills = 0; this.newRoom(); }
+  start() { this.g.room = 0; this.g.kills = 0; this.g.seen = ''; this.g.victory = false; this.g.endless = false; for (const p of this.heroes) p.kills = 0; this.newRoom(); }
 
   // ---------------- salle d'armes ----------------
   startHub() {
     const g = this.g;
     g.room = 0; g.kills = 0; g.seen = ''; g.rn++; g.vault = false; g.vaultNext = false;
+    g.victory = false; g.endless = false; g.arenaLayout = 0; g.arenaNext = -1; g.arenaQuake = 0; g.arenaVer = 0;
     g.act = 1; g.roomType = 'hub'; g.lootKind = 'combat';
     g.mapVote0 = g.mapVote1 = ''; g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
     this.map = this.useMap ? generateMap(this.runSeed, 1) : null;
@@ -433,15 +503,16 @@ export class DungeonSim extends Sim {
     g.roomType = roomType;
     g.lootKind = elite ? 'elite' : 'combat';
     g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
+    g.arenaLayout = 0; g.arenaNext = -1; g.arenaQuake = 0; g.arenaVer = 0;
 
     const exit = r.next() < 0.5 ? 'z' : 'x';
     const used = new Set();                       // dalles occupées « i,j »
     const key = (i, j) => i + ',' + j;
 
     // estrades avec un escalier tourné vers le centre (à partir de la 3e salle, hors salles calmes / antre)
-    const surf = [];
+    let surf = [];
     const q = r.next();
-    const lair = bossId === 'cerbere';            // antre de Cerbère : salle dédiée, arène dégagée
+    const lair = bossId === 'cerbere' ? 'cerbere' : bossId === 'squelette' ? 'squelette' : '';
     const calm = treasure || isEvent;
     const nPlat = n < 3 || lair || calm ? 0 : boss ? 2 : q < 0.4 ? 1 : q < 0.6 ? 2 : 0;
     const quads = [[1, 1], [-1, 1], [1, -1], [-1, -1]];
@@ -476,22 +547,27 @@ export class DungeonSim extends Sim {
       }
       return null;
     };
-    const obs = [];
+    let obs = [];
     const nObs = lair || calm ? 0 : boss ? 2 : (r.next() * 4) | 0;
     const kinds = ['column', 'column', 'barrel', 'rocks'];
-    if (lair || calm) for (const [i, j] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) obs.push({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' });
+    if (lair === 'cerbere' || calm) for (const [i, j] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) obs.push({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' });
     for (let k = 0; k < nObs; k++) {
       const t = freeTile();
       if (!t) break;
       const kind = boss ? 'column' : kinds[(r.next() * kinds.length) | 0];
       obs.push({ x: t[0], z: t[1], r: OBS_R[kind], kind });
     }
-    const traps = [];
+    let traps = [];
     if (n >= 2 && !lair && !calm && r.next() < 0.45) {
       const nt = 2 + ((r.next() * 3) | 0);
       for (let k = 0; k < nt; k++) { const t = freeTile(); if (t) traps.push({ x: t[0], z: t[1] }); }
     }
-    this.room = { exit, obs, surf, traps, boss, bossId, lair: lair ? 'cerbere' : '', roomType, act };
+    if (lair === 'squelette') {
+      const L0 = arenaLayoutData(0);
+      obs = L0.obs; surf = L0.surf; traps = L0.traps;
+    }
+    const biome = lair === 'cerbere' ? 'lair' : lair === 'squelette' ? 'ossuary' : biomeOfAct(act, this.useMap ? this.runSeed : 0);
+    this.room = { exit, obs, surf, traps, boss, bossId, lair, biome, roomType, act };
 
     // les héros entrent par le mur opposé à la sortie (les héros tombés se relèvent)
     const ent = ROOM_R - 0.7;
@@ -646,7 +722,7 @@ export class DungeonSim extends Sim {
     const e = Object.assign(newFighter(idx), { x, z, yaw, visTarget: yaw, kind: T.kind, wpn: T.wpn ?? defaultWeapon(T.kind), foe: id, size: T.size,
       boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)) * coop(np, T.boss ? 'bossPow' : 'pow'), armor: 0, leech: 0, staMul: 1, trapT: 0, team: 1, owner: -1, ...STATUS0 });
     e.arch = !!wpnOf(e).bow;
-    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first * coop(np, 'bossCd'), rage: 0, spTick: 0 });
+    if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first * coop(np, 'bossCd'), rage: 0, spTick: 0, spStage: 0 });
     if (T.brute) e.brute = 1;
     e.y = this.groundY(e);
     return e;
@@ -956,8 +1032,16 @@ export class DungeonSim extends Sim {
       if (p.revT >= REVIVE.time) this.getUp(p, 'RELEVÉ !');
     }
   }
-  // le colosse (et Cerbère) enrage à la moitié de ses PV
-  enrage(e) { if (e.sp !== undefined && !e.rage && e.state !== 'dead' && e.hp <= e.maxHp * BOSS.rage) this.startSpecial(e, 'roar'); }
+  // le colosse, Cerbère et le Souverain d'Os enragent à la moitié de leurs PV
+  enrage(e) {
+    if (e.sp === undefined || e.state === 'dead') return;
+    if (!e.rage && e.hp <= e.maxHp * BOSS.rage) { this.startSpecial(e, 'roar'); return; }
+    // Souverain d'Os : seuils de mutation d'arène à 75 % et 25 % PV (hors attaque en cours)
+    if (e.foe === 'squelette' && !e.sp) {
+      if (!(e.spStage & 1) && e.hp <= e.maxHp * 0.75) { e.spStage |= 1; this.startSpecial(e, 'shift', 1); }
+      else if (!(e.spStage & 4) && e.hp <= e.maxHp * 0.25) { e.spStage |= 4; this.startSpecial(e, 'shift', 2); }
+    }
+  }
   rebirth(p) {
     p.phoenix = 0;
     p.hp = Math.round(p.maxHp * PHOENIX);
@@ -998,6 +1082,15 @@ export class DungeonSim extends Sim {
     const o = this.target(e.idx);
     if (!o) return;
     const d = hypot(o.x - e.x, o.z - e.z);
+    if (FOES[e.foe].moves.includes('shift')) {
+      // Souverain d'Os : seuils de PV prioritaires, sinon fauchage de près, éventail d'os de loin, ou mutation d'arène
+      if (!(e.spStage & 1) && e.hp <= e.maxHp * 0.75) { e.spStage |= 1; this.startSpecial(e, 'shift', 1); return; }
+      if (!(e.spStage & 4) && e.hp <= e.maxHp * 0.25) { e.spStage |= 4; this.startSpecial(e, 'shift', 2); return; }
+      const u = this.rng.next();
+      if (u < (e.rage ? 0.28 : 0.2)) { this.startSpecial(e, 'shift'); return; }
+      this.startSpecial(e, d < 3.4 && u < 0.75 ? 'reap' : 'bones');
+      return;
+    }
     if (FOES[e.foe].moves.includes('fire')) {
       // Cerbère : loin, il charge ; à portée de flammes, il crache le feu ; collé, il bondit une fois sur deux
       this.startSpecial(e, d > BOSS.fire.R + 0.4 ? 'charge' : d < 2.4 && this.rng.next() < 0.5 ? 'slam' : 'fire');
@@ -1006,7 +1099,7 @@ export class DungeonSim extends Sim {
     // loin : charge ; près : saut écrasant ; entre les deux : au hasard (rng de la simulation)
     this.startSpecial(e, d > 4.2 ? 'charge' : d < 2.4 ? 'slam' : this.rng.next() < 0.5 ? 'charge' : 'slam');
   }
-  startSpecial(e, kind) {
+  startSpecial(e, kind, nextLayout = -1) {
     const o = this.target(e.idx), lim = ROOM_R - 1;
     this.setState(e, 'special');
     Object.assign(e, { sp: kind, spT: 0, spA: 0, spHit: 0, vx: 0, vz: 0, combo: 0, airAtk: false });
@@ -1022,6 +1115,29 @@ export class DungeonSim extends Sim {
       if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
       e.spTick = 0;
       this.emit('sfx', 'growl');
+    } else if (kind === 'shift') {
+      // choisit la prochaine disposition d'arène (toujours différente de l'actuelle)
+      const g = this.g, cur = g.arenaLayout | 0;
+      let nxt = nextLayout;
+      if (nxt < 0 || nxt === cur) {
+        const pool = [0, 1, 2, 3].filter((k) => k !== cur);
+        nxt = pool[(this.rng.next() * pool.length) | 0];
+      }
+      g.arenaNext = nxt;
+      g.arenaQuake = e.rage ? BOSS.shift.windRage : BOSS.shift.wind;
+      e.spTick = 0;
+      this.play(e, 'emote-yes', { ts: 0.7, fade: 0.08, loop: false });
+      this.emit('sfx', 'roar');
+      this.emit('shake', 0.25);
+      this.emit('announce', "L'ARÈNE TREMBLE !", 'ko', 1.4);
+    } else if (kind === 'reap') {
+      if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+      this.play(e, 'crouch', { fade: 0.08 });
+      this.emit('sfx', 'heavy');
+    } else if (kind === 'bones') {
+      if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+      this.play(e, 'holding-right-shoot', { ts: 0.8, fade: 0.08, loop: false });
+      this.emit('sfx', 'spell');
     } else {
       e.rage = 1;
       this.play(e, 'emote-yes', { ts: 0.8, fade: 0.08, loop: false });
@@ -1030,9 +1146,88 @@ export class DungeonSim extends Sim {
     }
   }
   endSpecial(e) {
+    if (e.sp === 'shift') { this.g.arenaNext = -1; this.g.arenaQuake = 0; }
     e.sp = ''; e.vx = e.vz = 0;
     e.spCd = (e.rage ? BOSS.cdRage : BOSS.cd) * (0.8 + 0.4 * this.rng.next()) * coop(this.g.np, 'bossCd');
     if (e.state === 'special') this.toIdle(e);
+  }
+  // Applique la nouvelle configuration d'arène du Sanctuaire mouvant (100 % déterministe)
+  applyArenaLayout(idx, boss = null) {
+    const g = this.g, L = arenaLayoutData(idx);
+    this.room = { ...this.room, obs: L.obs, surf: L.surf, traps: L.traps };
+    g.arenaLayout = idx;
+    g.arenaNext = -1;
+    g.arenaQuake = 0;
+    g.arenaVer++;
+    const S = BOSS.shift;
+    // Piliers qui jaillissent du sol : repoussent et blessent ceux qui restent pile dessus (sauf saut/roulade)
+    for (const o of L.obs) {
+      this.emit('ring', o.x, 0.08, o.z, 0x6effb8, 1.5, 0.45, true);
+      this.emit('emit', o.x, 0.2, o.z, 14, { color: [0xd8cdb0, 0x6effb8, 0x8a8090], speed: 3.2, up: 4.0, size: 0.1, life: 0.7, grav: 7 });
+      if (!boss) continue;
+      for (const d of this.f) {
+        if (d.state === 'dead' || d.team === boss.team) continue;
+        const dx = d.x - o.x, dz = d.z - o.z, dist = hypot(dx, dz);
+        if (dist > S.pillarR) continue;
+        if (d.y - this.groundY(d) > 0.3 || (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36)) continue;
+        const nx = dist > 0.05 ? dx / dist : 1, nz = dist > 0.05 ? dz / dist : 0;
+        this.damage(boss, d, S.dmg, 0, 0.4, d.x, d.y + 0.8, d.z);
+        if (d.state !== 'dead') { d.vx = nx * S.knock * knockOf(d); d.vz = nz * S.knock * knockOf(d); }
+      }
+    }
+    // Recale tous les combattants hors des nouveaux obstacles et à hauteur des nouvelles estrades
+    for (const f of this.f) {
+      if (f.state === 'dead') continue;
+      this.bound(f);
+      const gy = this.groundY(f);
+      if (f.y < gy) { f.y = gy; f.vy = 0; }
+    }
+    this.emit('sfx', 'quake');
+    this.emit('shake', 0.6);
+    this.emit('announce', L.name.toUpperCase(), '', 1.6);
+  }
+  // Fauchage circulaire (un coup du double tourbillon du Souverain d'Os)
+  reapHit(e) {
+    const R = BOSS.reap;
+    this.emit('ring', e.x, e.y + 0.9, e.z, 0x6effb8, R.R, 0.35, true);
+    this.emit('emit', e.x, e.y + 0.9, e.z, 22, { color: [0x6effb8, 0xd8cdb0, 0xffffff], speed: 4.5, up: 1.5, size: 0.09, life: 0.5, grav: 2 });
+    this.emit('sfx', 'swing');
+    for (const d of this.f) {
+      if (d.state === 'dead' || d.team === e.team) continue;
+      const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
+      if (dist > R.R + 0.3 * ((d.size ?? 1) - 1) || Math.abs(d.y - e.y) > 1.5) continue;
+      if (d.state === 'roll' && d.stateT > 0.03 && d.stateT < 0.36) {
+        this.emit('pop', 'ESQUIVE', d.x, d.y + 1.8, d.z, 'miss'); this.emit('sfx', 'dodge'); continue;
+      }
+      const nx = dist > 0.05 ? dx / dist : sin(e.yaw), nz = dist > 0.05 ? dz / dist : cos(e.yaw);
+      if (d.state === 'block') {
+        d.guard -= R.guard * guardOf(d); d.guardT = 0;
+        d.vx = nx * 3.5 * knockOf(d); d.vz = nz * 3.5 * knockOf(d);
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('sfx', 'clang');
+        if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
+        continue;
+      }
+      this.damage(e, d, R.dmg, 0, 0.4, d.x, d.y + 1, d.z);
+      if (d.state !== 'dead') { d.vx = nx * R.knock * knockOf(d); d.vz = nz * R.knock * knockOf(d); }
+    }
+  }
+  // Salve d'os spectraux en éventail (projectiles k = 3, parables et renvoyables !)
+  fireBones(e) {
+    const B = BOSS.bones, n = e.rage ? B.countRage : B.count;
+    const o = this.target(e.idx);
+    if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+    for (let k = 0; k < n; k++) {
+      const a = e.yaw + (k - (n - 1) / 2) * B.spread;
+      const dx = sin(a), dz = cos(a);
+      this.pr.push({
+        x: e.x + dx * 0.9, y: e.y + 1.05, z: e.z + dz * 0.9,
+        vx: dx * B.speed, vy: 0, vz: dz * B.speed,
+        o: e.idx, t: 0, k: 3, dmg: B.dmg, life: B.life,
+      });
+    }
+    this.emit('sfx', 'spell');
+    this.emit('ring', e.x, e.y + 1.0, e.z, 0x6effb8, 1.8, 0.35);
   }
   // une image d'attaque spéciale (avant le déplacement fait par updateFighter)
   special(e, canAct) {
@@ -1098,12 +1293,49 @@ export class DungeonSim extends Sim {
         if (e.spTick <= 0) { e.spTick += F.tick; this.flames(e); }
         if (e.spT >= F.dur) this.endSpecial(e);
       }
+    } else if (e.sp === 'shift') {
+      const S = BOSS.shift, wind = rage ? S.windRage : S.wind;
+      if (e.spA === 0) {
+        this.g.arenaQuake = Math.max(0, wind - e.spT);
+        e.spTick -= dt;
+        if (e.spTick <= 0) {
+          e.spTick += 0.22;
+          this.emit('shake', 0.16);
+          const nextL = ARENA_LAYOUTS[this.g.arenaNext];
+          if (nextL) for (const [i, j] of nextL.obs) this.emit('emit', i * TILE, 0.1, j * TILE, 3, { color: [0x6effb8, 0xd8cdb0], speed: 0.8, up: 2.2, size: 0.07, life: 0.5, grav: 2 });
+        }
+        if (e.spT >= wind) {
+          e.spA = 1; e.spT = 0;
+          this.applyArenaLayout(this.g.arenaNext >= 0 ? this.g.arenaNext : 1, e);
+          this.play(e, 'crouch', { fade: 0.05 });
+        }
+      } else if (e.spT >= S.recover) this.endSpecial(e);
+    } else if (e.sp === 'reap') {
+      const R = BOSS.reap, wind = rage ? R.windRage : R.wind;
+      if (e.spA === 0) {
+        const o = this.target(e.idx);
+        if (o && e.spT < wind - 0.1) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+        if (e.spT >= wind) { e.spA = 1; e.spT = 0; e.spHit = 0; this.play(e, 'attack-melee-right', { ts: 1.4, fade: 0.04, restart: true }); }
+      } else {
+        e.yaw += dt * 13; e.visTarget = e.yaw;
+        for (let k = 0; k < R.hits.length; k++) {
+          if (e.spT >= R.hits[k] && !(e.spHit & (1 << k))) { e.spHit |= 1 << k; this.reapHit(e); }
+        }
+        if (e.spT >= R.dur) this.endSpecial(e);
+      }
+    } else if (e.sp === 'bones') {
+      const B = BOSS.bones, wind = rage ? B.windRage : B.wind;
+      if (e.spA === 0) {
+        const o = this.target(e.idx);
+        if (o) { e.yaw = atan2(o.x - e.x, o.z - e.z); e.visTarget = e.yaw; }
+        if (e.spT >= wind) { e.spA = 1; e.spT = 0; this.fireBones(e); }
+      } else if (e.spT >= B.rest) this.endSpecial(e);
     } else if (e.sp === 'roar') {
       const R = BOSS.roar;
       if (e.spA === 0 && e.spT >= R.at) {
         e.spA = 1;
-        this.emit('ring', e.x, e.y + 0.1, e.z, 0xff5a20, R.R * 1.2, 0.6, true);
-        this.emit('ring', e.x, e.y + 1.2, e.z, 0xffb04a, R.R, 0.4);
+        this.emit('ring', e.x, e.y + 0.1, e.z, e.foe === 'squelette' ? 0x6effb8 : 0xff5a20, R.R * 1.2, 0.6, true);
+        this.emit('ring', e.x, e.y + 1.2, e.z, e.foe === 'squelette' ? 0xd8cdb0 : 0xffb04a, R.R, 0.4);
         this.emit('shake', 0.35);
         for (const d of this.f) {
           if (d.state === 'dead' || d.team === e.team) continue;
@@ -1119,7 +1351,10 @@ export class DungeonSim extends Sim {
           this.addFoe(add, e.x + sin(a) * 2.6, e.z + cos(a) * 2.6);
         }
       }
-      if (e.spT >= R.dur) this.endSpecial(e);
+      if (e.spT >= R.dur) {
+        if (e.foe === 'squelette' && !(e.spStage & 2)) { e.spStage |= 2; this.startSpecial(e, 'shift', 3); }
+        else this.endSpecial(e);
+      }
     }
   }
   // souffle de feu : brûlure de tous ceux qui sont dans le cône devant le boss (une fois par tick)
@@ -1270,11 +1505,22 @@ export class DungeonSim extends Sim {
     this.emit('sfx', 'coin');
     this.emit('emit', def.x, def.y + 1, def.z, 18, { color: [0xffd34a, 0xffe27a, 0xfff0a0], speed: 2.5, up: 4, size: 0.08, life: 0.9, grav: 9 });
     if (this.foesLeft === 0 && g.phase === 'fight') {
-      g.phase = 'clear'; g.t = 0;
-      g.exitOpen = true;
+      g.arenaNext = -1; g.arenaQuake = 0;
       for (const p of this.heroes) if (p.down) this.getUp(p, 'DEBOUT !');     // salle nettoyée : les héros tombés se relèvent
       for (const e of this.f) { e.sBurnT = 0; e.sPsn = 0; e.sPsnT = 0; e.sChill = 0; e.sConf = 0; }
       this.dropLoot();
+      const isFinalBoss = !g.endless && this.room.boss && (this.useMap ? g.act >= FINAL_ACT : g.room >= FINAL_ROOM);
+      if (isFinalBoss) {
+        g.victory = true; g.phase = 'victory'; g.t = 0; g.flagEnd = false;
+        g.exitOpen = true;
+        g.slow = 0.3; g.slowT = 1.2;
+        this.emit('announce', FOES[this.room.bossId || 'squelette'].name.toUpperCase() + ' VAINCU !', '', 2.4);
+        this.emit('sfx', 'cheer', 1);
+        this.emit('clear');
+        return;
+      }
+      g.phase = 'clear'; g.t = 0;
+      g.exitOpen = true;
       // salle au trésor ensuite ? (jamais après un boss : il laisse déjà ses objets)
       const m = g.room % BOSS_EVERY;
       g.vaultNext = !this.useMap && !this.room.boss && (m === VAULT.always || (m === VAULT.maybe && this.rng.next() < VAULT.chance));
@@ -1283,6 +1529,16 @@ export class DungeonSim extends Sim {
       this.emit('sfx', 'cheer', 0.6);
       this.emit('clear');
     }
+  }
+  // Poursuivre après la victoire de la salle 20 (mode Infini)
+  continueEndless() {
+    const g = this.g;
+    if (!g.victory || (g.phase !== 'end' && g.phase !== 'victory')) return false;
+    g.endless = true; g.victory = false; g.flagEnd = false;
+    g.phase = 'clear'; g.t = 0; g.exitOpen = true;
+    this.emit('announce', 'MODE INFINI !', '', 1.6);
+    this.emit('sfx', 'gong');
+    return true;
   }
 
   updateFighter(i, canAct) {
@@ -1583,6 +1839,9 @@ export class DungeonSim extends Sim {
         if (g.t > 0.45) { if (this.useMap) this.openMap(); else if (g.vaultNext) this.newVault(); else this.newRoom(); }
         break;
 
+      case 'victory':
+        if (g.t > 2.2 && !g.flagEnd) { g.flagEnd = true; g.phase = 'end'; this.emit('end'); }
+        break;
       case 'dead':
         if (g.t > 2.6 && !g.flagEnd) { g.flagEnd = true; g.phase = 'end'; this.emit('end'); }
         break;

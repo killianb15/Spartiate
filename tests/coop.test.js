@@ -27,18 +27,18 @@ test('à deux : plus d’ennemis (au plus COOP.cap) et plus de PV, sans inflatio
 });
 
 test('à deux : boss adaptés (plus de PV, dégâts et rythme mesurés)', () => {
-  for (const [n, id] of [[5, 'boss'], [10, 'colosse'], [15, 'cerbere']]) {
+  for (const [n, id] of [[5, 'boss'], [10, 'colosse'], [15, 'cerbere'], [20, 'squelette']]) {
     const a = room(n, 1), b = room(n, 2);
     const e1 = a.f.find((e) => e.foe === id), e2 = b.f.find((e) => e.foe === id);
     assert.ok(Math.abs(e2.maxHp / e1.maxHp - COOP.bossHp) < 0.01, `${id} PV`);
     assert.ok(Math.abs(e2.pow / e1.pow - COOP.bossPow) < 1e-9, `${id} dégâts`);
     if (e1.sp !== undefined) assert.ok(Math.abs(e2.spCd / e1.spCd - COOP.bossCd) < 1e-9, `${id} rythme`);
   }
-  // escorte du chef orc : salle 5 : 1 orc seul, 2 à deux ; salle 20 : 4 seul, 5 à deux
+  // escorte du chef orc : salle 5 : 1 orc seul, 2 à deux ; salle 25 : 4 seul, 5 à deux
   assert.equal(foes(room(5, 1)).filter((e) => e.foe === 'grunt').length, 1);
   assert.equal(foes(room(5, 2)).filter((e) => e.foe === 'grunt').length, 2);
-  assert.equal(foes(room(20, 1)).filter((e) => e.foe === 'grunt').length, 4);
-  assert.equal(foes(room(20, 2)).filter((e) => e.foe === 'grunt').length, COOP.escortCap);
+  assert.equal(foes(room(25, 1)).filter((e) => e.foe === 'grunt').length, 4);
+  assert.equal(foes(room(25, 2)).filter((e) => e.foe === 'grunt').length, COOP.escortCap);
 });
 
 test('seul : rien ne change (aucun multiplicateur)', () => {

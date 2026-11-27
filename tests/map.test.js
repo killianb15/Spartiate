@@ -24,11 +24,11 @@ test('map.js et map-config.js n’utilisent aucun Math.random (100 % déterminis
   }
 });
 
-test('invariants structurels sur 200 graines : 6 étages + Boss, 1..3 sorties, zéro croisement, zéro impasse', () => {
+test('invariants structurels sur 200 graines : 4 étages + Boss, 1..3 sorties, zéro croisement, zéro impasse', () => {
   for (let seed = 1; seed <= 200; seed++) {
     const act = ((seed - 1) % 4) + 1;
     const map = generateMap(seed, act);
-    assert.equal(map.floors, 6);
+    assert.equal(map.floors, 4);
 
     const byId = new Map(map.nodes.map((n) => [n.id, n]));
     const starts = map.nodes.filter((n) => n.floor === 0);
@@ -106,7 +106,7 @@ test('navigation, sérialisation JSON et affichage ASCII', () => {
   const map = generateMap(77, 1);
   const starts = availableNextIds(map);
   assert.ok(starts.length >= 2);
-  assert.equal(canMoveTo(map, '5-0'), false);
+  assert.equal(canMoveTo(map, '3-0'), false);
 
   // Parcours complet jusqu'au boss
   let steps = 0;
@@ -117,8 +117,8 @@ test('navigation, sérialisation JSON et affichage ASCII', () => {
     assert.ok(chosen);
     steps++;
   }
-  assert.equal(steps, map.floors + 1); // 6 étages + le boss = 7 salles
-  assert.equal(map.visited.length, 7);
+  assert.equal(steps, map.floors + 1); // 4 étages + le boss = 5 salles
+  assert.equal(map.visited.length, 5);
   assert.equal(availableNextIds(map).length, 0);
 
   // Sauvegarde / rechargement JSON fidèle et indépendant

@@ -247,6 +247,8 @@ test('biomes : un par tranche de 5 salles, le boss ferme la tranche, puis le cyc
   for (let n = 6; n <= 10; n++) assert.equal(biomeOf(n), 'mine');
   assert.equal(biomeOf(11), 'ruins');
   assert.equal(biomeOf(20), 'forge');
-  assert.equal(biomeOf(21), 'crypt');
-  assert.deepEqual(BIOMES, ['crypt', 'mine', 'ruins', 'forge']);
+  assert.equal(biomeOf(21), 'necropole');
+  assert.equal(biomeOf(26), 'citadelle');
+  assert.equal(biomeOf(31), 'crypt');
+  assert.deepEqual(BIOMES, ['crypt', 'mine', 'ruins', 'forge', 'necropole', 'citadelle']);
 });
