@@ -5,8 +5,8 @@
 // =====================================================================
 
 export const MAP_CONFIG = {
-  // 6 étages jouables (0 à 5) + 1 étage final réservé au Boss (étage 6) = 7 salles par acte
-  floors: 6,
+  // 4 étages jouables (0 à 3) + 1 étage final réservé au Boss (étage 4) = 5 salles par acte (4 actes = 20 salles)
+  floors: 4,
   cols: 4,
   paths: 5,
   minStartNodes: 2,
@@ -33,7 +33,7 @@ export const MAP_CONFIG = {
       minFloor: 2,          // jamais d'élite sur les deux premiers étages
       noConsecutive: true,  // jamais deux élites d'affilée sur un même chemin
       minPerAct: 1,
-      maxPerAct: 4,
+      maxPerAct: 3,
     },
     event: {
       id: 'event',
@@ -45,7 +45,7 @@ export const MAP_CONFIG = {
       minFloor: 1,
       noConsecutive: true,
       minPerAct: 1,
-      maxPerAct: 4,
+      maxPerAct: 3,
     },
     treasure: {
       id: 'treasure',

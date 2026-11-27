@@ -5,15 +5,18 @@
 // =====================================================================
 import { MAP_CONFIG } from './map-config.js';
 import { availableNextIds, nodeById } from './map.js';
+import { biomeOfAct, FINAL_ACT } from './dungeon.js';
 
-export const ACT_BIOMES = [
-  'Les Cryptes',
-  'Les Mines de Cristal',
-  'Les Ruines Envahies',
-  'La Forge Volcanique',
-];
+export const BIOME_NAMES = {
+  crypt: 'Les Cryptes',
+  mine: 'Les Mines de Cristal',
+  ruins: 'Les Ruines Envahies',
+  forge: 'La Forge Volcanique',
+  necropole: "La Nécropole d'Émeraude",
+  citadelle: 'La Citadelle Gelée',
+};
 
-const ACT_BOSSES = ['Chef orc', "Colosse d'airain", 'Cerbère'];
+const ACT_BOSSES = ['Chef orc', "Colosse d'airain", 'Cerbère', "Souverain d'Os"];
 
 const ROOM_REWARD_TAG = {
   combat: 'Cœur ou petit bonus',
@@ -75,7 +78,8 @@ export function renderMap(root, map, {
   onClose = null,
   previewControls = null,
 } = {}) {
-  const biome = ACT_BIOMES[(Math.max(1, map.act) - 1) % ACT_BIOMES.length];
+  const biomeId = biomeOfAct(map.act, map.runSeed);
+  const biome = BIOME_NAMES[biomeId] ?? BIOME_NAMES.crypt;
   const bossName = ACT_BOSSES[(Math.max(1, map.act) - 1) % ACT_BOSSES.length];
   const availIds = availableNextIds(map);
   const avail = new Set(availIds);
@@ -191,7 +195,7 @@ export function renderMap(root, map, {
       : isAv ? `Accessible · Touche ${keyIdx}`
       : isDead ? 'Hors de ton chemin'
       : 'Plus haut dans l’acte';
-    const rewardTag = ROOM_REWARD_TAG[n.type] ?? '';
+    const rewardTag = n.type === 'boss' && map.act === FINAL_ACT ? 'Boss final · Victoire !' : (ROOM_REWARD_TAG[n.type] ?? '');
     tip.className = `map-tip t-${esc(n.type)}`;
     tip.innerHTML = `<div class="mt-head"><span class="mt-ico">${ROOM_ICONS[n.type] ?? ROOM_ICONS.combat}</span><b>${esc(title)}</b><span class="mt-st">${esc(stateTag)}</span></div>`
       + `<div class="mt-desc">${esc(meta.desc)}</div>`

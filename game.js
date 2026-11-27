@@ -8,7 +8,7 @@ import { Rollback } from './rollback.js';
 import { CoopHost, CoopGuest } from './coop.js';
 import { Link } from './net.js';
 import { ITEMS, FAMILIES, COMBOS, MINORS, QUALITY, FX, TF_N, itemOf, itemList, has, hasTf } from './items.js';
-import { DungeonSim, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, mapInput, eventInput, padStand, PAD_R, MERCHANT, SORCERER, WEAPON_IDS, spellKey, HERO_IDS, FIRST_HERO, shopInput, biomeOf, biomeOfAct } from './dungeon.js';
+import { DungeonSim, REVIVE, HEROES, FOES, BOSS, ARENA_LAYOUTS, FINAL_ROOM, FINAL_ACT, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, mapInput, eventInput, padStand, PAD_R, MERCHANT, SORCERER, WEAPON_IDS, spellKey, HERO_IDS, FIRST_HERO, shopInput, biomeOf, biomeOfAct } from './dungeon.js';
 import { generateMap, advanceMap, availableNextIds, isBossNode } from './map.js';
 import { renderMap } from './map-ui.js';
 import { EVENTS } from './events.js';
@@ -1446,6 +1446,96 @@ function gloveModel(right, s) {
   if (right) g.scale.x = -s;
   return g;
 }
+// Grande faux d'os spectrale du Souverain d'Os (attachée au bras droit)
+const scytheShaftGeo = new THREE.CylinderGeometry(0.025, 0.032, 1.45, 7);
+const scytheBladeGeo = new THREE.BoxGeometry(0.55, 0.14, 0.035);
+const scytheEdgeGeo = new THREE.BoxGeometry(0.56, 0.045, 0.042);
+const scytheTipGeo = new THREE.ConeGeometry(0.09, 0.28, 5);
+const skullGeo = new THREE.BoxGeometry(0.28, 0.27, 0.27);
+const jawGeo = new THREE.BoxGeometry(0.18, 0.09, 0.17);
+const eyeSocketGeo = new THREE.BoxGeometry(0.065, 0.055, 0.04);
+const eyeGlowGeo = new THREE.SphereGeometry(0.024, 6, 6);
+const ribGeo = new THREE.BoxGeometry(0.3, 0.04, 0.19);
+const crownBandGeo = new THREE.CylinderGeometry(0.165, 0.155, 0.06, 8, 1, true);
+const crownSpikeGeo = new THREE.ConeGeometry(0.032, 0.11, 4);
+const pauldronGeo = new THREE.SphereGeometry(0.13, 8, 6, 0, TAU, 0, Math.PI * 0.65);
+keep(scytheShaftGeo, scytheBladeGeo, scytheEdgeGeo, scytheTipGeo, skullGeo, jawGeo, eyeSocketGeo, eyeGlowGeo, ribGeo, crownBandGeo, crownSpikeGeo, pauldronGeo);
+
+function scytheGroup() {
+  const g = new THREE.Group();
+  const shaft = new THREE.Mesh(scytheShaftGeo, stdMat({ color: 0x2a242c, roughness: 0.75, metalness: 0.25 }));
+  shaft.position.y = 0.45;
+  const blade = new THREE.Mesh(scytheBladeGeo, stdMat({ color: 0xd8cdb0, roughness: 0.55, metalness: 0.2 }));
+  blade.position.set(0.24, 1.1, 0);
+  blade.rotation.z = -0.22;
+  const edge = new THREE.Mesh(scytheEdgeGeo, new THREE.MeshBasicMaterial({ color: 0x6effb8, toneMapped: false }));
+  edge.position.set(0.24, 1.03, 0);
+  edge.rotation.z = -0.22;
+  const tip = new THREE.Mesh(scytheTipGeo, stdMat({ color: 0xd8cdb0, roughness: 0.55 }));
+  tip.position.set(0.52, 0.96, 0);
+  tip.rotation.z = -2.1;
+  g.add(shaft, blade, edge, tip);
+  g.position.set(-0.22, -0.02, 0.12);
+  g.rotation.set(Math.PI / 2, 0, 0);
+  g.userData.back = 0.2;
+  return g;
+}
+
+// Habille un FighterView (sur rig zombie) en Squelette ou en Souverain d'Os (crâne, yeux spectraux, côtes, couronne)
+function dressSkeleton(v, boss = false) {
+  const boneMat = stdMat({ color: 0xded4bc, roughness: 0.72, metalness: 0.08 });
+  const darkMat = stdMat({ color: 0x16141a, roughness: 0.9 });
+  const eyeMat = new THREE.MeshBasicMaterial({ color: 0x6effb8, toneMapped: false });
+  const goldMat = stdMat({ color: 0xd9a441, roughness: 0.35, metalness: 0.75 });
+  // teinte ivoire pâle sur tout le corps de base
+  for (const m of v.mats) m.color.setRGB(1.38, 1.34, 1.18);
+  const head = v.model.getObjectByName('head') || v.torso;
+  if (head) {
+    const sk = new THREE.Group();
+    sk.position.set(0, head === v.torso ? 0.34 : 0.14, 0.01);
+    const cranium = new THREE.Mesh(skullGeo, boneMat);
+    const jaw = new THREE.Mesh(jawGeo, boneMat);
+    jaw.position.set(0, -0.14, 0.03);
+    sk.add(cranium, jaw);
+    for (const s of [-1, 1]) {
+      const sock = new THREE.Mesh(eyeSocketGeo, darkMat);
+      sock.position.set(s * 0.065, 0.02, 0.125);
+      const eye = new THREE.Mesh(eyeGlowGeo, eyeMat);
+      eye.position.set(s * 0.065, 0.02, 0.145);
+      sk.add(sock, eye);
+    }
+    if (boss) {
+      const band = new THREE.Mesh(crownBandGeo, goldMat);
+      band.position.y = 0.145;
+      sk.add(band);
+      for (let k = 0; k < 5; k++) {
+        const a = (k / 5) * TAU;
+        const sp = new THREE.Mesh(crownSpikeGeo, goldMat);
+        sp.position.set(Math.sin(a) * 0.15, 0.21, Math.cos(a) * 0.15);
+        sk.add(sp);
+      }
+    }
+    head.add(sk);
+  }
+  if (v.torso) {
+    for (let k = 0; k < 3; k++) {
+      const rib = new THREE.Mesh(ribGeo, boneMat);
+      rib.position.set(0, 0.05 + k * 0.075, 0.02);
+      v.torso.add(rib);
+    }
+    if (boss) {
+      const armorMat = stdMat({ color: 0x26222c, roughness: 0.45, metalness: 0.65 });
+      for (const s of [-1, 1]) {
+        const p = new THREE.Mesh(pauldronGeo, armorMat);
+        p.position.set(s * 0.24, 0.25, 0);
+        p.rotation.z = -s * 0.35;
+        v.torso.add(p);
+      }
+    }
+  }
+  v.glowCol.setRGB(0.22, 1.0, 0.58);
+}
+
 function equipModel(v, kind, wpn) {
   const builtIn = v.model.getObjectByName('bow');    // l'archère a son arc dans le modèle
   if (builtIn) builtIn.visible = wpn === 'bow';
@@ -1475,14 +1565,15 @@ function equipModel(v, kind, wpn) {
     v.nocked.visible = false;
     return;
   }
-  v.sword = wpn === 'spear' ? heldWeapon('spear', 1.45, 0.3) : wpn === 'staff' ? heldWeapon('staff', 1.0, 0.08)
+  v.sword = wpn === 'scythe' ? scytheGroup()
+    : wpn === 'spear' ? heldWeapon('spear', 1.45, 0.3) : wpn === 'staff' ? heldWeapon('staff', 1.0, 0.08)
     : wpn === 'axe' || wpn === 'hammer' ? heldWeapon(wpn, 0.9) : heldWeapon('sword', 0.9);
   v.armR.add(v.sword);
   v.swordQ = v.sword.quaternion.clone();     // tenue de repos (dans le repère du bras)
   v.swordP = v.sword.position.clone();
-  if (wpn === 'hammer' || wpn === 'staff') { v.shield = new THREE.Group(); v.armL.add(v.shield); }   // pas de bouclier
+  if (wpn === 'hammer' || wpn === 'staff' || wpn === 'scythe') { v.shield = new THREE.Group(); v.armL.add(v.shield); }   // pas de bouclier
   if (wpn === 'staff') v.orb = glowOrb(v.sword);
-  if (wpn === 'hammer' || wpn === 'staff') return;
+  if (wpn === 'hammer' || wpn === 'staff' || wpn === 'scythe') return;
   v.shield = inst(wpn === 'tower' ? 'tower' : 'shield', wpn === 'tower' ? 1.1 : 0.8);
   v.shield.position.set(0.24, wpn === 'tower' ? -0.2 : 0, 0.07);
   v.armL.add(v.shield);
@@ -1988,11 +2079,32 @@ function fireballView() {
   scene.add(g);
   return g;
 }
-const NONE = [], arrowList = [], fireList = [], bladeList = [], bladeViews = [];
+const boneOrbCoreMat = new THREE.MeshBasicMaterial({ color: 0xeafff4, toneMapped: false });
+const boneOrbHaloMat = new THREE.MeshBasicMaterial({ color: 0x3aff9e, transparent: true, opacity: 0.65, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+keep(fbCore, fbHalo, fbCoreMat, fbHaloMat, boneOrbCoreMat, boneOrbHaloMat);
+const boneViews = [];
+function boneOrbView() {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(fbCore, boneOrbCoreMat), new THREE.Mesh(fbHalo, boneOrbHaloMat));
+  g.scale.setScalar(1.15);
+  scene.add(g);
+  return g;
+}
+const NONE = [], arrowList = [], fireList = [], bladeList = [], boneList = [], bladeViews = [];
 function syncArrows(alpha) {
   const all = game.phase === 'menu' ? NONE : sim.pr;
-  arrowList.length = fireList.length = bladeList.length = 0;
-  for (let i = 0; i < all.length; i++) { const a = all[i]; (a.k === 1 ? fireList : a.k === 2 ? bladeList : arrowList).push(a); }
+  arrowList.length = fireList.length = bladeList.length = boneList.length = 0;
+  for (let i = 0; i < all.length; i++) { const a = all[i]; (a.k === 1 ? fireList : a.k === 2 ? bladeList : a.k === 3 ? boneList : arrowList).push(a); }
+  while (boneViews.length < boneList.length) boneViews.push(boneOrbView());
+  for (let i = 0; i < boneViews.length; i++) {
+    const o = boneViews[i], a = boneList[i];
+    o.visible = !!a;
+    if (!a) continue;
+    o.position.set(a.x + a.vx * DT * (alpha - 1), a.y + a.vy * DT * (alpha - 1), a.z + a.vz * DT * (alpha - 1));
+    o.rotation.set(clockT * 8, clockT * 6, 0);
+    o.children[1].scale.setScalar(1 + 0.18 * Math.sin(clockT * 26 + i));
+    if ((arrowTrail = (arrowTrail + 1) % 2) === 0) emit(o.position.x, o.position.y, o.position.z, 1, { color: [0x6effb8, 0xd8cdb0, 0xffffff], speed: 0.25, up: 0.3, size: 0.065, life: 0.35, grav: -0.6 });
+  }
   // lames spectrales (objets) : forme partagée, en additif
   while (bladeViews.length < bladeList.length) { const m = new THREE.Mesh(bladeGeo, bladeMat); m.scale.setScalar(1.5); scene.add(m); bladeViews.push(m); }
   for (let i = 0; i < bladeViews.length; i++) {
@@ -2636,6 +2748,7 @@ function endMatch() {
   $('resTitle').textContent = title;
   $('result').classList.toggle('lose', match.mode !== 'duo' && game.wins[me] < game.wins[1 - me]);
   $('resSub').textContent = `${n1}  ${a} – ${b}  ${n2}  ·  ${ARENAS[match.arena].name}` + (guest ? '  ·  l’hôte peut lancer la revanche' : '');
+  $('endlessBtn').classList.add('hidden');
   $('againBtn').classList.toggle('hidden', guest);
   $('result').classList.remove('hidden');
   $('help').classList.add('hidden');
@@ -2916,7 +3029,7 @@ function syncUi() {
 //  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges).
 // =====================================================================
 // pk : vues des objets à ramasser (piédestaux, cœurs, éclats), par numéro n de l'objet dans la simulation
-const dng = { room: -1, rn: -1, roomVer: -1, hallLeft: false, gateOpen: false, gate: null, traps: [], pk: new Map(), tot: [], glow: null, endShown: false };
+const dng = { room: -1, rn: -1, roomVer: -1, arenaVer: -1, dynGroup: null, dynGrow: 1, dynMixers: [], hallLeft: false, gateOpen: false, gate: null, traps: [], pk: new Map(), tot: [], glow: null, endShown: false };
 const mapReq = [-1, -1];             // destination choisie sur la carte (phase 'map'), envoyée comme entrée
 const mapSent = [false, false];      // en coop invité : évite de renvoyer 60 fois la même sélection
 const evtReq = [-1, -1];             // option d'événement choisie (phase 'event')
@@ -3056,7 +3169,62 @@ function outsideDecor(kind, D, exit = 'z') {
       else if (r < 0.85) { const sc = S * rand(0.8, 1.3); PI('b_bush', x, 0, z, rand(0, TAU), sc, sc, sc, false); }
       else { const sc = S * rand(0.9, 1.2); PI('a_columnD', x, 0, z, rot4(), sc, sc, sc, false); }
     }
+  } else if (kind === 'necropole') {
+    // Nécropole d'Émeraude : stèles brisées, cristaux spectraux et brume verte au-delà des murs
+    const nN = Math.round(24 * gfx.meadowDecor);
+    for (let i = 0; i < nN; i++) {
+      const x = rand(-D - 9, D + 9), z = rand(-D - 9, D + 9);
+      if (Math.max(Math.abs(x), Math.abs(z)) < D + 1.4 || !seen(x, z)) continue;
+      const r = Math.random();
+      if (r < 0.45) { const sc = S * rand(0.9, 1.4); PI('a_columnD', x, 0, z, rot4(), sc, sc, sc, false); }
+      else if (r < 0.78) { const sc = S * rand(0.8, 1.3); PI('b_crystals', x, 0, z, rand(0, TAU), sc, sc, sc, false); }
+      else { const sc = S * rand(0.9, 1.2); PI('a_bricks', x, 0, z, rot4(), sc, sc, sc, false); }
+    }
+    for (const [x, z] of [[D + 3, -3], [D + 3, 3], [-3, D + 3], [3, D + 3]]) queueLight(0x3aff9e, 5.5, 11, 1.4, x, 1.2, z, 2);
+  } else if (kind === 'snow') {
+    // Citadelle Gelée : piliers givrés, cristaux de glace lumineux et rochers enneigés
+    const nS = Math.round(24 * gfx.meadowDecor);
+    for (let i = 0; i < nS; i++) {
+      const x = rand(-D - 9, D + 9), z = rand(-D - 9, D + 9);
+      if (Math.max(Math.abs(x), Math.abs(z)) < D + 1.4 || !seen(x, z)) continue;
+      const r = Math.random();
+      if (r < 0.5) { const sc = S * rand(0.9, 1.45); PI('b_crystals', x, 0, z, rand(0, TAU), sc, sc, sc, false); }
+      else if (r < 0.8) { const sc = S * rand(0.9, 1.3); PI('a_column', x, 0, z, rot4(), sc, sc, sc, false); }
+      else { const sc = S * rand(0.8, 1.2); PI('d_rocks', x, 0, z, rand(0, TAU), sc, sc, sc, false); }
+    }
+    for (const [x, z] of [[D + 3, -3], [D + 3, 3], [-3, D + 3], [3, D + 3]]) queueLight(0x7ae4ff, 5, 11, 1.4, x, 1.2, z, 2);
   }
+}
+// Sanctuaire d'Os (salle du Souverain d'Os) : ossements instanciés et brasiers spectraux verts aux coins
+function ossuaryDecor() {
+  for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6], [5.6, 5.6]]) {
+    queueLight(0x3aff9e, 6, 9, 1.4, x, 1.7, z, 5);
+  }
+  const boneMat = stdMat({ color: 0xd8cdb0, roughness: 0.9 });
+  const NB = 18;
+  const shafts = new THREE.InstancedMesh(boneShaftGeo, boneMat, NB);
+  const knobs = new THREE.InstancedMesh(boneKnobGeo, boneMat, NB * 4);
+  shafts.frustumCulled = knobs.frustumCulled = false;
+  let ki = 0;
+  for (let i = 0; i < NB; i++) {
+    const a = rand(0, TAU), r = rand(4.8, 6.4), ry = rand(0, TAU);
+    const bx = Math.sin(a) * r, bz = Math.cos(a) * r, cy = Math.cos(ry), sy = Math.sin(ry);
+    dummy.position.set(bx, 0.05, bz);
+    dummy.rotation.set(0, ry, 0);
+    dummy.scale.setScalar(1.1);
+    dummy.updateMatrix();
+    shafts.setMatrixAt(i, dummy.matrix);
+    for (const s of [-1, 1]) for (const d of [-0.04, 0.04]) {
+      const lx = s * 0.21, lz = d;
+      dummy.position.set(bx + cy * lx + sy * lz, 0.05, bz - sy * lx + cy * lz);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      knobs.setMatrixAt(ki++, dummy.matrix);
+    }
+  }
+  shafts.instanceMatrix.needsUpdate = true;
+  knobs.instanceMatrix.needsUpdate = true;
+  world.add(shafts, knobs);
 }
 // antre de Cerbère : flammes aux quatre colonnes, brasier dans le coin, ossements instanciés (2 appels au lieu de 70)
 function lairDecor() {
@@ -3126,6 +3294,23 @@ const BIOME = {
     ground: [0x140806, 0x0a0403], fog: [22, 44], wallLight: 'torch', banners: true, brazier: 'a_columnD', lantern: 0.8,
     motes: { color: 0xff8a3a, up: 0.45, size: 0.06 }, glowObs: { rocks: 0xff6a2a, column: 0xff6a2a }, outside: 'lava',
   },
+  necropole: {
+    name: "LA NÉCROPOLE D'ÉMERAUDE", floor: ['a_floor', 'a_floorD'], detail: 0.32,
+    wall: ['d_wall', 2.25], wallAlt: ['b_ruin-wall-broken', 0.25], low: ['d_wallHalf', 0.55], open: ['d_wallOpen', 2.475], block: ['a_block', 0.5],
+    obs: { column: ['a_columnD', 1.15, true], barrel: ['a_bricks', 1.15, true], rocks: ['b_crystals', 1] },
+    bg: [0x0f241f, 0x061210], sky: [0xbfffe0, 0x56b894], gnd: [0x244a3c, 0x102820], hi: [1.15, 0.9], sun: [0xa0ffd4, 0x58d0a4], si: [1.35, 0.95],
+    ground: [0x0b1a16, 0x050d0b], fog: [21, 42], wallLight: 'lantern', banners: true, brazier: 'a_columnD', lantern: 0.95,
+    motes: { color: 0x6effb8, up: 0.26, size: 0.055 }, glowObs: { rocks: 0x3aff9e }, outside: 'necropole',
+  },
+  citadelle: {
+    name: 'LA CITADELLE GELÉE', floor: ['b_mine-floor', 'b_mine-floor-stones'], detail: 0.35,
+    wall: ['a_wall', 2.25], wallAlt: ['b_ruin-wall', 0.2], low: ['b_ruin-low', null], open: ['a_wallGate', 2.4], block: ['a_block', 0.5],
+    obs: { column: ['a_column', 1.15, true], barrel: ['d_stones', 1.15, true], rocks: ['b_crystals', 1] },
+    sky: [0xdcf4ff, 0x8cc8f0], gnd: [0x4c708e, 0x2a4562], hi: [1.45, 1.15], sun: [0xeaf8ff, 0x9ed8ff], si: [1.9, 1.35],
+    skyTex: [[0, '#102c4e'], [0.55, '#3474a8'], [1, '#bce8ff']], skyTexEnd: [[0, '#081830'], [0.5, '#1e5282'], [1, '#7fc2ea']],
+    bg: [0xbce8ff, 0x7fc2ea], ground: [0x7aa8c8, 0x4b7496], fog: [26, 56], wallLight: 'lantern', banners: false, brazier: 'a_column', lantern: 0.55,
+    motes: { color: 0xeef9ff, up: -0.55, size: 0.055 }, glowObs: { rocks: 0x7ae4ff }, outside: 'snow',
+  },
 };
 // salle d'armes : murs des cryptes, mais en plein air, au milieu d'une prairie (verdure au-delà des murs)
 BIOME.hub = {
@@ -3134,11 +3319,17 @@ BIOME.hub = {
   bg: [0xefe6c6, 0xefe6c6], sky: [0xfff4e0, 0xfff4e0], gnd: [0x5a7040, 0x5a7040], hi: [1.45, 1.45], sun: [0xfff0d0, 0xfff0d0], si: [2.1, 2.1],
   ground: [0x5e8a48, 0x5e8a48], fog: [36, 90], lantern: 0.5, motes: { color: 0xe8f0a0, up: 0.03, size: 0.04 }, outside: 'meadow',
 };
-// antre de Cerbère (salle dédiée, room.lair) : basalte, lave tout autour, lueurs rouges
+// antre de Cerbère (salle dédiée, room.lair = 'cerbere') : basalte, lave tout autour, lueurs rouges
 BIOME.lair = {
   ...BIOME.forge, name: "L'ANTRE DE CERBÈRE",
   bg: [0x1a0404, 0x1a0404], sky: [0xff7050, 0xff7050], gnd: [0x701008, 0x701008], hi: [0.9, 0.9], sun: [0xff6040, 0xff6040], si: [1.0, 1.0],
   ground: [0x0e0302, 0x0e0302], fog: [20, 40], lantern: 0.9, motes: { color: 0xff5a20, up: 0.6, size: 0.07 },
+};
+// sanctuaire du Souverain d'Os (salle finale, room.lair = 'squelette') : marbre sombre et brume d'émeraude
+BIOME.ossuary = {
+  ...BIOME.necropole, name: "LE SANCTUAIRE D'OS",
+  bg: [0x081613, 0x081613], sky: [0x88ffca, 0x88ffca], gnd: [0x14382c, 0x14382c], hi: [1.05, 1.05], sun: [0x78ffc0, 0x78ffc0], si: [1.15, 1.15],
+  ground: [0x06110e, 0x06110e], fog: [19, 38], lantern: 0.9, motes: { color: 0x6effb8, up: 0.42, size: 0.065 },
 };
 const rot4 = () => ((Math.random() * 4) | 0) * Math.PI / 2;
 
@@ -3151,14 +3342,15 @@ function buildDungeonRoom(room, n) {
   crowd = null;
   arenaHooks = {};
   curArena = 'dungeon';
-  Object.assign(dng, { gateOpen: false, gate: null, traps: [], glow: null });
+  Object.assign(dng, { gateOpen: false, gate: null, traps: [], glow: null, dynGroup: null, dynGrow: 1, dynMixers: [], arenaVer: sim?.g?.arenaVer ?? 0 });
   dng.pk.clear();                      // leurs objets 3D partent avec le monde
   dng.tot = [];                        // totems de vie (sort) : idem
   const boss = room.boss;
-  dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : (room.act ? biomeOfAct(room.act) : biomeOf(n));
-  const B = BIOME[dng.biome];
+  const runSeed = sim?.map?.runSeed ?? sim?.runSeed ?? 0;
+  dng.biome = room.hub ? 'hub' : room.biome && BIOME[room.biome] ? room.biome : room.lair === 'squelette' ? 'ossuary' : room.lair ? 'lair' : (room.act ? biomeOfAct(room.act, runSeed) : biomeOf(n, runSeed));
+  const B = BIOME[dng.biome] ?? BIOME.crypt;
   const k = clamp(((Math.max(n, 1) - 1) % 5) / 4, 0, 1) * (boss ? 1 : 0.85);   // 0 : début de la tranche … 1 : salle du boss
-  const red = boss ? 0.45 : 0;                                                   // teinte rouge de la salle du boss
+  const red = boss && dng.biome !== 'ossuary' ? 0.45 : 0;                      // teinte rouge de la salle du boss (sauf Sanctuaire d'Os émeraude)
   const col = ([a, b], tint) => new THREE.Color(a).lerp(new THREE.Color(b), k).lerp(new THREE.Color(tint ?? 0x000000), tint === undefined ? 0 : red);
   const num = ([a, b]) => a + (b - a) * k;
   const bg = col(B.bg, 0x2a0606);
@@ -3245,8 +3437,9 @@ function buildDungeonRoom(room, n) {
   piece(B.low, D, D, 0, false);
   if (B.outside) outsideDecor(B.outside, D, room.exit);
 
-  // estrades (blocs surmontés de dalles) et escaliers (tous instanciés)
-  for (const s of room.surf) {
+  const dynArena = room.lair === 'squelette';
+  // estrades (blocs surmontés de dalles) et escaliers (tous instanciés, sauf en arène mouvante gérée par dng.dynGroup)
+  if (!dynArena) for (const s of room.surf) {
     for (let x = s.x0 + TILE / 2; x < s.x1; x += TILE)
       for (let z = s.z0 + TILE / 2; z < s.z1; z += TILE) {
         if (!s.ramp) {
@@ -3270,7 +3463,7 @@ function buildDungeonRoom(room, n) {
   }
 
   // obstacles (leur collision est dans dungeon.js) : [clé, échelle, quart de tour seulement]
-  for (const o of room.obs) {
+  if (!dynArena) for (const o of room.obs) {
     if (o.kind === 'stand' || o.kind === 'counter' || o.kind === 'tent' || o.kind === 'cauldron' || o.kind === 'npc') continue;      // salle d'armes : construits par buildHub
     const [key, s, square] = B.obs[o.kind] ?? B.obs.rocks;
     const sc = S * s;
@@ -3279,7 +3472,7 @@ function buildDungeonRoom(room, n) {
     const glow = B.glowObs?.[o.kind];
     if (glow) queueLight(glow, 2.5, 4, 1.6, o.x, 0.9, o.z, 3);
   }
-  if (boss) for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) brazier(x, z, B.brazier, B.brazier === 'd_barrel' ? 1.3 : 1.1, 6, 5);
+  if (boss && !dynArena) for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) brazier(x, z, B.brazier, B.brazier === 'd_barrel' ? 1.3 : 1.1, 6, 5);
   if (room.roomType === 'treasure') {
     for (const [x, z] of [[-1.9, -1.9], [1.9, -1.9], [-1.9, 1.9], [1.9, 1.9]]) {
       PI('a_trophy', x, 0, z, rot4(), S * 0.9, S * 0.9, S * 0.9, true);
@@ -3291,11 +3484,25 @@ function buildDungeonRoom(room, n) {
     for (const [x, z] of [[-1.5, -1.2], [1.5, -1.2]]) PI('b_crystals', x, 0, z, rand(0, TAU), S * 0.9, S * 0.9, S * 0.9, false);
     queueLight(0xa584ff, 6.5, 10, 1.4, 0, 2.1, -1.2, 8);
   }
-  if (room.lair) lairDecor();
+  if (room.lair === 'cerbere') lairDecor();
+  if (room.lair === 'squelette') {
+    ossuaryDecor();
+    dng.dynGroup = new THREE.Group();
+    world.add(dng.dynGroup);
+    rebuildDynamicArena(room, true);
+    updaters.push((dt) => {
+      for (const mx of dng.dynMixers) mx.update(dt);
+      if (dng.dynGroup && dng.dynGrow < 1) {
+        dng.dynGrow = Math.min(1, dng.dynGrow + dt * 3.2);
+        const e = Math.sin(dng.dynGrow * Math.PI * 0.5);
+        dng.dynGroup.position.y = (1 - e) * -1.4;
+      }
+    });
+  }
   if (room.hub) buildHub(room);
 
   // pièges à pics : l'animation suit l'état des pics dans la simulation
-  room.traps.forEach((t, i) => {
+  if (!dynArena) room.traps.forEach((t, i) => {
     const o = P('d_trap', t.x, 0.004, t.z, 0, S, world, false);
     const mx = new THREE.AnimationMixer(o);
     playOnce(mx, 'd_trap', 'hide');
@@ -3333,7 +3540,7 @@ function buildDungeonRoom(room, n) {
     const d = accM; accM = 0;
     for (let i = 0; i < N; i++) {
       const s = seed[i];
-      s[1] += d * B.motes.up; if (s[1] > 3.5) s[1] = 0;
+      s[1] += d * B.motes.up; if (s[1] > 3.5) s[1] = 0; else if (s[1] < 0) s[1] = 3.5;
       pos[i * 3] = s[0] + Math.sin(t * 0.3 + s[3]) * 0.4;
       pos[i * 3 + 1] = s[1];
       pos[i * 3 + 2] = s[2] + Math.cos(t * 0.25 + s[3]) * 0.3;
@@ -3780,6 +3987,45 @@ function dungeonViews() {
   else { F.slice(np).forEach((v) => v.dispose()); F.length = np; heroViews(); }
   for (let i = F.length; i < sim.f.length; i++) F.push(makeView(i));
 }
+// Reconstruit uniquement les éléments dynamiques (piliers, estrades, pièges) du Sanctuaire mouvant du Souverain d'Os
+function rebuildDynamicArena(room, instant = false) {
+  if (!dng.dynGroup) return;
+  disposeTree(dng.dynGroup);
+  dng.dynGroup.clear();
+  dng.traps = [];
+  dng.dynMixers = [];
+  const B = BIOME.ossuary;
+  for (const s of room.surf) {
+    for (let x = s.x0 + TILE / 2; x < s.x1; x += TILE) {
+      for (let z = s.z0 + TILE / 2; z < s.z1; z += TILE) {
+        if (!s.ramp) {
+          const blk = P(B.block[0], x, 0, z, rot4(), S, dng.dynGroup, true);
+          blk.scale.y = PLAT_H / B.block[1];
+          P(B.floor[0], x, PLAT_H + 0.003, z, rot4(), S, dng.dynGroup, false);
+        } else {
+          const dir = Math.sign(s.to - s.from), dx = s.ramp === 'x' ? dir : 0, dz = s.ramp === 'z' ? dir : 0;
+          const st = P('d_stairs', x, 0, z, Math.atan2(-dx, -dz), S, dng.dynGroup, true);
+          st.scale.y = PLAT_H / 0.9;
+        }
+      }
+    }
+  }
+  for (const o of room.obs) {
+    const [key, s, square] = B.obs[o.kind] ?? B.obs.column;
+    P(key, o.x, 0, o.z, square ? rot4() : rand(0, TAU), S * s, dng.dynGroup, true);
+  }
+  room.traps.forEach((t) => {
+    const o = P('d_trap', t.x, 0.004, t.z, 0, S, dng.dynGroup, false);
+    const mx = new THREE.AnimationMixer(o);
+    playOnce(mx, 'd_trap', 'hide');
+    mx.update(1);
+    dng.dynMixers.push(mx);
+    dng.traps.push({ x: t.x, z: t.z, mx, up: false, warnT: 0 });
+  });
+  dng.dynGrow = instant ? 1 : 0;
+  dng.dynGroup.position.y = instant ? 0 : -1.4;
+}
+
 // vue du combattant i du donjon : héros, ennemi ou chien invoqué
 function makeView(i) {
   const e = sim.f[i], np = sim.g.np;
@@ -3799,6 +4045,16 @@ function makeView(i) {
     if (hell) { for (const m of v.mats) m.color.setRGB(0.85, 0.42, 0.36); v.ring.material.color.set(0xe0452f); }
     v.addHpBar(hell ? 0xe0452f : 0xb98aff);
     v.hpBar.position.y = 1.05;
+    return v;
+  }
+  if (e.kind === 'squelette') {
+    const v = new FighterView(i, 'zombie', e.wpn);
+    v.kind = 'squelette';
+    v.team = e.team;
+    v.setSize(e.size);
+    dressSkeleton(v, !!e.boss);
+    v.ring.material.color.set(e.boss ? 0x3aff9e : 0x6effb8);
+    if (!e.boss) v.addHpBar(0x6effb8);
     return v;
   }
   const v = new FighterView(i, e.kind, e.wpn);
@@ -3872,10 +4128,11 @@ function dungeonRoom() {
   buildDungeonRoom(sim.room, sim.g.room);
   // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
   const n = sim.g.room;
-  const curBiome = sim.room.lair ? 'lair' : (sim.room.act ? biomeOfAct(sim.room.act) : biomeOf(n));
+  const runSeed = sim.map?.runSeed ?? sim.runSeed ?? 0;
+  const curBiome = sim.room.biome && BIOME[sim.room.biome] ? sim.room.biome : sim.room.lair === 'squelette' ? 'ossuary' : sim.room.lair ? 'lair' : (sim.room.act ? biomeOfAct(sim.room.act, runSeed) : biomeOf(n, runSeed));
   if (n >= 1 && dng.room >= 0 && curBiome !== dng.lastBiome && !sim.room.hub && !sim.room.vault) {
     const b = $('biome');
-    b.textContent = BIOME[curBiome].name;
+    b.textContent = (BIOME[curBiome] ?? BIOME.crypt).name;
     b.className = '';
     void b.offsetWidth;
     b.className = 'show';
@@ -3883,6 +4140,7 @@ function dungeonRoom() {
   dng.lastBiome = curBiome;
   dng.room = sim.g.room;
   dng.rn = sim.g.rn;
+  dng.arenaVer = sim.g.arenaVer ?? 0;
   dng.roomVer = coop?.role === 'guest' ? coop.roomVer : 0;
   dungeonViews();
   snapCamera();
@@ -3897,7 +4155,14 @@ function dungeonSync() {
   const g = sim.g;
   const dt = Math.min(0.1, clockT - syncT);
   syncT = clockT;
-  const needRoom = dng.room !== g.room || dng.rn !== g.rn || (coop?.role === 'guest' && dng.roomVer !== coop.roomVer);
+  const sameRoom = dng.room === g.room && dng.rn === g.rn;
+  const arenaChanged = sameRoom && sim.room?.lair === 'squelette' && dng.arenaVer !== (g.arenaVer ?? 0);
+  if (arenaChanged) {
+    dng.arenaVer = g.arenaVer ?? 0;
+    if (coop?.role === 'guest') dng.roomVer = coop.roomVer;
+    rebuildDynamicArena(sim.room, false);
+  }
+  const needRoom = !sameRoom || (coop?.role === 'guest' && dng.roomVer !== coop.roomVer);
   if (needRoom) dungeonRoom();
   else { heroViews(); extraViews(); }
   if (g.room === 0 && g.phase === 'map' && !dng.hallLeft && dng.room === 0) leaveHall();
@@ -3924,6 +4189,12 @@ function dungeonSync() {
   mapSync();
   bossTele();
   if (g.phase === 'end' && !dng.endShown) endDungeon();
+  else if (g.phase !== 'end' && dng.endShown) {
+    // reprise en Mode Infini (local ou propagée par l'hôte coop)
+    dng.endShown = false;
+    $('result').classList.add('hidden');
+    $('help').classList.remove('hidden');
+  }
 }
 
 // ---------- Totem de vie (sort) : un totem 3D par lanceur, déduit de f.totT / totX / totY / totZ ----------
@@ -3985,8 +4256,18 @@ const tele = (() => {
   // cône du souffle de feu (centré sur +z avant rotation, rayon 1)
   const cone = new THREE.Mesh(new THREE.CircleGeometry(1, 32, -Math.PI / 2 - BOSS.fire.half, 2 * BOSS.fire.half).rotateX(-Math.PI / 2), mat(0xffb030, 0.4));
   const bite = new THREE.Mesh(new THREE.RingGeometry(0.55, 1, 24, 1, -Math.PI / 2 - 0.55, 1.1).rotateX(-Math.PI / 2), mat(0xff2a10, 0.45));
-  for (const m of [disk, fill, edge, lane, cone, bite]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
-  return { disk, fill, edge, lane, tex, cone, bite };
+  // fauchage tournoyant du Souverain d'Os + groupe de télégraphes de mutation d'arène (shift)
+  const reap = new THREE.Mesh(new THREE.RingGeometry(0.75, 1, 48).rotateX(-Math.PI / 2), mat(0x3aff9e, 0.55));
+  const shiftG = new THREE.Group();
+  shiftG.visible = false;
+  scene.add(shiftG);
+  const shiftObsGeo = new THREE.CircleGeometry(BOSS.shift.pillarR, 28).rotateX(-Math.PI / 2);
+  const shiftTrapGeo = new THREE.PlaneGeometry(1.3, 1.3).rotateX(-Math.PI / 2);
+  const shiftSurfGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+  const shiftObsMat = mat(0x3aff9e, 0.35), shiftTrapMat = mat(0xff3a30, 0.38), shiftSurfMat = mat(0x7ae4ff, 0.25);
+  keep(shiftObsGeo, shiftTrapGeo, shiftSurfGeo, shiftObsMat, shiftTrapMat, shiftSurfMat);
+  for (const m of [disk, fill, edge, lane, cone, bite, reap]) { m.renderOrder = 2; m.visible = false; scene.add(m); }
+  return { disk, fill, edge, lane, tex, cone, bite, reap, shiftG, shiftLayout: -1, shiftObsGeo, shiftTrapGeo, shiftSurfGeo, shiftObsMat, shiftTrapMat, shiftSurfMat };
 })();
 const telePos = { x: 0, z: 0 };
 function bossTele() {
@@ -3997,9 +4278,45 @@ function bossTele() {
     if (!b && o.brute && o.state === 'attack' && o.stateT < windupOf(o)) b = o;
   }
   const slam = e?.sp === 'slam' && e.spA < 2, charge = e?.sp === 'charge' && e.spA === 0;
+  const reaping = e?.sp === 'reap';
+  const shifting = (sim.g.arenaNext ?? -1) >= 0 && (sim.g.arenaQuake ?? 0) > 0;
   tele.disk.visible = tele.fill.visible = tele.edge.visible = slam;
   tele.lane.visible = charge;
   tele.cone.visible = e?.sp === 'fire';
+  tele.reap.visible = reaping;
+  tele.shiftG.visible = shifting;
+  if (reaping) {
+    tele.reap.position.set(e.x, e.y + 0.05, e.z);
+    tele.reap.scale.setScalar(BOSS.reap.R);
+    tele.reap.material.opacity = e.spA === 0 ? 0.35 + 0.25 * Math.sin(clockT * 24) : 0.65;
+  }
+  if (shifting) {
+    const idx = sim.g.arenaNext;
+    if (tele.shiftLayout !== idx) {
+      tele.shiftLayout = idx;
+      tele.shiftG.clear();
+      const L = ARENA_LAYOUTS[idx];
+      if (L) {
+        for (const [i, j] of L.obs) {
+          const m = new THREE.Mesh(tele.shiftObsGeo, tele.shiftObsMat);
+          m.position.set(i * TILE, 0.05, j * TILE); m.renderOrder = 2; tele.shiftG.add(m);
+        }
+        for (const s of L.surf) {
+          const m = new THREE.Mesh(tele.shiftSurfGeo, tele.shiftSurfMat);
+          m.scale.set(s.x1 - s.x0, 1, s.z1 - s.z0);
+          m.position.set((s.x0 + s.x1) / 2, 0.04, (s.z0 + s.z1) / 2); m.renderOrder = 2; tele.shiftG.add(m);
+        }
+        for (const [i, j] of L.traps) {
+          const m = new THREE.Mesh(tele.shiftTrapGeo, tele.shiftTrapMat);
+          m.position.set(i * TILE, 0.05, j * TILE); m.renderOrder = 2; tele.shiftG.add(m);
+        }
+      }
+    }
+    const pulse = 0.22 + 0.25 * Math.abs(Math.sin(clockT * 10));
+    tele.shiftObsMat.opacity = pulse + 0.12;
+    tele.shiftTrapMat.opacity = pulse + 0.16;
+    tele.shiftSurfMat.opacity = pulse * 0.85;
+  } else tele.shiftLayout = -1;
   // morsure préparée de Cerbère (pas une attaque spéciale : on cherche le boss qui se ramasse)
   tele.bite.visible = !!b;
   if (b) {
@@ -4052,7 +4369,7 @@ function bossHud() {
     // nouvelle salle de boss : la barre arrive
     Object.assign(bossUi, { id: e.idx, room: g.room, hp: e.hp, gone: false, rage: false });
     $('bbName').textContent = FOES[e.foe].name;
-    $('bbSub').textContent = `${{ colosse: "Gardien d'airain", cerbere: 'Gardien des enfers' }[e.foe] ?? 'Seigneur de guerre'} · salle ${g.room}`;
+    $('bbSub').textContent = `${{ colosse: "Gardien d'airain", cerbere: 'Gardien des enfers', squelette: 'Seigneur des ossements' }[e.foe] ?? 'Seigneur de guerre'} · salle ${g.room}`;
     $('bbMark').classList.toggle('hidden', e.sp === undefined);
     bar.className = '';
     void bar.offsetWidth;
@@ -4190,19 +4507,23 @@ function resumeDungeon() {
 function endDungeon() {
   if (dng.endShown) return;
   dng.endShown = true;
-  if (match?.mode === 'solo') clearSavedRun();
+  const g = sim.g, won = !!g.victory;
+  if (match?.mode === 'solo' && !won) clearSavedRun();
   mapPeek = false;
   ['mapOv', 'eventOv', 'mapToggleBtn'].forEach((id) => $(id)?.classList.add('hidden'));
   $('resDefis').innerHTML = '';
-  $('result').classList.add('lose');
-  const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
+  $('result').classList.toggle('lose', !won);
+  const rec = dungeonRecord(), best = g.room > rec;
   const me = sim.f[localHeroes()[0] ?? 0];     // à deux sur un clavier : le compte suit le joueur 1
   if (me) accountRun(g.room, me.kills, me.kind, me.wpn);
   const guest = net.live && net.role === 'guest';
   if (best) try { localStorage.setItem(DNG_REC, String(g.room)); } catch (e) { /* ignoré */ }
-  $('resTitle').textContent = g.np > 1 ? 'VAINCUS…' : 'VAINCU…';
-  $('resSub').textContent = `Tombé${g.np > 1 ? 's' : ''} dans la salle ${g.room} · ${g.kills} ennemi${g.kills > 1 ? 's' : ''} vaincu${g.kills > 1 ? 's' : ''}` +
-    (best ? ' · nouveau record !' : ` · record : salle ${rec}`) + (guest ? '  ·  l’hôte peut relancer' : '');
+  $('resTitle').textContent = won ? 'VICTOIRE !' : (g.np > 1 ? 'VAINCUS…' : 'VAINCU…');
+  $('resSub').textContent = (won
+    ? `Souverain d’Os vaincu · Salle ${g.room} · ${g.kills} ennemi${g.kills > 1 ? 's' : ''} vaincu${g.kills > 1 ? 's' : ''}`
+    : `Tombé${g.np > 1 ? 's' : ''} dans la salle ${g.room} · ${g.kills} ennemi${g.kills > 1 ? 's' : ''} vaincu${g.kills > 1 ? 's' : ''}`) +
+    (best ? ' · nouveau record !' : ` · record : salle ${rec}`) +
+    (guest ? (won ? '  ·  l’hôte peut continuer en Infini ou relancer' : '  ·  l’hôte peut relancer') : '');
   // objets de la partie, par héros
   let items = '';
   for (let i = 0; i < g.np; i++) {
@@ -4213,6 +4534,7 @@ function endDungeon() {
     items += `<div class="row">${g.np > 1 ? `<b>J${i + 1}</b>` : ''}${tf}${icons || '<span>aucun objet</span>'}</div>`;
   }
   $('resItems').innerHTML = items;
+  $('endlessBtn').classList.toggle('hidden', !won || guest);
   $('againBtn').classList.toggle('hidden', guest);
   $('result').classList.remove('hidden');
   $('help').classList.add('hidden');
@@ -4731,6 +5053,16 @@ function setupMenu() {
     });
   });
   $('go').onclick = () => (cfg.mode === 'online' ? netStart() : cfg.game === 'dungeon' ? startDungeon() : startMatch());
+  $('endlessBtn').onclick = () => {
+    if (!isDungeon() || (net.live && net.role === 'guest')) return;
+    if (sim.continueEndless()) {
+      playEvents(sim.ev); sim.ev.length = 0;
+      dng.endShown = false;
+      $('result').classList.add('hidden');
+      $('help').classList.remove('hidden');
+      if (match?.mode === 'solo') saveRun();
+    }
+  };
   $('againBtn').onclick = () => (match?.mode === 'online' ? netStart(match.game) : match?.game === 'dungeon' ? startDungeon() : startMatch());
   $('menuBtn').onclick = () => toMenu();
   $('resumeBtn').onclick = togglePause;
@@ -5387,7 +5719,7 @@ boot();
 //  il modifie la simulation directement (en ligne, l'autre joueur ne le verrait pas).
 // =====================================================================
 const dbg = { open: false, god: false, tp: false };
-const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [15, 'Antre de Cerbère'], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [-1, 'Salle suivante']];
+const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [15, 'Antre de Cerbère'], [20, "Boss : Souverain d'Os"], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [21, 'Nécropole (21)'], [26, 'Citadelle (26)'], [-1, 'Salle suivante']];
 function setupDebug() {
   $('dbgRooms').innerHTML = DBG_ROOMS.map(([n, t]) => `<button data-room="${n}">${esc(t)}</button>`).join('');
   // objets : liste triée par qualité, puis les petits bonus
