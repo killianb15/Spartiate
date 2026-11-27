@@ -49,6 +49,11 @@ export function packFighter(f) {
     phoenix: f.phoenix ? 1 : 0,
     spellCd: r3(f.spellCd ?? 0), spellMax: f.spellMax ?? 7, spellBuffT: r3(f.spellBuffT ?? 0),
   };
+  // Totem de vie planté par ce combattant
+  if (f.spell) o.spell = f.spell;
+  if (f.shopK) o.shopK = f.shopK;
+  if (f.stoneT > 0) o.stoneT = r3(f.stoneT);
+  if (f.totT > 0) { o.totT = r3(f.totT); o.totX = r3(f.totX); o.totY = r3(f.totY); o.totZ = r3(f.totZ); o.totK = r3(f.totK); }
   if (f.brute) o.brute = 1;
   // états visibles (objets) : brûlure, poison, froid, gel, discorde, rétréci, chien des enfers
   const st = (f.sBurnT > 0 ? 1 : 0) | (f.sPsn > 0 ? 2 : 0) | (f.sChill > 0 ? 4 : 0) | (f.sFrz > 0 ? 8 : 0) |
@@ -91,6 +96,8 @@ export function unpackFighter(p, prev = null) {
   f.down = p.down; f.revT = p.revT; f.shop = p.shop;
   f.phoenix = p.phoenix;
   f.spellCd = p.spellCd ?? 0; f.spellMax = p.spellMax ?? 7; f.spellBuffT = p.spellBuffT ?? 0;
+  f.spell = p.spell ?? ''; f.shopK = p.shopK ?? 0; f.stoneT = p.stoneT ?? 0;
+  f.totT = p.totT ?? 0; f.totX = p.totX ?? 0; f.totY = p.totY ?? 0; f.totZ = p.totZ ?? 0; f.totK = p.totK ?? 0;
   f.brute = p.brute ? 1 : 0;
   const st = p.st | 0;
   f.sBurnT = st & 1 ? 1 : 0; f.sPsn = st & 2 ? p.psn ?? 1 : 0; f.sChill = st & 4 ? 1 : 0; f.sFrz = st & 8 ? 1 : 0;
@@ -226,7 +233,7 @@ export class CoopHost {
       this.lastRoomRef = sim.room;
     }
     // objets pris ou apparus : envoyés tout de suite
-    const eq = sim.f.slice(0, sim.g.np).map((h) => h.kind + ':' + h.wpn + ':' + h.shop + ':' + h.items).join('|');
+    const eq = sim.f.slice(0, sim.g.np).map((h) => h.kind + ':' + h.wpn + ':' + h.spell + ':' + h.shop + ':' + h.items).join('|');
     const pk = sim.pk ? sim.pk.map((o) => o.n).join(',') : '';
     const urgent = roomChanged || sim.g.phase !== this.lastPhase || pk !== this.lastPk || eq !== this.lastEquip;
     this.lastPhase = sim.g.phase;

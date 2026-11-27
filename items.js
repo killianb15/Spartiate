@@ -20,7 +20,7 @@
 //  Comme sim.js : logique pure et déterministe (dmath.js, rng de la simulation).
 // =====================================================================
 import { sin, cos, hypot, atan2 } from './dmath.js';
-import { BLADE, SHOT, spellOf } from './sim.js';
+import { BLADE, SHOT, spellCdOf } from './sim.js';
 
 export const heal = (p, n) => { p.hp = Math.min(p.maxHp, p.hp + n); };
 const reduce = (p, k) => { p.armor = 1 - (1 - p.armor) * (1 - k); };   // −k de dégâts subis (multiplicatif)
@@ -432,7 +432,7 @@ export const ITEM_METHODS = {
     p.hp = Math.min(p.hp, p.maxHp);
     p.runMul = Math.max(0.6, p.runMul);
     p.spellCdMul = Math.max(0.3, p.spellCdMul);
-    p.spellMax = Math.max(1.2, spellOf(p).cd * p.spellCdMul);
+    p.spellMax = spellCdOf(p);
   },
 
   // ----- multiplicateur des dégâts d'un coup (attaquant du camp des héros) -----

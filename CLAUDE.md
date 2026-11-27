@@ -7,12 +7,12 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Lancer / tester
 - Jeu : `python serveur.py` (port 8123) → http://localhost:8123 ; `?dungeon` lance le donjon directement,
   `&debug` expose `window.spartiate.sim` / `.views` dans la console. Ouvrir index.html en fichier ne marche pas.
-- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~160 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
+- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~170 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
 - Après une modif de `game.js`, l'utilisateur doit faire **Ctrl+F5** (cache).
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
   (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
-  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure, objets). Chromium headless est lent (quelques images/s) : pour une capture
+  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure, objets, sorcier). Chromium headless est lent (quelques images/s) : pour une capture
   précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
@@ -79,6 +79,18 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   directement (clic, touches 1 à 9). Affichage (`buildMerchant`, `shopSync`) : la caméra passe derrière
   le héros local en boutique (`camAng = 0`, donc les flèches suivent l'écran), bulle `#talk`, panneau
   `#shop`, carrousel d'armes sur le comptoir, réactions du marchand déduites de l'état (pas d'événements).
+- **Sorts** (`SPELLS` dans sim.js, touche Q) : un par héros (clé = `kind`) + `stone` (Peau de pierre : `f.stoneT`,
+  −60 % de dégâts via `spellShield`, ×0,5 vitesse `slowOf`, recul réduit `knockOf`, aussi pour les coups des boss)
+  et `totem` (Totem de vie : `f.totT/totX/totY/totZ/totK`, `totemTick` soigne les alliés à moins de `R`, jamais
+  au-dessus de maxHp, disparaît à la salle suivante). `SPELL_IDS` ; `f.spell` = clé choisie, `''` = sort du héros
+  (`spellOf(f)`, `spellKey(p)`) ; gardé au changement de héros (`equip(p, kind, wpn, spell)`), transmis comme les
+  armes (`new DungeonSim(seed, kinds, wpns, unlocked, spells)`, `s1/s2` dans cfg, `hello`/`start`, `net.peerSpell`,
+  `packFighter`). Tous les sorts sont choisissables par tous les héros.
+- **Sorcier** (`SORCERER`, à gauche de la porte : tente = 2 obstacles `kind 'tent'`, chaudron, `npc`) : dalle
+  `t: 'spell'`, même boutique que le marchand avec `p.shopK = 1` (`shopList(p)` = SPELL_IDS ou WEAPON_IDS,
+  `buy` → `learn`). Affichage `buildSorcerer` : carrousel d'icônes au-dessus du chaudron, caméra plongeante,
+  `#shop.spells` (bordure violette), `TALKERS` choisit qui parle dans `#talk`. Modèles : `tools/blender/sorcier.py`.
+  Tests : `tests/sorts.test.js` ; scénario navigateur `sorcier`.
 - **Salons** (game.js, `lobby*`, `hallStart`, panneau `#lobby` d'index.html) : seul dans la salle d'armes, on
   ouvre son salon (`{t:'open', kind, wpn}` : listé par serveur.py, `rooms[code]['hall']`) ou on rejoint
   celui d'un autre (liste `{t:'list'}` redemandée toutes les 2 s en temps réel, ou code). Quand l'invité
@@ -200,6 +212,8 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Modèles 3D : Blender en ligne de commande
 - Blender 5.3 installé (winget `BlenderFoundation.Blender` 5.3.0, le 25/11/2026) : `"C:\Program Files\Blender Foundation\Blender 5.3\blender.exe" -b --factory-startup -P tools/blender/<script>.py`
   (passer des chemins **absolus** Windows aux scripts ; `cygpath -wa` depuis bash).
+  Sous Linux (sans Blender installé) : l'archive portable `blender-5.3.0-linux-x64.tar.xz` de blender.org suffit
+  (`blender -b --factory-startup -P <chemin absolu>`).
 - `tools/blender/kenney.py` : boîte à outils. Positions/rotations écrites dans le **repère du jeu** (+Y haut,
   radians, ordre XYZ, comme three.js). Couleurs par nom = cases de la palette Kenney (`colormap.png`,
   grille 16×16 de 32 px ; colonnes paires unies, impaires en dégradé). `kenney_character()` importe un
@@ -211,7 +225,9 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   (`assets/summons/dog.glb` : `dog` > `body` > head/tail/leg-fl/fr/bl/br/glow), `check_weapons.py`,
   `cerbere.py` (Cerbère : pièces articulées comme `dog.py`, trois têtes `head-*` avec yeux `eyes-*`),
   `merchant.py` (vieux marchand : Kenney male-b chauve et barbu, barbe blanche ALLONGÉE en déplaçant ses
-  sommets, robe violette, couronne de cheveux ; + étal `stall.glb` → `assets/npc/`).
+  sommets, robe violette, couronne de cheveux ; + étal `stall.glb` → `assets/npc/`),
+  `sorcier.py` (sorcier : Kenney male-b en robe bleue, barbe grise allongée, chapeau pointu ; tente rayée
+  `tent.glb`, chaudron `cauldron.glb` (nœud `brew`) → `assets/npc/` ; totem `assets/summons/totem.glb` (nœud `gem`)).
   Aperçus dans `tools/blender/previews/`. Base de l'archère : `tools/blender/sources/character-female-f.glb`.
 - Squelette Kenney : os root, leg-left/right, torso, arm-left/right, head ; rotations de repos nulles,
   bras à l'horizontale, visage vers +z. Les nœuds nommés exportés gardent leur nom ; exporter un objet
@@ -222,7 +238,8 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Assets
 - Packs Kenney CC0 : `assets/arena`, `assets/dungeon`, `assets/characters` (Mini Characters : seulement
   knight, zombie, robot + colormap). **Pas de personnages modernes** (demande de l'utilisateur).
-- Nos modèles : `assets/archer`, `assets/weapons`, `assets/summons`, `assets/npc` (marchand, étal).
+- Nos modèles : `assets/archer`, `assets/weapons`, `assets/summons` (chien, Cerbère, totem), `assets/npc`
+  (marchand, étal, sorcier, tente, chaudron).
 
 ## Préférences de l'utilisateur
 - Veut le **style Kenney** partout (mêmes proportions, palette, peu de détails). Pour modifier un perso

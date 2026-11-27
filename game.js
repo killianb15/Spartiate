@@ -1,14 +1,14 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, SPELLS, spellOf, defaultWeapon, windupOf } from './sim.js';
+import { Sim, DT, PRESS, NEUTRAL, quant, ATK, BRK, ROLL, STA, SHOT, FIRE, CAST, WEAPONS, SPELLS, SPELL_IDS, spellOf, defaultWeapon, windupOf } from './sim.js';
 const AR = 'assets/archer/';
 import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { CoopHost, CoopGuest } from './coop.js';
 import { Link } from './net.js';
 import { ITEMS, FAMILIES, COMBOS, MINORS, QUALITY, FX, TF_N, itemOf, itemList, has, hasTf } from './items.js';
-import { DungeonSim, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, padStand, PAD_R, MERCHANT, SORCERER, WEAPON_IDS, spellKey, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -104,7 +104,7 @@ let gfx = GFX[gfxId];
 // En ligne : les deux navigateurs font tourner la même simulation (sim.js) et s'échangent
 // leurs touches ; rollback.js corrige les prédictions. Voir net.js pour le transport.
 // hall : salon ouvert depuis la salle d'armes (listé sur le serveur) ; halls : salons des autres, à rejoindre
-const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [], hall: false, halls: [] };
+const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [] };
 
 // =====================================================================
 //  Modèles
@@ -121,6 +121,8 @@ const FILES = {
   dog: 'assets/summons/dog.glb',   // chien invoqué par le grimoire, généré par tools/blender/dog.py
   cerbere: 'assets/summons/cerbere.glb',   // boss à trois têtes, généré par tools/blender/cerbere.py
   merchant: 'assets/npc/merchant.glb', stall: 'assets/npc/stall.glb',   // marchand d'armes et son étal (tools/blender/merchant.py)
+  sorcerer: 'assets/npc/sorcerer.glb', tent: 'assets/npc/tent.glb', cauldron: 'assets/npc/cauldron.glb',   // sorcier (tools/blender/sorcier.py)
+  totem: 'assets/summons/totem.glb',   // Totem de vie (sort), même script
   soldier: A + 'character-soldier.glb', human: D + 'character-human.glb', orc: D + 'character-orc.glb',
   archer: AR + 'archer.glb', arrow: AR + 'arrow.glb',   // générés par tools/archer-asset.html
   sword: D + 'weapon-sword.glb', shield: D + 'shield-round.glb',
@@ -1531,7 +1533,7 @@ class FighterView {
     this.glowCol = new THREE.Color(1, 0.3, 0.05);    // lueur permanente (rage du colosse) ajoutée au flash
     this.glow = 0;
     this.cur = null;
-    this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0; this.downK = 0;
+    this.flash = 0; this.shieldGlow = 0; this.bw = 0; this.flinch = 0; this.vyaw = 0; this.downK = 0; this.stoneK = 0; this.stoneOn = false;
     this.emissiveOn = false; this.shieldOn = false; this.sizeK = 1;
     this.model.rotation.order = 'YXZ';     // à terre : penché vers l'avant dans sa propre direction
     this.seenReset = -1; this.seenAnimN = -1; this.seenAnim = ''; this.seenAnimTs = 0;
@@ -1750,13 +1752,21 @@ class FighterView {
 
     this.flash = Math.max(0, this.flash - dt * 4);
     const sg = this.stGlow || 0;          // états (brûlure, gel…) : posé par statusPre
-    const emOn = this.flash > 0 || this.glow > 0 || sg > 0;
+    // Peau de pierre : couleurs ternies et grisées (fondu à l'entrée et à la sortie)
+    this.stoneK += ((sf.stoneT > 0 ? 1 : 0) - this.stoneK) * Math.min(1, dt * 6);
+    const sk = this.stoneK > 0.01 ? this.stoneK : 0;
+    if (sk > 0 || this.stoneOn) {
+      this.stoneOn = sk > 0;
+      for (const m of this.mats) { if (!m.userData.c0) m.userData.c0 = m.color.clone(); m.color.copy(m.userData.c0).multiplyScalar(1 - 0.6 * sk); }
+    }
+    const emOn = this.flash > 0 || this.glow > 0 || sg > 0 || sk > 0;
     if (emOn || this.emissiveOn) {
       this.emissiveOn = emOn;
       for (const m of this.mats) {
         m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
         if (this.glow > 0) { m.emissive.r += this.glowCol.r * this.glow; m.emissive.g += this.glowCol.g * this.glow; m.emissive.b += this.glowCol.b * this.glow; }
         if (sg > 0) { m.emissive.r += this.stCol.r * sg; m.emissive.g += this.stCol.g * sg; m.emissive.b += this.stCol.b * sg; }
+        if (sk > 0) { m.emissive.r += 0.3 * sk; m.emissive.g += 0.29 * sk; m.emissive.b += 0.27 * sk; }
       }
     }
     this.shieldGlow = Math.max(0, this.shieldGlow - dt * 3);
@@ -2247,6 +2257,7 @@ const AURA_FAM = [['feu', 0xff7a2e], ['peste', 0x7ae85a], ['givre', 0x8fe0ff]];
 function animK(sf) {
   if (sf.sFrz > 0) return 0;
   let k = sf.sChill > 0 ? FX.chill.slow : 1;
+  if (sf.stoneT > 0 && (sf.state === 'walk' || sf.state === 'block')) k *= SPELLS.stone.slow;   // Peau de pierre : seule la marche est ralentie dans la sim
   if (sim.aspdOf && sf.idx < sim.g.np && (sf.state === 'attack' || sf.state === 'shoot')) k *= sim.aspdOf(sf);
   return k;
 }
@@ -2689,7 +2700,8 @@ function updateSpellHud(f, n, showKey) {
   const ready = cd <= 0.01;
   const kCode = showKey ? key1(KEYSETS[match?.mode === 'duo' ? n - 1 : 0], 'spell') : null;
   setTxt('spn' + n, (kCode ? `[${lab(kCode)}] ` : '') + S.name);
-  setTxt('spc' + n, ready ? (f.spellBuffT > 0 ? `ACTIF ${f.spellBuffT.toFixed(1)} s` : 'PRÊT') : `${cd.toFixed(1)} s`);
+  const act = Math.max(f.spellBuffT || 0, f.stoneT || 0, f.totT || 0);   // Rempart sacré, Peau de pierre, Totem de vie
+  setTxt('spc' + n, act > 0 ? `ACTIF ${act.toFixed(1)} s` : ready ? 'PRÊT' : `${cd.toFixed(1)} s`);
   setW('spf' + n, ready ? 100 : Math.max(0, Math.min(100, (1 - cd / max) * 100)));
   setCls('spb' + n, 'ready', ready);
 }
@@ -2867,7 +2879,7 @@ function syncUi() {
 //  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges).
 // =====================================================================
 // pk : vues des objets à ramasser (piédestaux, cœurs, éclats), par numéro n de l'objet dans la simulation
-const dng = { room: -1, rn: -1, roomVer: -1, gateOpen: false, gate: null, traps: [], pk: new Map(), glow: null, endShown: false };
+const dng = { room: -1, rn: -1, roomVer: -1, gateOpen: false, gate: null, traps: [], pk: new Map(), tot: [], glow: null, endShown: false };
 const DNG_REC = 'spartiate-donjon-record';
 const ISO = Math.PI / 4;             // caméra en diagonale au-dessus de la salle (vue isométrique)
 const HERO_COL = [0xff5a4a, 0x4aa3ff];
@@ -3099,6 +3111,7 @@ function buildDungeonRoom(room, n) {
   curArena = 'dungeon';
   Object.assign(dng, { gateOpen: false, gate: null, traps: [], glow: null });
   dng.pk.clear();                      // leurs objets 3D partent avec le monde
+  dng.tot = [];                        // totems de vie (sort) : idem
   const boss = room.boss;
   dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : biomeOf(n);
   const B = BIOME[dng.biome];
@@ -3216,7 +3229,7 @@ function buildDungeonRoom(room, n) {
 
   // obstacles (leur collision est dans dungeon.js) : [clé, échelle, quart de tour seulement]
   for (const o of room.obs) {
-    if (o.kind === 'stand' || o.kind === 'counter') continue;      // salle d'armes : socles et comptoir construits par buildHub
+    if (o.kind === 'stand' || o.kind === 'counter' || o.kind === 'tent' || o.kind === 'cauldron' || o.kind === 'npc') continue;      // salle d'armes : construits par buildHub
     const [key, s, square] = B.obs[o.kind] ?? B.obs.rocks;
     const sc = S * s;
     PI(key, o.x, 0, o.z, square ? rot4() : rand(0, TAU), sc, sc, sc, true);
@@ -3315,7 +3328,7 @@ function buildHub(room) {
   const lockedFor = (id) => isDungeon() && !sim.canPick(me, id);
   const pads = room.pads.map((pd) => {
     const hero = pd.t === 'hero', locked = hero && lockedFor(pd.id);
-    const col = locked ? 0x8a8a90 : hero ? 0xffc04a : 0x6fc3ff;
+    const col = locked ? 0x8a8a90 : hero ? 0xffc04a : pd.t === 'spell' ? 0xb98aff : 0x6fc3ff;
     // dalle lumineuse
     const disc = new THREE.Mesh(padGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.18, depthWrite: false, toneMapped: false }));
     disc.position.set(pd.x, 0.012, pd.z);
@@ -3346,6 +3359,8 @@ function buildHub(room) {
     return { pd, disc, rim, show, mixer: locked ? null : mixer, yes, sel: false, locked };
   });
   buildMerchant();
+  buildSorcerer();
+  updaters.push(shopSync);   // panneau #shop et bulle #talk des deux marchands
   // tapis au centre de la salle
   const rug = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 5.2), stdMat({ color: 0x7a1e1a, roughness: 1 }));
   rug.rotation.x = -Math.PI / 2; rug.position.set(0.6, 0.008, 1.2); rug.receiveShadow = true;
@@ -3366,12 +3381,12 @@ function buildHub(room) {
       let sel = false;
       for (let i = 0; i < np; i++) {
         const h = sim.f[i];
-        if (p.pd.t === 'hero' ? h.kind === p.pd.id : h.shop > 0) { sel = true; break; }
+        if (p.pd.t === 'hero' ? h.kind === p.pd.id : h.shop > 0 && !h.shopK === (p.pd.t === 'shop')) { sel = true; break; }
       }
       if (sel && !p.sel && p.yes) p.yes.reset().play();
       p.sel = sel;
       // la dalle du marchand pulse doucement pour attirer l'œil
-      p.disc.material.opacity = sel ? 0.45 + 0.12 * Math.sin(t * 4) : p.pd.t === 'shop' ? 0.2 + 0.1 * Math.sin(t * 2.5) : p.locked ? 0.06 : 0.14;
+      p.disc.material.opacity = sel ? 0.45 + 0.12 * Math.sin(t * 4) : p.pd.t !== 'hero' ? 0.2 + 0.1 * Math.sin(t * 2.5) : p.locked ? 0.06 : 0.14;
       p.rim.material.opacity = sel ? 1 : p.locked ? 0.3 : 0.55;
       if (p.mixer) p.mixer.update(dt);
     }
@@ -3396,13 +3411,16 @@ const SHOP_LINES = {
 };
 const SHOP_SHORT = { sword: 'Glaive', spear: 'Lance', tower: 'Pavois', axe: 'Hache', hammer: 'Marteau', staff: 'Sceptre', tome: 'Grimoire', gloves: 'Gants', bow: 'Arc' };
 const shopReq = [-1, -1];            // arme choisie à l'écran (clic, touches 1 à 9), envoyée comme entrée
-const shopUi = { key: '', say: '', sayT: 0, last: [{ shop: 0, wpn: '' }, { shop: 0, wpn: '' }] };
+// bulles : spk[0] = marchand, spk[1] = sorcier (une seule bulle affichée à la fois)
+const shopUi = { key: '', spk: [{ say: '', sayT: 0 }, { say: '', sayT: 0 }], last: [{ shop: 0, wpn: '' }, { shop: 0, wpn: '' }], lastS: [{ shop: 0, sp: '' }, { shop: 0, sp: '' }] };
 // héros joué sur cette machine qui est dans la boutique (-1 sinon) : la caméra se place derrière lui
 function localShopper() {
   if (!isDungeon() || sim.g.phase !== 'hub') return -1;
   return localHeroes().find((h) => sim.f[h]?.shop > 0) ?? -1;
 }
-function say(text, dur) { shopUi.say = text; shopUi.sayT = dur; }
+function say(k, text, dur) { const s = shopUi.spk[k]; s.say = text; s.sayT = dur; }
+// boutique où se trouve le héros h : 0 = aucune, 1 = marchand, 2 = sorcier
+const shopOf = (h) => (h.shop > 0 ? (h.shopK ? 2 : 1) : 0);
 // arme seule, telle qu'exposée au-dessus du comptoir
 function weaponShow(id) {
   const g = new THREE.Group();
@@ -3432,7 +3450,7 @@ function buildMerchant() {
   // pièces d'or et pot sur le comptoir, râteliers d'armes contre le mur (instanciés)
   for (const [dx, dz, r] of [[-0.85, 0.05, 0.3], [-0.7, -0.1, 1.2], [0.9, 0, 2]]) PI('d_coin', M.x + dx, 0.6, M.counterZ + dz, r, 0.5, 0.5, 0.5, false);
   PI('d_pot', M.x + 1.35, 0, M.counterZ - 0.45, 0.4, 1);
-  for (const x of [-1.8, -3.6]) PI('a_rack', x, 0, -6.15, 0, 1.3);
+  PI('a_rack', -1.8, 0, -6.15, 0, 1.3);   // (à gauche : la tente du sorcier)
   PI('d_barrel', -5.2, 0, -5.9, 0.3, S);
   const sign = label("MARCHAND D'ARMES", '', M.x, 2.45, M.counterZ + 0.1, 1.7);
 
@@ -3472,42 +3490,41 @@ function buildMerchant() {
   });
   const lampRef = queueLight(0xffd9a0, 0.8, 4, 1.5, M.x, 1.9, M.counterZ + 0.9, 6);
   shopUi.last.forEach((o) => { o.shop = 0; o.wpn = ''; });
-  say('', 0);
+  say(0, '', 0);
 
   updaters.push((dt, t) => {
     const np = isDungeon() ? Math.min(sim.g.np, sim.f.length) : 0;
     const locSh = localShopper();
-    let buyer = locSh >= 0 ? sim.f[locSh] : null, look = 0, best = 4.5, near = false;
+    let buyer = locSh >= 0 && shopOf(sim.f[locSh]) === 1 ? sim.f[locSh] : null, look = 0, best = 4.5, near = false;
     for (let i = 0; i < np; i++) {
-      const h = sim.f[i];
-      if (!buyer && h.shop > 0) buyer = h;
+      const h = sim.f[i], hs = shopOf(h) === 1 ? h.shop : 0;
+      if (!buyer && hs) buyer = h;
       const was = shopUi.last[i];
       if (was.wpn) {
-        if (h.shop && !was.shop) { gesture('interact-right'); say('Tu veux quelle arme, mon brave ?', 0); }
-        else if (h.shop && h.shop !== was.shop) say(SHOP_LINES[WEAPON_IDS[h.shop - 1]] ?? '', 0);
-        else if (!h.shop && was.shop) {
-          if (h.wpn !== was.wpn) { gesture('emote-yes'); say('Bon choix, mon brave ! Fais-en bon usage.', 2.6); }
-          else { gesture('emote-no'); say('Reviens quand tu veux !', 2); }
+        if (hs && !was.shop) { gesture('interact-right'); say(0, 'Tu veux quelle arme, mon brave ?', 0); }
+        else if (hs && hs !== was.shop) say(0, SHOP_LINES[WEAPON_IDS[hs - 1]] ?? '', 0);
+        else if (!hs && was.shop) {
+          if (h.wpn !== was.wpn) { gesture('emote-yes'); say(0, 'Bon choix, mon brave ! Fais-en bon usage.', 2.6); }
+          else { gesture('emote-no'); say(0, 'Reviens quand tu veux !', 2); }
         }
       }
-      was.shop = h.shop; was.wpn = h.wpn;
-      const d = h.shop ? -1 : Math.hypot(h.x - MX, h.z - M.z);
+      was.shop = hs; was.wpn = h.wpn;
+      const d = hs ? -1 : Math.hypot(h.x - MX, h.z - M.z);
       if (d < best) { best = d; look = clamp(Math.atan2(h.x - MX, h.z - M.z), -0.9, 0.9); }
       if (!near && h.state !== 'dead' && Math.hypot(h.x - M.x, h.z - (M.counterZ + 1.5)) < 2.4) near = true;
     }
     man.rotation.y += (look - man.rotation.y) * Math.min(1, dt * 4);
     mixer.update(dt);
-    shopUi.sayT -= dt;
-    if (!buyer && shopUi.sayT <= 0) {
-      shopUi.say = near ? 'Approche, mon brave ! J\'ai de belles armes.' : '';
-    }
+    const sp0 = shopUi.spk[0];
+    sp0.sayT -= dt;
+    if (!buyer && sp0.sayT <= 0) sp0.say = near ? 'Approche, mon brave ! J\'ai de belles armes.' : '';
     // carrousel : l'arme montrée au centre, ses voisines de part et d'autre
     const sel = buyer ? buyer.shop - 1 : -1, N = WEAPON_IDS.length, k2 = Math.min(1, dt * 10);
     for (let k = 0; k < N; k++) {
       const g = shows[k];
-      let d = sel < 0 ? 9 : (k - sel + N) % N;
+      let d = (k - sel + N) % N;
       if (d > N / 2) d -= N;
-      if (Math.abs(d) > 1) { g.visible = false; continue; }
+      if (sel < 0 || Math.abs(d) > 1) { g.visible = false; continue; }
       const x = AX + d * 0.58;
       if (!g.visible) { g.visible = true; g.position.set(x, 1, M.counterZ); g.scale.setScalar(0.01); }
       g.position.x += (x - g.position.x) * k2;
@@ -3518,44 +3535,169 @@ function buildMerchant() {
     }
     if (lampRef.light) lampRef.light.intensity += ((buyer ? 3 : 0.8) - lampRef.light.intensity) * Math.min(1, dt * 4);
     sign.visible = localShopper() < 0;   // vue de près : l'enseigne passerait sous le titre
-    shopSync();
   });
 }
 
-// bulle du marchand et panneau de choix (HTML par-dessus la scène)
+// ---------- Sorcier ----------
+// Un vieux sorcier devant sa petite tente, à gauche de la porte. Un héros qui marche sur la dalle devant son
+// chaudron entre dans son « étal » (p.shop avec p.shopK = 1) : il choisit un sort parmi tous (SPELL_IDS),
+// dont les icônes tournent au-dessus du chaudron. Comme le marchand : tout passe par la simulation.
+const SPELL_ICON = { soldier: '🌀', human: '💨', orc: '💥', archer: '🏹', knight: '🛡️', zombie: '☠️', robot: '⚡', stone: '🪨', totem: '🗿' };
+const SPELL_LINES = {
+  soldier: 'Le Tourbillon : tourne, tourne, et que tout tombe autour de toi !',
+  human: 'L\'Estoc fulgurant… rapide comme l\'éclair, hé hé.',
+  orc: 'La Frappe sismique ! Le sol lui-même leur tombera dessus.',
+  archer: 'Une pluie de flèches, et un bond en arrière. Prudent !',
+  knight: 'Le Rempart sacré : la lumière te protège un moment.',
+  zombie: 'La Nuée putride… ça sent mauvais, mais ça soigne.',
+  robot: 'La Décharge d\'arc : les gardes ne tiennent pas face à la foudre.',
+  stone: 'Peau de pierre ! Tu seras lent… mais qui pourra te faire mal ?',
+  totem: 'Mon Totem de vie : plante-le, reste près de lui, et guéris.',
+};
+// à qui appartient un sort (affiché dans le panneau)
+const spellOwner = (id) => {
+  const n = HEROES[id]?.name;
+  return !n ? 'Secret du sorcier' : /^[AEIOUYÉÈÂ]/i.test(n) ? `Sort de l'${n}` : `Sort du ${n}`;
+};
+function buildSorcerer() {
+  const S = SORCERER;
+  const tent = inst('tent', 1);
+  tent.position.set(S.tentX, 0, S.tentZ);
+  world.add(tent);
+  const pot = inst('cauldron', 1);
+  pot.position.set(S.x, 0, S.cauldronZ);
+  glowNode(pot, 'brew', new THREE.Color(0x7dff5a));
+  world.add(pot);
+  const sign = label('SORCIER', 'Sorts au choix', S.tentX, 2.35, S.tentZ + 0.75, 1.5);
+  const man = inst('sorcerer', 1.6);
+  man.position.set(S.manX, 0, S.z);
+  world.add(man);
+  const mixer = new THREE.AnimationMixer(man);
+  const idle = mixer.clipAction(clipOf('sorcerer', 'idle'));
+  idle.play();
+  let cur = null;
+  const gesture = (name) => {
+    const a = mixer.clipAction(clipOf('sorcerer', name));
+    if (cur && cur !== a) cur.fadeOut(0.15);
+    a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true; a.fadeIn(0.15).play();
+    idle.fadeOut(0.15);
+    cur = a;
+  };
+  mixer.addEventListener('finished', (e) => {
+    if (e.action !== cur) return;
+    cur.fadeOut(0.25); cur = null;
+    idle.reset().fadeIn(0.25).play();
+  });
+  // icônes des sorts qui tournent au-dessus du chaudron pendant le choix (la sélection au premier plan)
+  const shows = SPELL_IDS.map((id) => {
+    const sp = new THREE.Sprite(emojiMat(SPELL_ICON[id] ?? '✨'));
+    sp.visible = false;
+    world.add(sp);
+    return sp;
+  });
+  const lampRef = queueLight(0x7dff5a, 0.9, 3.5, 1.5, S.x, 0.9, S.cauldronZ, 6);
+  shopUi.lastS.forEach((o) => { o.shop = 0; o.sp = ''; });
+  say(1, '', 0);
+
+  updaters.push((dt, t) => {
+    const np = isDungeon() ? Math.min(sim.g.np, sim.f.length) : 0;
+    const locSh = localShopper();
+    let buyer = locSh >= 0 && shopOf(sim.f[locSh]) === 2 ? sim.f[locSh] : null, look = 0, best = 4.5, near = false;
+    for (let i = 0; i < np; i++) {
+      const h = sim.f[i], hs = shopOf(h) === 2 ? h.shop : 0, mine = spellKey(h);
+      if (!buyer && hs) buyer = h;
+      const was = shopUi.lastS[i];
+      if (was.sp) {
+        if (hs && !was.shop) { gesture('interact-right'); say(1, 'Hé hé… Quel sort veux-tu apprendre ?', 0); }
+        else if (hs && hs !== was.shop) say(1, SPELL_LINES[SPELL_IDS[hs - 1]] ?? '', 0);
+        else if (!hs && was.shop) {
+          if (mine !== was.sp) { gesture('emote-yes'); say(1, 'Voilà, c\'est gravé dans ta tête. Hé hé !', 2.6); }
+          else { gesture('emote-no'); say(1, 'Reviens quand tu veux, jeune pousse.', 2); }
+        }
+      }
+      was.shop = hs; was.sp = mine;
+      const d = hs ? -1 : Math.hypot(h.x - S.manX, h.z - S.z);
+      if (d < best) { best = d; look = clamp(Math.atan2(h.x - S.manX, h.z - S.z), -0.9, 0.9); }
+      if (!near && h.state !== 'dead' && Math.hypot(h.x - S.x, h.z - (S.cauldronZ + 1.2)) < 2.2) near = true;
+    }
+    man.rotation.y += (look - man.rotation.y) * Math.min(1, dt * 4);
+    mixer.update(dt);
+    const sp1 = shopUi.spk[1];
+    sp1.sayT -= dt;
+    if (!buyer && sp1.sayT <= 0) sp1.say = near ? 'Psst… Des sorts, jeune guerrier ?' : '';
+    // carrousel : la sélection au-dessus du chaudron, ses voisines plus petites de part et d'autre
+    const sel = buyer ? buyer.shop - 1 : -1, N = SPELL_IDS.length, k2 = Math.min(1, dt * 10);
+    for (let k = 0; k < N; k++) {
+      const g = shows[k];
+      let d = (k - sel + N) % N;
+      if (d > N / 2) d -= N;
+      if (sel < 0 || Math.abs(d) > 1) { g.visible = false; continue; }
+      const x = S.x - 0.15 + d * 0.42;
+      if (!g.visible) { g.visible = true; g.position.set(x, 1, S.cauldronZ); g.scale.setScalar(0.01); }
+      g.position.x += (x - g.position.x) * k2;
+      g.position.y = (d ? 1.3 : 1.55) + Math.sin(t * 2 + k) * 0.05;
+      g.position.z = S.cauldronZ + (d ? -0.1 : 0.15);
+      g.scale.setScalar(g.scale.x + ((d ? 0.32 : 0.55) - g.scale.x) * k2);
+    }
+    // la potion bouillonne (petites bulles qui montent), plus fort pendant le choix
+    if (Math.random() < dt * (buyer ? 8 : 2.5)) emit(S.x + rand(-0.15, 0.15), 0.6, S.cauldronZ + rand(-0.15, 0.15), 1, { color: [0x7dff5a, 0xc8ff9a], speed: 0.15, up: 0.7, size: 0.06, life: 0.7, grav: -0.5 });
+    if (lampRef.light) lampRef.light.intensity = (buyer ? 2.4 : 0.9) + Math.sin(t * 7) * 0.15;
+    sign.visible = localShopper() < 0;
+  });
+}
+
+// bulle du marchand ou du sorcier et panneau de choix (HTML par-dessus la scène)
 let talkVis = false, shopVis = false, talkX = '', talkY = '';
+const TALKERS = [
+  { who: 'Le vieux marchand', x: MERCHANT.x + 0.5, y: 1.75, z: MERCHANT.z },
+  { who: 'Le sorcier', x: SORCERER.manX, y: 2.05, z: SORCERER.z },
+];
 function shopSync() {
   const hub = isDungeon() && sim.g.phase === 'hub' && !game.paused;
   const talk = $('talk');
-  const v = v1.set(MERCHANT.x + 0.5, 1.75, MERCHANT.z).project(camera);
-  const showTalk = !!(hub && shopUi.say && v.z < 1);
+  const h = hub ? localShopper() : -1;
+  // qui parle : la boutique du héros local, sinon le dernier qui a quelque chose à dire
+  const [a, b] = shopUi.spk;
+  const k = h >= 0 ? (sim.f[h].shopK ? 1 : 0) : b.say && (!a.say || b.sayT > a.sayT) ? 1 : 0;
+  const T = TALKERS[k], txt = shopUi.spk[k].say;
+  const v = v1.set(T.x, T.y, T.z).project(camera);
+  const showTalk = !!(hub && txt && v.z < 1);
   if (showTalk) {
     if (!talkVis) { talkVis = true; talk.classList.remove('hidden'); }
-    if (talk.dataset.txt !== shopUi.say) { talk.dataset.txt = shopUi.say; $('talkTxt').textContent = shopUi.say; }
+    if (talk.dataset.txt !== txt) { talk.dataset.txt = txt; $('talkTxt').textContent = txt; }
+    if (talk.dataset.who !== T.who) { talk.dataset.who = T.who; $('talkWho').textContent = T.who; }
     const lx = Math.round((v.x + 1) / 2 * innerWidth) + 'px', ty = Math.round((1 - v.y) / 2 * innerHeight) + 'px';
     if (lx !== talkX) { talkX = lx; talk.style.left = lx; }
     if (ty !== talkY) { talkY = ty; talk.style.top = ty; }
   } else if (talkVis) { talkVis = false; talk.classList.add('hidden'); }
 
-  const h = hub ? localShopper() : -1;
-  for (const k of [0, 1]) if (k !== h) shopReq[k] = -1;
+  for (const n of [0, 1]) if (n !== h) shopReq[n] = -1;
   setCls('help', 'shopping', h >= 0);
   if (h < 0) {
     shopUi.key = '';
     if (shopVis) { shopVis = false; $('shop').classList.add('hidden'); }
     return;
   }
-  const p = sim.f[h], sel = p.shop - 1;
-  const key = [h, sel, p.wpn].join('|');
+  const p = sim.f[h], sel = p.shop - 1, spells = !!p.shopK, mine = spells ? spellKey(p) : p.wpn;
+  const key = [h, p.shopK, sel, mine].join('|');
   if (key === shopUi.key) return;
   shopUi.key = key;
-  const id = WEAPON_IDS[sel], w = WEAPONS[id];
-  $('shopName').textContent = w.name;
-  $('shopMine').classList.toggle('hidden', id !== p.wpn);
-  $('shopDesc').textContent = w.desc;
-  $('shopList').innerHTML = WEAPON_IDS.map((wid, k) =>
-    `<button class="${k === sel ? 'on' : ''}${wid === p.wpn ? ' mine' : ''}" data-k="${k}"><kbd>${k + 1}</kbd>${esc(SHOP_SHORT[wid] ?? WEAPONS[wid].name)}</button>`).join('');
-  $('shopList').querySelectorAll('button').forEach((b) => { b.onclick = () => { shopReq[h] = +b.dataset.k; }; });
+  const list = spells ? SPELL_IDS : WEAPON_IDS, id = list[sel];
+  setCls('shop', 'spells', spells);
+  if (spells) {
+    const S = SPELLS[id];
+    $('shopName').textContent = `${SPELL_ICON[id] ?? ''} ${S.name}`;
+    $('shopMine').textContent = '✔ TON SORT';
+    $('shopDesc').textContent = `${S.desc} · recharge ${S.cd} s · ${spellOwner(id)}`;
+  } else {
+    $('shopName').textContent = WEAPONS[id].name;
+    $('shopMine').textContent = '✔ TON ARME';
+    $('shopDesc').textContent = WEAPONS[id].desc;
+  }
+  $('shopMine').classList.toggle('hidden', id !== mine);
+  $('shopList').innerHTML = list.map((wid, n) =>
+    `<button class="${n === sel ? 'on' : ''}${wid === mine ? ' mine' : ''}" data-k="${n}"><kbd>${n + 1}</kbd>${spells ? `${SPELL_ICON[wid] ?? ''} ${esc(SPELLS[wid].name)}` : esc(SHOP_SHORT[wid] ?? WEAPONS[wid].name)}</button>`).join('');
+  $('shopList').querySelectorAll('button').forEach((bt) => { bt.onclick = () => { shopReq[h] = +bt.dataset.k; }; });
   const ks = KEYSETS[localHeroes().length > 1 ? h : 0];
   const k1 = (act) => kb(key1(ks, act) ?? '?');
   $('shopKeys').innerHTML = `${k1('l')} ${k1('r')} choisir · ${k1('atk')} ou ${k1('jump')} prendre · ${k1('d')} ou ${k1('blk')} partir`;
@@ -3638,6 +3780,7 @@ function saveHeroes() {
     const n = match?.mode === 'online' ? 1 : k + 1;
     cfg['p' + n] = sim.f[h].kind;
     cfg['w' + n] = sim.f[h].wpn;
+    cfg['s' + n] = sim.f[h].spell;
   });
   saveCfg();
 }
@@ -3684,6 +3827,7 @@ function dungeonSync() {
   else { heroViews(); extraViews(); }
   if (g.exitOpen && !dng.gateOpen) { dng.gateOpen = true; dng.gate?.open(); }
   pkSync(dt, clockT);
+  totemSync(dt, clockT);
   itemCard();
   bannerTick();
   dng.traps.forEach((t, k) => {
@@ -3702,6 +3846,43 @@ function dungeonSync() {
   });
   bossTele();
   if (g.phase === 'end' && !dng.endShown) endDungeon();
+}
+
+// ---------- Totem de vie (sort) : un totem 3D par lanceur, déduit de f.totT / totX / totY / totZ ----------
+const totRingGeo = new THREE.RingGeometry(SPELLS.totem.R - 0.08, SPELLS.totem.R, 48).rotateX(-Math.PI / 2);
+const totDiscGeo = new THREE.CircleGeometry(SPELLS.totem.R, 48).rotateX(-Math.PI / 2);
+keep(totRingGeo, totDiscGeo);
+const totCol = new THREE.Color(0x8fe36a);
+function totemSync(dt, T) {
+  const np = Math.min(sim.g.np, sim.f.length), S = SPELLS.totem;
+  for (let i = 0; i < Math.max(np, dng.tot.length); i++) {   // dng.tot peut garder le totem d'un équipier parti
+    const f = i < np ? sim.f[i] : null;
+    let v = dng.tot[i];
+    if (!(f?.totT > 0)) { if (v) { v.g.visible = false; v.x = NaN; } continue; }   // NaN : le prochain repoussera du sol
+    if (!v) {
+      const g = new THREE.Group();
+      const m = inst('totem', 1);
+      const gem = glowNode(m, 'gem', totCol);
+      const mat = (o) => new THREE.MeshBasicMaterial({ color: totCol, transparent: true, opacity: o, depthWrite: false, toneMapped: false });
+      const ring = new THREE.Mesh(totRingGeo, mat(0.6)), disc = new THREE.Mesh(totDiscGeo, mat(0.08));
+      ring.position.y = 0.03; disc.position.y = 0.02; ring.renderOrder = disc.renderOrder = 2;
+      g.add(m, ring, disc);
+      world.add(g);
+      v = dng.tot[i] = { g, m, gem, ring, disc, grow: 0, x: NaN, z: NaN };
+    }
+    // un nouveau totem (autre position) repousse depuis le sol
+    if (v.x !== f.totX || v.z !== f.totZ) { v.x = f.totX; v.z = f.totZ; v.grow = 0; v.g.position.set(f.totX, f.totY, f.totZ); }
+    v.g.visible = true;
+    v.grow = Math.min(1, v.grow + dt * 3.5);
+    const fade = Math.min(1, f.totT / 0.4);                 // il s'enfonce dans le sol à la fin
+    const up = v.grow < 1 ? v.grow * (1 + 0.35 * Math.sin(v.grow * Math.PI)) : 1;
+    v.m.scale.set(1, Math.max(0.01, up * fade), 1);
+    if (v.gem) { v.gem.rotation.y = T * 2; v.gem.position.y = 0.04 * Math.sin(T * 3); }
+    // l'anneau s'illumine à chaque soin (totK repart de S.tick), puis s'éteint doucement
+    const p = clamp((f.totK ?? 0) / S.tick, 0, 1);
+    v.ring.material.opacity = (0.25 + 0.55 * p * p) * fade;
+    v.disc.material.opacity = (0.05 + 0.1 * p * p) * fade;
+  }
 }
 
 // ---------- Colosse : zones dangereuses au sol (déduites de l'état de la simulation) ----------
@@ -3830,7 +4011,9 @@ function dungeonPreview() {
 }
 
 // m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed, sid }
-function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p1, p2: cfg.p2, w1: cfg.w1, w2: cfg.w2 }) {
+// sort appris chez le sorcier (clé de SPELLS), '' = celui du héros
+const cleanSpell = (x) => (typeof x === 'string' && SPELLS[x] ? x : '');
+function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p1, p2: cfg.p2, w1: cfg.w1, w2: cfg.w2, s1: cfg.s1, s2: cfg.s2 }) {
   match = { ...m, game: 'dungeon' };
   net.live = m.mode === 'online';
   rb = null;
@@ -3872,7 +4055,7 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
     acc = 0;
     return;
   }
-  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np));
+  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np), [cleanSpell(m.s1), cleanSpell(m.s2)]);
   sim.startHub();   // on commence dans la salle d'armes
   playEvents(sim.ev);
   sim.ev.length = 0;
@@ -3986,8 +4169,13 @@ function dungeonCam(dt) {
   if (sh >= 0 && match?.mode !== 'duo') {
     const p = sim.f[sh];
     camAng = 0;      // les flèches suivent l'écran : ← → le long du comptoir, ↓ pour s'en aller
-    camPos.set(p.x + 1.05, 2.4, p.z + 2.45);
-    camTgt.set(MERCHANT.x + 0.15, 0.8, MERCHANT.counterZ - 0.3);
+    if (p.shopK) {   // sorcier : plus haut et en retrait, pour que le héros (en bas de l'image) ne cache pas le chaudron
+      camPos.set(p.x + 1.6, 5.2, p.z + 2.7);
+      camTgt.set(SORCERER.x + 0.1, 0.7, SORCERER.cauldronZ - 0.5);
+    } else {
+      camPos.set(p.x + 1.05, 2.4, p.z + 2.45);
+      camTgt.set(MERCHANT.x + 0.15, 0.8, MERCHANT.counterZ - 0.3);
+    }
     return;
   }
   camAng = ISO;   // fixe : les déplacements suivent l'écran
@@ -4222,7 +4410,7 @@ function netSend(m) { if (net.ws?.readyState === 1) net.ws.send(JSON.stringify(m
 function netClose() {
   const ws = net.ws;
   net.link?.close();
-  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [], hall: false, halls: [] });
+  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [] });
   rb = null;
   coop = null;
   if (ws) ws.close();
@@ -4281,9 +4469,10 @@ function netStart(forcedGame = null) {
   const keepDg = g === 'dungeon' && isDungeon() && sim.f.length >= 2;
   const p1 = keepDg ? sim.f[0].kind : cfg.p1, w1 = keepDg ? sim.f[0].wpn : (cfg.w1 || '');
   const p2 = keepDg ? sim.f[1].kind : (net.peerKind || 'soldier'), w2 = keepDg ? sim.f[1].wpn : (net.peerWpn || '');
+  const s1 = keepDg ? sim.f[0].spell : cleanSpell(cfg.s1), s2 = keepDg ? sim.f[1].spell : net.peerSpell;
   const m = {
     mode: 'online', game: g, sid: nextSid(),
-    p1, p2, w1, w2,
+    p1, p2, w1, w2, s1, s2,
     u1: unlockedHeroes(), u2: net.peerUnlocked,
     arena: cfg.arena, seed: (Math.random() * 4294967296) >>> 0,
   };
@@ -4320,6 +4509,7 @@ function netMsg(m) {
     case 'hello':
       net.peerKind = CHARS[m.kind] ? m.kind : 'soldier';
       net.peerWpn = WEAPON_IDS.includes(m.wpn) ? m.wpn : null;
+      net.peerSpell = cleanSpell(m.spell);
       net.peerName = cleanName(m.name);
       net.peerUnlocked = cleanUnlocked(m.unlocked);
       if (coop?.role === 'host' && sim.g.room === 0 && sim.unlocked) sim.unlocked[1] = net.peerUnlocked;
@@ -4330,7 +4520,7 @@ function netMsg(m) {
       if (net.role !== 'guest' || !CHARS[m.p1] || !CHARS[m.p2]) break;
       const sid = Number.isFinite(+m.sid) ? +m.sid : 1;
       const seed = Number.isFinite(+m.seed) ? +m.seed : 1;
-      if (m.game === 'dungeon') startDungeon({ mode: 'online', sid, p1: m.p1, p2: m.p2, w1: m.w1, w2: m.w2, u1: cleanUnlocked(m.u1), u2: cleanUnlocked(m.u2), seed });
+      if (m.game === 'dungeon') startDungeon({ mode: 'online', sid, p1: m.p1, p2: m.p2, w1: m.w1, w2: m.w2, s1: cleanSpell(m.s1), s2: cleanSpell(m.s2), u1: cleanUnlocked(m.u1), u2: cleanUnlocked(m.u2), seed });
       else if (ARENAS[m.arena]) startMatch({ mode: 'online', sid, p1: m.p1, p2: m.p2, arena: m.arena, seed });
       break;
     }
@@ -4342,14 +4532,14 @@ function netMsg(m) {
     case 'bye': {
       const dg = net.live && match?.game === 'dungeon';
       const wasHost = net.role === 'host';
-      const mine = dg && sim.f[net.me] ? { kind: sim.f[net.me].kind, wpn: sim.f[net.me].wpn } : null;
+      const mine = dg && sim.f[net.me] ? { kind: sim.f[net.me].kind, wpn: sim.f[net.me].wpn, spell: sim.f[net.me].spell } : null;
       const onResult = !$('result').classList.contains('hidden');
       net.link?.close(); net.link = null;
       coop = null; rb = null;
       if (dg && onResult) {
         // Écran de fin : ne pas interrompre le joueur, lui permettre de relancer seul
         net.live = false;
-        if (wasHost) Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [] });
+        if (wasHost) Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [] });
         else netClose();
         match.mode = 'solo';
         $('resSub').textContent += '  ·  équipier parti';
@@ -4372,7 +4562,7 @@ function netMsg(m) {
         } else {
           // L'invité retourne dans sa salle d'armes solo avec son héros et son arme
           netClose();
-          startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, p2: cfg.p2, w2: cfg.w2 });
+          startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, s1: mine ? mine.spell : cfg.s1, p2: cfg.p2, w2: cfg.w2, s2: cfg.s2 });
           lobby.msg = 'L’hôte a quitté la partie.';
           announce('L’HÔTE A QUITTÉ', 2.2, '#ff6b57');
         }
@@ -4380,7 +4570,7 @@ function netMsg(m) {
       }
       if (net.live && !dg) toMenu(true);
       if (wasHost) {
-        Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerName: '', peerUnlocked: [] });
+        Object.assign(net, { peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [] });
         if (game.phase === 'menu') menuFighters();
         netInfo('L’adversaire a quitté la partie.<br>' + hostInfo());
       } else {
@@ -4389,7 +4579,7 @@ function netMsg(m) {
         netInfo('L’hôte a fermé la partie.');
       }
       if (dg) {
-        startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, p2: cfg.p2, w2: cfg.w2 });
+        startDungeon({ mode: 'solo', p1: mine?.kind || cfg.p1, w1: mine?.wpn || cfg.w1, s1: mine ? mine.spell : cfg.s1, p2: cfg.p2, w2: cfg.w2, s2: cfg.s2 });
         lobby.msg = wasHost && net.hall ? 'Ton équipier est parti. Ton salon reste ouvert.' : 'Ton équipier a quitté la partie.';
       }
       break;
@@ -4561,12 +4751,12 @@ const inHall = () => isDungeon() && game.phase === 'hub' && !net.live && match?.
 // héros et arme de ce joueur : ceux de la salle d'armes en cours, sinon ceux du menu
 function myHero() {
   const p = game.phase !== 'menu' && isDungeon() ? sim.f[localHeroes()[0] ?? 0] : null;
-  return { ...(p ? { kind: p.kind, wpn: p.wpn } : { kind: cfg.p1, wpn: cfg.w1 || '' }), name: myName(), unlocked: unlockedHeroes() };
+  return { ...(p ? { kind: p.kind, wpn: p.wpn, spell: p.spell } : { kind: cfg.p1, wpn: cfg.w1 || '', spell: cleanSpell(cfg.s1) }), name: myName(), unlocked: unlockedHeroes() };
 }
 function lobbyWs(m) { if (net.ws?.readyState === 1) netSend(m); else netConnect(m); }
 function hallStart() {
   const me = myHero();
-  const m = { mode: 'online', game: 'dungeon', sid: nextSid(), p1: me.kind, w1: me.wpn, p2: net.peerKind || 'soldier', w2: net.peerWpn || '',
+  const m = { mode: 'online', game: 'dungeon', sid: nextSid(), p1: me.kind, w1: me.wpn, s1: me.spell, p2: net.peerKind || 'soldier', w2: net.peerWpn || '', s2: net.peerSpell,
     u1: unlockedHeroes(), u2: net.peerUnlocked, seed: (Math.random() * 4294967296) >>> 0 };
   netSend({ t: 'start', ...m });
   startDungeon(m);

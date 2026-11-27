@@ -11,7 +11,7 @@
 //  les IA des ennemis tournent DANS la simulation et sont sauvegardées avec elle, ce qui
 //  permet de jouer en ligne avec le rollback de rollback.js (step(entrée0, entrée1)).
 // =====================================================================
-import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, spellOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
+import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, SPELL_IDS, spellOf, spellCdOf, spellShield, knockOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
 import { hypot, atan2, clamp, sin, cos } from './dmath.js';
 import { AI } from './ai.js';
 import { ITEM_BASE, STATUS0, ITEM_METHODS, MINOR_IDS, LOOT, FX, CAPS, heal, rollItem, itemOf } from './items.js';
@@ -108,21 +108,31 @@ export const WEAPON_IDS = Object.keys(WEAPONS).filter((k) => !WEAPONS[k].hidden)
 export const PAD_R = 0.55;
 // le marchand, derrière son comptoir ; on lui parle en marchant sur la dalle devant le comptoir
 export const MERCHANT = { x: 3.4, z: -5.55, counterZ: -4.95, counterW: 2.3 };
+// le sorcier, devant sa tente (à gauche de la porte) : on apprend un sort en marchant sur la dalle devant son chaudron
+// (x : dalle et chaudron ; manX, z : le sorcier, debout à droite du chaudron, devant sa tente)
+export const SORCERER = { x: -3.1, manX: -2.2, z: -5.0, tentX: -3.35, tentZ: -6.05, cauldronZ: -4.55 };
 export const HUB_PADS = [
   ...HERO_IDS.map((id, k) => ({ t: 'hero', id, x: -4.6, z: -2.4 + k * 1.35 })),
   { t: 'shop', id: 'shop', x: MERCHANT.x, z: -3.85 },
+  { t: 'spell', id: 'spell', x: SORCERER.x, z: -3.55 },
 ];
 const HUB_WALL = -5.15;
 // socle de la statue, derrière chaque dalle de héros (contre le mur)
 export const padStand = (pd) => ({ x: -5.9, z: pd.z });
 
-// Boutique : un héros sur la dalle du marchand choisit son arme (p.shop = 1 + arme montrée).
+// Boutique : un héros sur la dalle du marchand choisit son arme, sur celle du sorcier son sort
+// (p.shopK : 0 = marchand, 1 = sorcier ; p.shop = 1 + arme ou sort montré).
 // ← → (selon l'écran) changent l'arme montrée, attaque ou saut la prend, reculer ou bloquer s'en va.
 // Une arme peut aussi être prise directement (clic, touches 1 à 9) : entrée mx = SHOP + n, mz = 127,
 // blk = vrai (un déplacement au clavier ne donne jamais mx entre 110 et 126).
 const SHOP = 110;
 export const shopInput = (n) => ({ mx: SHOP + n, mz: 127, blk: true, press: 0 });
-const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + WEAPON_IDS.length ? s.mx - SHOP : -1);
+const SHOP_N = Math.max(WEAPON_IDS.length, SPELL_IDS.length);
+const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + SHOP_N ? s.mx - SHOP : -1);
+// ce que propose la boutique où se trouve p (armes ou sorts)
+export const shopList = (p) => (p.shopK ? SPELL_IDS : WEAPON_IDS);
+// sort actuel de p (clé de SPELLS) : celui choisi chez le sorcier, sinon celui de son personnage
+export const spellKey = (p) => (SPELLS[p.spell] ? p.spell : SPELLS[p.kind] ? p.kind : 'soldier');
 const SHOP_DIR = 64;   // seuil d'une direction franche (sur 127)
 
 // Butin : les objets (items.js) sont sur des piédestaux (salle au trésor, boss) ; les salles normales
@@ -139,24 +149,26 @@ export const REVIVE = { time: 3, R: 1.5, hp: 0.4, decay: 2 };
 const FURY = { below: 0.4, mul: 1.7 };
 
 const OBS_R = { column: 0.4, barrel: 0.45, rocks: 0.65, stand: 0.45 };
-const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteur (les flèches passent au-dessus)
+const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8, tent: 1.6, cauldron: 0.7, npc: 1.6 };   // hauteur (les flèches passent au-dessus)
 
 // donne au héros p son personnage et son arme (statistiques de base + trait du personnage)
-export function equip(p, kind, wpn = defaultWeapon(kind)) {
+// spell : sort appris chez le sorcier ('' = celui du personnage) ; gardé par défaut
+export function equip(p, kind, wpn = defaultWeapon(kind), spell = p.spell ?? '') {
   if (!HEROES[kind]) kind = 'soldier';
   if (!WEAPONS[wpn]) wpn = defaultWeapon(kind);
+  if (!SPELLS[spell]) spell = '';
   // statistiques de base et effets des objets (tout est remis à zéro : objets possédés compris)
-  Object.assign(p, { kind, wpn, ...ITEM_BASE, spellCd: 0, spellMax: spellOf({ kind }).cd, spellBuffT: 0 });
+  Object.assign(p, { kind, wpn, spell, ...ITEM_BASE, spellCd: 0, spellMax: spellOf({ kind, spell }).cd, spellBuffT: 0, stoneT: 0, totT: 0 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
   const tank = wpnOf(p).tank;                   // gants de boxe : se cumule avec l'armure du héros
   if (tank) p.armor = 1 - (1 - p.armor) * (1 - tank);
   p.hp = p.maxHp;
 }
-function newHero(i, kind, wpn) {
+function newHero(i, kind, wpn, spell) {
   // team : 0 = camp des héros (héros et chiens invoqués), 1 = ennemis ; owner : maître d'un chien
-  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1, kills: 0, down: 0, revT: 0, ...STATUS0 });
-  equip(p, kind, wpn);
+  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, trapT: 0, pad: -1, shop: 0, shopK: 0, shopIn: 0, team: 0, owner: -1, kills: 0, down: 0, revT: 0, ...STATUS0 });
+  equip(p, kind, wpn, spell);
   return p;
 }
 
@@ -174,11 +186,12 @@ export class DungeonSim extends Sim {
   // kinds : personnage de chaque héros (1 ou 2) ; wpns : leurs armes (par défaut : celle du personnage)
   // unlocked : héros débloqués de chaque joueur (listes d'identifiants), ou null = tous (tests, outils).
   // Ce n'est pas de l'état : identique chez les deux joueurs en ligne (transmis au lancement).
-  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null) {
+  // spells : sorts appris chez le sorcier ('' ou absent = celui du personnage)
+  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null, spells = []) {
     super(seed);
     if (!Array.isArray(kinds)) kinds = [kinds];
     this.unlocked = unlocked ? kinds.map((_, i) => (Array.isArray(unlocked[i]) ? unlocked[i].filter((k) => HEROES[k]) : [])) : null;
-    this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i]));
+    this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i], spells?.[i] ?? ''));
     this.inp = this.f.map(() => newInput());
     this.g = { phase: 'menu', np: kinds.length, room: 0, kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
       exitOpen: false, flagEnd: false,
@@ -213,11 +226,15 @@ export class DungeonSim extends Sim {
     const obs = HUB_PADS.filter((pd) => pd.t === 'hero').map((pd) => ({ ...padStand(pd), r: OBS_R.stand, kind: 'stand' }));
     // comptoir du marchand (trois cercles côte à côte)
     for (const dx of [-0.8, 0, 0.8]) obs.push({ x: MERCHANT.x + dx, z: MERCHANT.counterZ, r: OBS_R.stand, kind: 'counter' });
+    // le sorcier : sa tente (deux cercles contre le mur) et son chaudron
+    for (const dx of [-0.55, 0.55]) obs.push({ x: SORCERER.tentX + dx, z: SORCERER.tentZ, r: 0.75, kind: 'tent' });
+    obs.push({ x: SORCERER.x, z: SORCERER.cauldronZ, r: 0.42, kind: 'cauldron' });
+    obs.push({ x: SORCERER.manX, z: SORCERER.z, r: 0.35, kind: 'npc' });
     for (const [x, z] of [[5.3, -2.4], [5.3, -1.2], [5.3, 5.3]]) obs.push({ x, z, r: OBS_R.barrel, kind: 'barrel' });
     this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, pads: HUB_PADS };
     this.heroes.forEach((p, i) => {
       const x = this.g.np > 1 ? (i ? 1.6 : 0.4) : 1, yaw = Math.PI * 0.75;
-      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
+      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopK: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: spellOf(p).cd });
       p.resetN++;
       this.toIdle(p);
     });
@@ -239,7 +256,7 @@ export class DungeonSim extends Sim {
     p.pad = on;
     if (on < 0) return;
     const pd = pads[on];
-    if (pd.t === 'shop') { this.enterShop(p, pd); return; }
+    if (pd.t === 'shop' || pd.t === 'spell') { this.enterShop(p, pd); return; }
     if (pd.id === p.kind) return;
     if (!this.canPick(p.idx, pd.id)) {
       this.emit('pop', 'VERROUILLÉ', p.x, p.y + 2.1, p.z, 'miss');
@@ -263,15 +280,16 @@ export class DungeonSim extends Sim {
   // ---------------- boutique du marchand ----------------
   enterShop(p, pd) {
     if (p.state === 'dead' || p.shop) return;
-    p.shop = 1 + Math.max(0, WEAPON_IDS.indexOf(p.wpn));
+    p.shopK = pd.t === 'spell' ? 1 : 0;
+    p.shop = 1 + Math.max(0, p.shopK ? SPELL_IDS.indexOf(spellKey(p)) : WEAPON_IDS.indexOf(p.wpn));
     p.shopIn = 7;                       // ignore la direction tenue en arrivant, jusqu'à ce qu'on la relâche
-    const yaw = Math.PI;                // face au marchand (vers −z)
+    const yaw = Math.PI;                // face au marchand ou au sorcier (vers −z)
     // à deux devant le comptoir : on se décale légèrement pour ne pas se pousser hors de la dalle
-    const busy = this.heroes.some((q) => q !== p && q.shop > 0);
+    const busy = this.heroes.some((q) => q !== p && q.shop > 0 && q.shopK === p.shopK);
     const x = busy ? pd.x + (p.idx ? 0.52 : -0.52) : pd.x;
     Object.assign(p, { x, z: pd.z, vx: 0, vz: 0, yaw, visTarget: yaw });
     this.toIdle(p);
-    this.emit('sfx', 'coin');
+    this.emit('sfx', p.shopK ? 'spell' : 'coin');
   }
   leaveShop(p) { p.shop = 0; p.shopIn = 0; }
   // entrée d'un héros dans la boutique (sa vraie entrée est ensuite remplacée par NEUTRAL)
@@ -284,7 +302,7 @@ export class DungeonSim extends Sim {
     else if (dir !== p.shopIn) {
       p.shopIn = dir;
       if (dir) {
-        const N = WEAPON_IDS.length;
+        const N = shopList(p).length;
         p.shop = 1 + ((p.shop - 1 + dir + N) % N);
         this.emit('sfx', 'tick');
       }
@@ -292,12 +310,23 @@ export class DungeonSim extends Sim {
     if (p.shopIn !== 7 && src.press & (PRESS.atk | PRESS.jump)) this.buy(p, p.shop - 1);
   }
   buy(p, n) {
+    if (p.shopK) { this.learn(p, n); return; }
     const id = WEAPON_IDS[n];
     this.leaveShop(p);
-    if (id === p.wpn) return;
+    if (!id || id === p.wpn) return;
     equip(p, p.kind, id);
     this.emit('sfx', 'coin');
     this.equipped(p, WEAPONS[id].name);
+  }
+  // sorcier : p apprend le sort n de SPELL_IDS (celui de son propre héros = '' : il suivra ses changements de héros)
+  learn(p, n) {
+    const id = SPELL_IDS[n];
+    this.leaveShop(p);
+    if (!id || id === spellKey(p)) return;
+    p.spell = id === p.kind ? '' : id;
+    Object.assign(p, { spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: spellCdOf(p) });
+    this.emit('sfx', 'spell');
+    this.equipped(p, SPELLS[id].name);
   }
 
   // ---------------- sauvegarde (rollback en ligne) ----------------
@@ -470,8 +499,8 @@ export class DungeonSim extends Sim {
       const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
       if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
       else if (p.roomHeal > 0) heal(p, Math.round(p.maxHp * p.roomHeal));
-      const smax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
-      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: smax,
+      const smax = spellCdOf(p);
+      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: smax,
         ...STATUS0, took: 0, frenzyN: 0, rollBuffOn: 0, rollHit: 0, hitN: 0, zeusN: 0, auraT: 0, stormT: FX.storm.every });
       p.resetN++;
       this.toIdle(p);
@@ -600,7 +629,7 @@ export class DungeonSim extends Sim {
   }
 
   foeOf(o, f) { const s = this.f[o]; return !!s && s.team !== f.team; }
-  canCastSpell(f) { return this.isHero(f) && !!SPELLS[f.kind]; }
+  canCastSpell(f) { return this.isHero(f) && !!(SPELLS[f.spell] || SPELLS[f.kind]); }
   mitigateSpell(def, dmg) { return dmg; }   // appliqué directement dans DungeonSim.damage()
 
   // ---------------- grimoire : chiens invoqués ----------------
@@ -709,7 +738,7 @@ export class DungeonSim extends Sim {
     // coups critiques (Œil de lynx, Faucheur…) ; Cœur de l'hiver : toujours critique sur un ennemi congelé
     const isCrit = (att.crit > 0 && this.rng.next() < Math.min(CAPS.crit, att.crit)) || (att.frzCrit > 0 && def.sFrz > 0);
     const critK = isCrit ? (att.critMul ?? 2) : 1;
-    const aegis = def.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;                // sort Rempart sacré
+    const aegis = spellShield(def);                                                   // sorts Rempart sacré, Peau de pierre
     const amp = hero && def.team !== hero.team ? this.heroMul(att, def) : 1;        // bonus des objets (états, Midas…)
     const armor = Math.min(CAPS.armor, def.armor ?? 0);
     dmg = Math.max(1, Math.round(dmg * att.pow * fury * exec * vsBoss * critK * amp * (1 - armor) * aegis));
@@ -905,7 +934,7 @@ export class DungeonSim extends Sim {
           if (d.state === 'dead' || d.team === e.team) continue;
           const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
           if (dist > R.R || dist < 0.01) continue;
-          d.vx = dx / dist * R.knock; d.vz = dz / dist * R.knock;
+          d.vx = dx / dist * R.knock * knockOf(d); d.vz = dz / dist * R.knock * knockOf(d);
           if (d.state !== 'air' && d.state !== 'roll') { this.setState(d, 'hit', 0.4); this.play(d, 'idle', { fade: 0.05 }); }
         }
         // renforts : un de plus à deux
@@ -964,14 +993,14 @@ export class DungeonSim extends Sim {
       const nx = dist > 0.05 ? dx / dist : sin(e.yaw), nz = dist > 0.05 ? dz / dist : cos(e.yaw);
       if (d.state === 'block') {
         d.guard -= S.guard * guardOf(d); d.guardT = 0;
-        d.vx = nx * 3; d.vz = nz * 3;
+        d.vx = nx * 3 * knockOf(d); d.vz = nz * 3 * knockOf(d);
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
         if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
         continue;
       }
       this.damage(e, d, S.dmg, 0, 0.5, d.x, d.y + 0.6, d.z);
-      if (d.state !== 'dead') { d.vx = nx * S.knock; d.vz = nz * S.knock; }
+      if (d.state !== 'dead') { d.vx = nx * S.knock * knockOf(d); d.vz = nz * S.knock * knockOf(d); }
     }
   }
   // la charge renverse ceux qu'elle traverse (une fois chacun : spHit, un bit par combattant)
@@ -988,7 +1017,7 @@ export class DungeonSim extends Sim {
       const kx = e.spX * 0.8 + e.spZ * side * 0.6, kz = e.spZ * 0.8 - e.spX * side * 0.6;
       if (d.state === 'block' && sin(d.yaw) * e.spX + cos(d.yaw) * e.spZ < -0.2) {
         d.guard -= C.guard * guardOf(d); d.guardT = 0;
-        d.vx = kx * 4; d.vz = kz * 4;
+        d.vx = kx * 4 * knockOf(d); d.vz = kz * 4 * knockOf(d);
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
         this.emit('shake', 0.15);
@@ -996,7 +1025,7 @@ export class DungeonSim extends Sim {
         continue;
       }
       this.damage(e, d, C.dmg, 0, 0.55, d.x, d.y + 1, d.z);
-      if (d.state !== 'dead') { d.vx = kx * C.knock; d.vz = kz * C.knock; }
+      if (d.state !== 'dead') { d.vx = kx * C.knock * knockOf(d); d.vz = kz * C.knock * knockOf(d); }
     }
   }
   // la charge va-t-elle heurter un mur ou un obstacle ?
@@ -1011,7 +1040,7 @@ export class DungeonSim extends Sim {
   // pics d'un piège
   trapHit(f) {
     if (f.god) return;
-    const aegis = f.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;
+    const aegis = spellShield(f);
     const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor) * aegis));
     f.trapT = 1.0;
     if (f.phoenix && f.hp - dmg <= 0) { this.rebirth(f); return; }
@@ -1280,7 +1309,7 @@ export class DungeonSim extends Sim {
     const adt = this.effectiveDt();
     let dt = DT * g.slow;
     if (g.hitstop > 0) { g.hitstop -= DT; dt = 0; }
-    this.dt = dt;
+    this.dt = this.wdt = dt;
     g.t += DT;
     if (g.slowT > 0) { g.slowT -= DT; if (g.slowT <= 0) g.slow = 1; }
     const ph = g.phase;
