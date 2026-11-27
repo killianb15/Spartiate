@@ -2,7 +2,8 @@
 //  Test des salons de la salle d'armes dans de vrais navigateurs : deux joueurs (deux contextes
 //  Chromium séparés, donc deux localStorage) dans leur salle d'armes. A ouvre son salon, B le voit
 //  dans la liste et le rejoint ; les deux doivent se retrouver dans la même salle d'armes en ligne,
-//  chacun avec son héros et son arme. Puis B s'en va : A doit repartir seul, salon toujours ouvert.
+//  chacun avec son héros et son arme. Puis salle au trésor à deux (objets vus par l'invité) ; enfin B s'en va :
+//  A continue seul.
 //
 //  Même préparation que tools/browser-test.mjs (serveur sur 8137, Chromium headless sur 9333), puis :
 //    node tools/lobby-test.mjs <dossier des captures>
@@ -103,9 +104,37 @@ console.log('B BOUGE vu par A', before, '->', await posB());
 console.log('POSITIONS A', await A.evalJs(sync), 'B', await B.evalJs(sync));
 await A.shot('ensemble'); await B.shot('ensemble');
 
-// B ferme son onglet : A repart seul dans sa salle d'armes, salon toujours ouvert
+// carte des chemins à deux : l'hôte franchit la porte, la carte s'ouvre chez les deux ; chacun vote (touche 1)
+const press = async (p, code, vk) => {
+  await p.send('Input.dispatchKeyEvent', { type: 'keyDown', code, key: code.slice(-1), windowsVirtualKeyCode: vk });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', code, key: code.slice(-1), windowsVirtualKeyCode: vk });
+};
+await A.evalJs(`(() => { const g = window.__game.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+const mapOpen = `window.__game.sim.g.phase === 'map' && !document.getElementById('mapOv').classList.contains('hidden')`;
+console.log('CARTE A', await A.waitFor(mapOpen, 20000), 'B', await B.waitFor(mapOpen, 20000));
+await sleep(500); await B.shot('carte');
+await press(B, 'Digit1', 49);
+console.log('VOTE B vu par A', await A.waitFor(`window.__game.sim.g.mapVote1 !== ''`, 10000), await A.evalJs(`window.__game.sim.g.phase`));
+await press(A, 'Digit1', 49);
+const room1 = `window.__game.sim.g.room === 1 && window.__game.sim.g.phase !== 'map'`;
+console.log('SALLE 1 A', await A.waitFor(room1, 20000), 'B', await B.waitFor(room1, 20000),
+  await A.evalJs(`window.__game.sim.map.currentId`), await B.evalJs(`window.__game.sim.map.currentId`));
+await sleep(1500); await B.shot('salle-1');
+
+// objets à deux : l'hôte ouvre une salle au trésor, l'invité voit les piédestaux ; l'hôte donne des objets
+// au héros de l'invité (transformation, lames tournoyantes) : l'invité voit ses icônes et son aura
+await A.evalJs(`(() => { const s = window.__game.sim; s.g.room = 2; s.debugVault(); return true; })()`);
+console.log('TRESOR invité', await B.waitFor(`window.__game.sim.g.vault && window.__game.sim.pk.length === 2 && document.getElementById('timer').textContent.includes('TRÉSOR')`, 20000),
+  await B.evalJs(`JSON.stringify(window.__game.sim.pk.map((o) => o.t + ':' + o.v))`));
+await A.evalJs(`(() => { const s = window.__game.sim; for (const id of ['silex', 'naphte', 'braise', 'anneau']) s.debugItem(1, id); return true; })()`);
+console.log('OBJETS invité', await B.waitFor(`window.__game.sim.f[1].tf === 'feu' && document.getElementById('it2').children.length >= 5`, 20000),
+  await B.evalJs(`JSON.stringify({ objets: window.__game.sim.f[1].items, orbit: window.__game.sim.f[1].orbit, hud: document.getElementById('it2').textContent })`));
+await sleep(2500);
+await A.shot('tresor-hote'); await B.shot('tresor-invite');
+
+// B ferme son onglet : A continue seul (on est dans la salle au trésor, donc dans le donjon)
 await B.send('Page.close');
-console.log('SEUL A', await A.waitFor(`!window.__game.net.live && window.__game.sim.g.np === 1 && window.__game.game.phase === 'hub'`, 15000));
+console.log('SEUL A', await A.waitFor(`!window.__game.net.live && window.__game.sim.g.np === 1 && window.__game.sim.g.vault`, 15000));
 await sleep(2500);
 console.log('ETAT A', await A.state());
 await A.shot('equipier-parti');

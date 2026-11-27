@@ -16,10 +16,10 @@ export const ACT_BIOMES = [
 const ACT_BOSSES = ['Chef orc', "Colosse d'airain", 'Cerbère'];
 
 const ROOM_REWARD_TAG = {
-  combat: 'Coffre de bénédiction',
-  elite: 'Rare garantie · Légendaire ×3',
+  combat: 'Cœur ou petit bonus',
+  elite: 'Objet Rare ou mieux',
   event: 'Choix mystère & surprises',
-  treasure: '3 bénédictions (sans Potion)',
+  treasure: 'Objets sur des piédestaux',
   boss: 'Ouvre l’acte suivant',
 };
 
@@ -114,7 +114,7 @@ export function renderMap(root, map, {
     const isAv = avail.has(n.id);
     const isDead = !isVis && !isCur && !future.has(n.id);
     const cls = [
-      'mnode', `t-${n.type}`,
+      'mnode', `t-${esc(n.type)}`,
       isCur ? 'is-current' : '',
       isVis ? 'is-visited' : '',
       isAv && interactive ? 'is-avail' : '',
@@ -154,8 +154,8 @@ export function renderMap(root, map, {
     <div class="map-panel">
       <div class="map-head">
         <div>
-          <h3>ACTE ${map.act} — ${esc(biome.toUpperCase())}</h3>
-          <div class="map-sub">${esc(floorLbl)} · Boss : ${esc(bossName)} · Seed #${map.runSeed}</div>
+          <h3>ACTE ${esc(map.act)} — ${esc(biome.toUpperCase())}</h3>
+          <div class="map-sub">${esc(floorLbl)} · Boss : ${esc(bossName)} · Seed #${esc(map.runSeed)}</div>
         </div>
         <div class="map-head-acts">
           ${previewControls ? '<button type="button" class="tool-btn" data-mact="reroll">Nouvelle seed</button><button type="button" class="tool-btn" data-mact="nextAct">Acte suivant</button>' : ''}
@@ -192,8 +192,8 @@ export function renderMap(root, map, {
       : isDead ? 'Hors de ton chemin'
       : 'Plus haut dans l’acte';
     const rewardTag = ROOM_REWARD_TAG[n.type] ?? '';
-    tip.className = `map-tip t-${n.type}`;
-    tip.innerHTML = `<div class="mt-head"><span class="mt-ico">${ROOM_ICONS[n.type]}</span><b>${esc(title)}</b><span class="mt-st">${esc(stateTag)}</span></div>`
+    tip.className = `map-tip t-${esc(n.type)}`;
+    tip.innerHTML = `<div class="mt-head"><span class="mt-ico">${ROOM_ICONS[n.type] ?? ROOM_ICONS.combat}</span><b>${esc(title)}</b><span class="mt-st">${esc(stateTag)}</span></div>`
       + `<div class="mt-desc">${esc(meta.desc)}</div>`
       + (rewardTag ? `<div class="mt-tag">${esc(rewardTag)}</div>` : '');
     // Positionne au-dessus ou en dessous du nœud pour ne jamais sortir du cadre

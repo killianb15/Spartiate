@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DungeonSim, BOONS, mapInput, eventInput, pickInput, ROOM_R } from '../dungeon.js';
-import { availableNextIds, isBossNode } from '../map.js';
+import { DungeonSim, mapInput, eventInput } from '../dungeon.js';
+import { availableNextIds, generateMap, sanitizeMap, deserializeMap } from '../map.js';
+import { ITEMS, itemList } from '../items.js';
 import { EVENTS, EVENT_IDS } from '../events.js';
 import { CoopHost, CoopGuest } from '../coop.js';
 import { NEUTRAL, DT } from '../sim.js';
@@ -70,7 +71,7 @@ test('reproductibilité complète : même seed + mêmes choix de carte => même 
   assert.deepEqual(play(), play());
 });
 
-test('salle Élite (champion renforcé + Rare garantie) et salle Trésor (3 bénédictions sans Potion)', () => {
+test('salle Élite (champion renforcé + objet Rare ou mieux) et salle Trésor (objets sur piédestaux, sans combat)', () => {
   const s = new DungeonSim(42, ['soldier'], ['sword'], null, { useMap: true });
   s.startHub();
   // Force l'entrée dans un nœud Élite de la carte
@@ -78,24 +79,89 @@ test('salle Élite (champion renforcé + Rare garantie) et salle Trésor (3 bén
   assert.ok(eliteNode);
   s.newRoom(eliteNode);
   assert.equal(s.g.roomType, 'elite');
+  assert.equal(s.g.lootKind, 'elite');
   const champ = s.f.find((e) => e.eliteChamp);
   assert.ok(champ && champ.size > 1.2, 'champion d’élite agrandi présent');
   s.debugKill();
-  s.rollOffer();
-  assert.equal(s.offer[0], 'potion');
-  assert.ok(BOONS[s.offer[1]].rare >= 1, 'coffre d’élite garantit au moins une Rare');
+  assert.equal(s.g.phase, 'clear');
+  const loot = s.pk.filter((o) => o.t === 'item');
+  assert.equal(loot.length, 1, 'un objet par héros sur un piédestal');
+  assert.ok(loot.every((o) => ITEMS[o.v] && ITEMS[o.v].q >= 1), 'élite : objet Rare ou mieux');
+  assert.ok(s.pk.some((o) => o.t === 'heart'), 'élite : un cœur en plus');
 
-  // Force l'entrée dans un nœud Trésor
+  // Force l'entrée dans un nœud Trésor : pas d'ennemi, porte ouverte, objets déjà posés
   const treasNode = s.map.nodes.find((n) => n.type === 'treasure');
   assert.ok(treasNode);
   s.newRoom(treasNode);
   assert.equal(s.g.roomType, 'treasure');
   assert.equal(s.g.phase, 'clear');
-  assert.equal(s.g.chest, 1);
+  assert.equal(s.g.exitOpen, true);
   assert.equal(s.foesLeft, 0);
-  s.rollOffer();
-  assert.ok(!s.offer.includes('potion'), 'coffre au trésor sans Potion');
-  assert.ok(s.offer.some((id) => BOONS[id].rare >= 1), 'coffre au trésor contient au moins une Rare');
+  const vault = s.pk.filter((o) => o.t === 'item');
+  assert.ok(vault.length >= 1 && vault.every((o) => ITEMS[o.v]), 'trésor : objets sur des piédestaux');
+  assert.ok(!vault.some((o) => loot.some((l) => l.v === o.v && o.v !== 'eclat')), 'pas deux fois le même objet dans la partie');
+});
+
+test('la salle au trésor automatique (sans carte) est remplacée par les nœuds Trésor quand la carte est active', () => {
+  const s = new DungeonSim(7, ['soldier'], ['sword'], null, { useMap: true });
+  s.startHub();
+  for (let k = 0; k < 6; k++) {
+    s.newRoom({ id: `${k}-0`, floor: k, col: 0, type: 'combat', next: [], roomSeed: 50 + k });
+    s.debugKill();
+    assert.equal(s.g.vaultNext, false, `salle ${s.g.room} : pas de salle au trésor surprise`);
+  }
+});
+
+test('un événement peut donner un objet (autel de sang : Épique ou Légendaire, jamais maudit)', () => {
+  for (let seed = 1; seed <= 6; seed++) {
+    const s = new DungeonSim(seed, ['soldier'], ['sword'], null, { useMap: true });
+    s.startHub();
+    s.newRoom({ id: '2-0', floor: 2, col: 0, type: 'event', next: [], roomSeed: 300 + seed });
+    s.g.eventId = 'autel';
+    assert.equal(s.chooseEvent(0, 0), true);
+    const got = itemList(s.f[0]);
+    assert.equal(got.length, 1, 'un objet reçu');
+    const it = ITEMS[got[0]];
+    assert.ok(it.q >= 2 && !it.curse, `${got[0]} : Épique ou mieux, non maudit`);
+    assert.match(s.g.eventLog, /^−\d+ PV · Objet obtenu : /, 'le sang a coulé');
+    assert.ok((',' + s.g.seen + ',').includes(',' + got[0] + ','), 'objet marqué comme sorti');
+  }
+});
+
+test('Coffre maudit chanceux : objets sur piédestaux ; malchanceux : embuscade avec butin d’élite', () => {
+  let luck = 0, ambush = 0;
+  for (let seed = 1; seed <= 16; seed++) {
+    const s = new DungeonSim(seed, ['soldier'], ['sword'], null, { useMap: true });
+    s.startHub();
+    s.newRoom({ id: '2-0', floor: 2, col: 0, type: 'event', next: [], roomSeed: 400 + seed });
+    s.g.eventId = 'coffre';
+    s.chooseEvent(0, 0);
+    if (s.g.phase === 'fight') {
+      ambush++;
+      assert.equal(s.g.lootKind, 'elite');
+      s.debugKill();
+      assert.ok(s.pk.filter((o) => o.t === 'item').every((o) => ITEMS[o.v].q >= 1));
+    } else {
+      luck++;
+      assert.ok(s.pk.some((o) => o.t === 'item'), 'objets posés');
+    }
+  }
+  assert.ok(luck > 0 && ambush > 0, `les deux issues arrivent (${luck} / ${ambush})`);
+});
+
+test('sanitizeMap : la carte reçue de l’hôte est validée (types, identifiants, liens)', () => {
+  const m = generateMap(1234, 1);
+  const ok = sanitizeMap(JSON.parse(JSON.stringify(m)));
+  assert.deepEqual(ok, m, 'une carte valide passe sans changement');
+  const bad = (f) => { const c = JSON.parse(JSON.stringify(m)); f(c); return sanitizeMap(c); };
+  assert.equal(bad((c) => { c.nodes[0].type = '"><img src=x onerror=alert(1)>'; }), null, 'type inconnu');
+  assert.equal(bad((c) => { c.nodes[0].type = 'constructor'; }), null, 'type hérité de Object');
+  assert.equal(bad((c) => { c.nodes[0].id = '<b>'; }), null, 'identifiant invalide');
+  assert.equal(bad((c) => { c.nodes[0].next = ['99-99']; }), null, 'lien vers un nœud absent');
+  assert.equal(bad((c) => { c.currentId = 'x'; }), null, 'nœud courant absent');
+  assert.equal(sanitizeMap(null), null);
+  assert.equal(sanitizeMap('carte'), null);
+  assert.equal(deserializeMap('{pas du json'), null);
 });
 
 test('les 8 événements "?" fonctionnent tous sans erreur (y compris embuscades et coffres)', () => {
@@ -185,14 +251,14 @@ test('coop réseau (CoopHost / CoopGuest) : synchronisation de la carte, vote et
   assert.equal(guest.sim.map.currentId, sim.map.currentId);
 });
 
-test('sauvegarde et rechargement JSON en cours de run préservent la carte, les PV et les bénédictions', () => {
+test('sauvegarde et rechargement JSON en cours de run préservent la carte, les PV et les objets', () => {
   const s = new DungeonSim(88, ['soldier'], ['sword'], null, { useMap: true });
   s.startHub();
   s.openMap();
   s.step(mapInput(0));
+  s.giveItem(s.f[0], 'eclat');
   s.f[0].hp = 73;
-  s.f[0].pow = 1.35;
-  s.f[0].boons = 'lame';
+  s.f[0].pow += 0.15;
   const json = JSON.stringify(s.save());
 
   const s2 = new DungeonSim(1, ['soldier'], ['sword'], null, { useMap: true });
@@ -200,6 +266,7 @@ test('sauvegarde et rechargement JSON en cours de run préservent la carte, les 
   assert.equal(s2.runSeed, 88);
   assert.deepEqual(s2.map, s.map);
   assert.equal(s2.f[0].hp, 73);
-  assert.equal(s2.f[0].boons, 'lame');
+  assert.equal(s2.f[0].items, s.f[0].items);
+  assert.equal(s2.f[0].pow, s.f[0].pow);
   assert.equal(s2.hash(), s.hash());
 });

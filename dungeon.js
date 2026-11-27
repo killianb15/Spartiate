@@ -4,15 +4,17 @@
 //  Reprend toute la mécanique de combat de sim.js (attaque, blocage, parade, brise-garde,
 //  roulade, endurance…) ; seuls changent l'aire de jeu (salle carrée avec obstacles,
 //  estrades, escaliers, pièges et porte), le nombre de combattants (1 ou 2 héros contre
-//  plusieurs ennemis) et le déroulement (salle → coffre → bénédiction → salle suivante).
+//  plusieurs ennemis) et le déroulement (salle → butin → salle suivante ; salles au trésor et boss
+//  laissent des objets sur des piédestaux : voir items.js).
 //
 //  Comme sim.js : logique pure et déterministe (dmath.js, this.rng, aucun Math.random) ;
 //  les IA des ennemis tournent DANS la simulation et sont sauvegardées avec elle, ce qui
 //  permet de jouer en ligne avec le rollback de rollback.js (step(entrée0, entrée1)).
 // =====================================================================
-import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, spellOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
+import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, SPELL_IDS, spellOf, spellCdOf, spellShield, knockOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
 import { hypot, atan2, clamp, sin, cos, Rng } from './dmath.js';
 import { AI } from './ai.js';
+import { ITEM_BASE, STATUS0, ITEM_METHODS, MINOR_IDS, LOOT, FX, CAPS, heal, rollItem, itemOf } from './items.js';
 import { generateMap, availableNextIds, advanceMap, isBossNode, cloneMap, nodeById } from './map.js';
 import { EVENTS, EVENT_IDS } from './events.js';
 
@@ -109,71 +111,39 @@ export const WEAPON_IDS = Object.keys(WEAPONS).filter((k) => !WEAPONS[k].hidden)
 export const PAD_R = 0.55;
 // le marchand, derrière son comptoir ; on lui parle en marchant sur la dalle devant le comptoir
 export const MERCHANT = { x: 3.4, z: -5.55, counterZ: -4.95, counterW: 2.3 };
+// le sorcier, devant sa tente (à gauche de la porte) : on apprend un sort en marchant sur la dalle devant son chaudron
+// (x : dalle et chaudron ; manX, z : le sorcier, debout à droite du chaudron, devant sa tente)
+export const SORCERER = { x: -3.1, manX: -2.2, z: -5.0, tentX: -3.35, tentZ: -6.05, cauldronZ: -4.55 };
 export const HUB_PADS = [
   ...HERO_IDS.map((id, k) => ({ t: 'hero', id, x: -4.6, z: -2.4 + k * 1.35 })),
   { t: 'shop', id: 'shop', x: MERCHANT.x, z: -3.85 },
+  { t: 'spell', id: 'spell', x: SORCERER.x, z: -3.55 },
 ];
 const HUB_WALL = -5.15;
 // socle de la statue, derrière chaque dalle de héros (contre le mur)
 export const padStand = (pd) => ({ x: -5.9, z: pd.z });
 
-// Boutique : un héros sur la dalle du marchand choisit son arme (p.shop = 1 + arme montrée).
+// Boutique : un héros sur la dalle du marchand choisit son arme, sur celle du sorcier son sort
+// (p.shopK : 0 = marchand, 1 = sorcier ; p.shop = 1 + arme ou sort montré).
 // ← → (selon l'écran) changent l'arme montrée, attaque ou saut la prend, reculer ou bloquer s'en va.
 // Une arme peut aussi être prise directement (clic, touches 1 à 9) : entrée mx = SHOP + n, mz = 127,
 // blk = vrai (un déplacement au clavier ne donne jamais mx entre 110 et 126).
 const SHOP = 110;
 export const shopInput = (n) => ({ mx: SHOP + n, mz: 127, blk: true, press: 0 });
-const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + WEAPON_IDS.length ? s.mx - SHOP : -1);
+const SHOP_N = Math.max(WEAPON_IDS.length, SPELL_IDS.length);
+const readShop = (s) => (s.blk && s.mz === 127 && s.mx >= SHOP && s.mx < SHOP + SHOP_N ? s.mx - SHOP : -1);
+// ce que propose la boutique où se trouve p (armes ou sorts)
+export const shopList = (p) => (p.shopK ? SPELL_IDS : WEAPON_IDS);
+// sort actuel de p (clé de SPELLS) : celui choisi chez le sorcier, sinon celui de son personnage
+export const spellKey = (p) => (SPELLS[p.spell] ? p.spell : SPELLS[p.kind] ? p.kind : 'soldier');
 const SHOP_DIR = 64;   // seuil d'une direction franche (sur 127)
 
-const heal = (p, n) => { p.hp = Math.min(p.maxHp, p.hp + n); };
-// Bénédictions proposées dans le coffre de chaque salle. rare : 0 commune, 1 rare, 2 légendaire (voir
-// rollOffer : la Potion toujours, puis deux tirages par rareté, plus généreux en profondeur) ; unique : on ne
-// la prend qu'une fois.
-export const RARITY = ['Commune', 'Rare', 'Légendaire'];
-// Équilibrage par rareté :
-// - Commune (~+20 % valeur de combat) : bonus francs et lisibles pour démarrer un build.
-// - Rare (~+35-40 % valeur, ≈ ×1,8-2 Commune) : évolutions directes et synergies tactiques.
-// - Légendaire (~+60-75 % valeur, ≈ ×3 Commune) : effets majeurs ou uniques transformant le style de jeu.
-export const BOONS = {
-  // ---- Communes (rare: 0) ----
-  potion: { name: 'Potion', desc: 'Soigne 40 PV', rare: 0, apply: (p) => heal(p, 40) },
-  force: { name: 'Force du taureau', desc: '+20 % de dégâts', rare: 0, apply: (p) => { p.pow *= 1.2; } },
-  vita: { name: 'Vitalité', desc: '+20 PV max et soigne 20 PV', rare: 0, apply: (p) => { p.maxHp += 20; heal(p, 20); } },
-  peau: { name: 'Peau de bronze', desc: '−15 % de dégâts subis', rare: 0, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.85; } },
-  sang: { name: 'Soif de sang', desc: 'Chaque coup porté soigne 2 PV', rare: 0, apply: (p) => { p.leech += 2; } },
-  souffle: { name: 'Second souffle', desc: '+40 % de récupération d\'endurance', rare: 0, apply: (p) => { p.staMul += 0.4; } },
-  precision: { name: 'Œil de lynx', desc: '+20 % de chances de coup critique (×2 dégâts)', rare: 0, apply: (p) => { p.crit += 0.2; } },
-  hate: { name: 'Hâte arcanique', desc: '−15 % de temps de recharge du sort', rare: 0, apply: (p) => { p.spellCdMul *= 0.85; } },
-  elan: { name: 'Élan agile', desc: '+12 % de vitesse de course', rare: 0, apply: (p) => { p.runMul *= 1.12; } },
-  pavois: { name: 'Bouclier ferme', desc: 'Bloquer coûte 25 % de garde en moins', rare: 0, apply: (p) => { p.guardMul *= 0.75; } },
-
-  // ---- Rares (rare: 1) ----
-  lame: { name: 'Lame affûtée', desc: '+35 % de dégâts', rare: 1, apply: (p) => { p.pow *= 1.35; } },
-  cuirasse: { name: 'Cuirasse', desc: '+40 PV max et soigne 40 PV', rare: 1, apply: (p) => { p.maxHp += 40; heal(p, 40); } },
-  carapace: { name: 'Carapace d\'airain', desc: '−22 % de dégâts subis', rare: 1, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.78; } },
-  vampire: { name: 'Vampirisme', desc: 'Chaque coup porté soigne 4 PV', rare: 1, apply: (p) => { p.leech += 4; } },
-  fer: { name: 'Garde de fer', desc: 'Bloquer coûte 40 % de garde en moins et +40 % régén. garde', rare: 1, apply: (p) => { p.guardMul *= 0.6; p.guardRegen += 0.4; } },
-  vent: { name: 'Pieds de vent', desc: '+20 % de vitesse de course et +25 % d\'endurance', rare: 1, apply: (p) => { p.runMul *= 1.2; p.staMul += 0.25; } },
-  maitrise: { name: 'Maîtrise arcanique', desc: '−25 % de recharge du sort et +25 % dégâts de sort', rare: 1, apply: (p) => { p.spellCdMul *= 0.75; p.spellPow *= 1.25; } },
-  bourreau: { name: 'Coup de grâce', desc: '+50 % de dégâts contre les ennemis sous 45 % PV', rare: 1, apply: (p) => { p.execPow += 0.5; } },
-  tueur: { name: 'Chasseur de géants', desc: '+15 % de dégâts (+45 % contre les boss)', rare: 1, apply: (p) => { p.pow *= 1.15; p.bossPow *= 1.45; } },
-  riposte: { name: 'Contre-riposte', desc: 'Parer soigne 12 PV et inflige 20 dégâts à l\'attaquant', rare: 1, apply: (p) => { p.riposte += 1; } },
-  pillage: { name: 'Trophée de victoire', desc: 'Chaque ennemi vaincu soigne 6 PV et réduit le CD du sort de 1,2 s', rare: 1, apply: (p) => { p.onKillHeal += 6; p.onKillCd += 1.2; } },
-
-  // ---- Légendaires (rare: 2) ----
-  phenix: { name: 'Plume de phénix', desc: 'Une fois : au lieu de tomber, tu renais à 60 % PV', rare: 2, unique: true, apply: (p) => { p.phoenix = 1; } },
-  egide: { name: 'Égide divine', desc: '−30 % de dégâts subis', rare: 2, apply: (p) => { p.armor = 1 - (1 - p.armor) * 0.7; } },
-  epines: { name: 'Épines de bronze', desc: 'Renvoie 60 % des dégâts reçus à l\'attaquant', rare: 2, apply: (p) => { p.thorns += 0.6; } },
-  fureur: { name: 'Fureur', desc: '+70 % de dégâts sous 40 % de PV', rare: 2, unique: true, apply: (p) => { p.berserk = 1; } },
-  olympe: { name: 'Lame de l\'Olympe', desc: '+55 % de dégâts et +15 % de chances de critique (×2)', rare: 2, apply: (p) => { p.pow *= 1.55; p.crit += 0.15; } },
-  titan: { name: 'Cœur de Titan', desc: '+75 PV max, soigne 75 PV et −15 % de dégâts subis', rare: 2, apply: (p) => { p.maxHp += 75; heal(p, 75); p.armor = 1 - (1 - p.armor) * 0.85; } },
-  cataclysme: { name: 'Cataclysme', desc: '−38 % de recharge du sort et +65 % dégâts de sort', rare: 2, apply: (p) => { p.spellCdMul *= 0.62; p.spellPow *= 1.65; } },
-  assassin: { name: 'Faucheur', desc: '+35 % de chances de critique (×2,25) et +5 PV par critique', rare: 2, unique: true, apply: (p) => { p.crit += 0.35; p.critMul = Math.max(p.critMul, 2.25); p.critHeal += 5; } },
-  source: { name: 'Source d\'immortalité', desc: '+2 PV/s en combat et restaure 35 % PV à chaque salle', rare: 2, unique: true, apply: (p) => { p.regen += 2; p.roomHeal += 0.35; } },
-};
-// chances de rare et de légendaire pour une place du coffre, salle n
-export const boonOdds = (n) => ({ rare: Math.min(0.4, 0.2 + 0.012 * n), legend: Math.min(0.12, 0.03 + 0.005 * n) });
+// Butin : les objets (items.js) sont sur des piédestaux (salle au trésor, boss) ; les salles normales
+// laissent un cœur, des éclats (petits bonus, un par héros) ou rien. On ramasse en marchant dessus.
+// Salle au trésor : après la salle n quand n % BOSS_EVERY vaut 2 (toujours) ou 4 (une fois sur deux).
+export const VAULT = { always: 2, maybe: 4, chance: 0.5, maxItems: 5, spacing: 1.8 };
+export const PICK_R = { item: 0.95, heart: 0.7, minor: 0.7, arm: 1.0, ped: 0.4 };
+const PK_GRP = { item: 0, minor: 1, heart: 2 };
 const PHOENIX = 0.6;            // PV rendus par la Plume de phénix
 // Réanimation (à deux) : un héros tombé reste à quatre pattes (état 'dead' + down = 1, les ennemis l'ignorent).
 // Son équipier le relève en bloquant à moins de R de lui pendant time s (la jauge redescend s'il s'arrête) ;
@@ -181,13 +151,9 @@ const PHOENIX = 0.6;            // PV rendus par la Plume de phénix
 export const REVIVE = { time: 3, R: 1.5, hp: 0.4, decay: 2 };
 const FURY = { below: 0.4, mul: 1.7 };
 
-// Choix d'une bénédiction transmis comme une entrée (pour qu'il passe par le rollback en ligne) :
-// pendant la phase 'reward', mx = PICK + 1 + n, mz = 127, blk = vrai. Un déplacement au clavier ne
-// produit jamais mx entre 95 et 126 (ses composantes valent 0, ±90 ou ±127).
-const PICK = 100;
-export const pickInput = (n) => ({ mx: PICK + 1 + n, mz: 127, blk: true, press: 0 });
-const readPick = (s) => (s.blk && s.mz === 127 && s.mx > PICK && s.mx <= PICK + 3 ? s.mx - PICK - 1 : -1);
-
+// Choix transmis comme des entrées (pour qu'ils passent par le rollback en ligne) : mz = 127, blk = vrai et
+// mx hors des valeurs d'un déplacement au clavier (0, ±90 ou ±127). Plages : événement 95..99, boutique 110..,
+// carte 120..126.
 // Choix d'une destination sur la carte (phase 'map') : mx = 120 + n (0..6)
 const MAP_IN = 120;
 export const mapInput = (n) => ({ mx: MAP_IN + n, mz: 127, blk: true, press: 0 });
@@ -199,26 +165,26 @@ export const eventInput = (n) => ({ mx: EVT_IN + n, mz: 127, blk: true, press: 0
 const readEventIn = (s) => (s.blk && s.mz === 127 && s.mx >= EVT_IN && s.mx <= EVT_IN + 4 ? s.mx - EVT_IN : -1);
 
 const OBS_R = { column: 0.4, barrel: 0.45, rocks: 0.65, stand: 0.45 };
-const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteur (les flèches passent au-dessus)
+const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8, tent: 1.6, cauldron: 0.7, npc: 1.6 };   // hauteur (les flèches passent au-dessus)
 
 // donne au héros p son personnage et son arme (statistiques de base + trait du personnage)
-export function equip(p, kind, wpn = defaultWeapon(kind)) {
+// spell : sort appris chez le sorcier ('' = celui du personnage) ; gardé par défaut
+export function equip(p, kind, wpn = defaultWeapon(kind), spell = p.spell ?? '') {
   if (!HEROES[kind]) kind = 'soldier';
   if (!WEAPONS[wpn]) wpn = defaultWeapon(kind);
-  Object.assign(p, { kind, wpn, maxHp: 100, pow: 1, armor: 0, leech: 0, staMul: 1, guardMul: 1, guardRegen: 1, runMul: 1,
-    phoenix: 0, thorns: 0, berserk: 0, crit: 0, critMul: 2, critHeal: 0, spellCdMul: 1, spellPow: 1,
-    execPow: 0, bossPow: 1, riposte: 0, onKillHeal: 0, onKillCd: 0, regen: 0, roomHeal: 0,
-    spellCd: 0, spellMax: spellOf({ kind }).cd, spellBuffT: 0 });
+  if (!SPELLS[spell]) spell = '';
+  // statistiques de base et effets des objets (tout est remis à zéro : objets possédés compris)
+  Object.assign(p, { kind, wpn, spell, ...ITEM_BASE, spellCd: 0, spellMax: spellOf({ kind, spell }).cd, spellBuffT: 0, stoneT: 0, totT: 0 });
   p.arch = !!wpnOf(p).bow;
   HEROES[kind].apply(p);
   const tank = wpnOf(p).tank;                   // gants de boxe : se cumule avec l'armure du héros
   if (tank) p.armor = 1 - (1 - p.armor) * (1 - tank);
   p.hp = p.maxHp;
 }
-function newHero(i, kind, wpn) {
+function newHero(i, kind, wpn, spell) {
   // team : 0 = camp des héros (héros et chiens invoqués), 1 = ennemis ; owner : maître d'un chien
-  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, boons: '', trapT: 0, pad: -1, shop: 0, shopIn: 0, team: 0, owner: -1, kills: 0, down: 0, revT: 0 });
-  equip(p, kind, wpn);
+  const p = Object.assign(newFighter(i), { foe: '', size: 1, boss: false, trapT: 0, pad: -1, shop: 0, shopK: 0, shopIn: 0, team: 0, owner: -1, kills: 0, down: 0, revT: 0, ...STATUS0 });
+  equip(p, kind, wpn, spell);
   return p;
 }
 
@@ -235,19 +201,32 @@ const span = (a, b, sg) => { const p = sg * a * TILE, q = sg * b * TILE; return 
 export class DungeonSim extends Sim {
   // kinds : personnage de chaque héros (1 ou 2) ; wpns : leurs armes (par défaut : celle du personnage)
   // unlocked : héros débloqués de chaque joueur (listes d'identifiants), ou null = tous (tests, outils).
+  // Ce n'est pas de l'état : identique chez les deux joueurs en ligne (transmis au lancement).
+  // spells : sorts appris chez le sorcier ('' ou absent = celui du personnage)
   // opts.useMap : active la carte par actes (style Slay the Spire) ; false par défaut pour garder les tests historiques intacts.
-  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null, { useMap = false } = {}) {
+  // (opts peut aussi être passé à la place de spells : new DungeonSim(seed, kinds, wpns, unlocked, { useMap: true }))
+  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null, spells = [], opts = {}) {
+    if (spells && !Array.isArray(spells)) { opts = spells; spells = []; }
+    const { useMap = false } = opts ?? {};
     super(seed);
     if (!Array.isArray(kinds)) kinds = [kinds];
     this.runSeed = (seed >>> 0) || 1;
     this.useMap = !!useMap;
     this.map = null;
     this.unlocked = unlocked ? kinds.map((_, i) => (Array.isArray(unlocked[i]) ? unlocked[i].filter((k) => HEROES[k]) : [])) : null;
-    this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i]));
+    this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i], spells?.[i] ?? ''));
     this.inp = this.f.map(() => newInput());
     this.g = { phase: 'menu', np: kinds.length, room: 0, act: 1, roomType: 'hub', kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
-      exitOpen: false, chest: 0, chestX: 0, chestZ: 0, chestKind: 'combat', o0: '', o1: '', o2: '', pick0: -1, pick1: -1,
-      mapVote0: '', mapVote1: '', eventId: '', evPick0: -1, evPick1: -1, eventLog: '', flagEnd: false };
+      exitOpen: false, flagEnd: false,
+      // rn : numéro de la salle construite (change aussi pour une salle au trésor, qui garde g.room) ;
+      // vault : on est dans une salle au trésor ; vaultNext : la prochaine porte y mène ;
+      // pkN : numéro du prochain objet ramassable ; seen : objets déjà sortis (pas de doublon dans une partie)
+      rn: 0, vault: false, vaultNext: false, pkN: 0, seen: '',
+      // carte : lootKind = butin de la salle une fois nettoyée ('combat' | 'elite') ; votes et événements '?'
+      lootKind: 'combat', mapVote0: '', mapVote1: '', eventId: '', evPick0: -1, evPick1: -1, eventLog: '' };
+    // objets à ramasser : { n, t: 'item' | 'heart' | 'minor', v : identifiant, x, z, grp, q : qualité, arm }
+    this.pk = [];
+    this.src = '';                 // nature du coup en cours ('melee', 'shot', 'fire') pour les effets
     // exit : mur de la porte de sortie ('z' : mur z = -R, 'x' : mur x = -R) ; on entre par le mur opposé
     this.room = { exit: 'z', obs: [], surf: [], traps: [], boss: false, roomType: 'hub', act: 1 };
     this.ais = [];
@@ -260,25 +239,30 @@ export class DungeonSim extends Sim {
   get foesLeft() { let n = 0; for (const e of this.f) if (e.team === 1 && e.state !== 'dead') n++; return n; }
   // chiens vivants invoqués par le héros h
   dogsOf(h) { let n = 0; for (const e of this.f) if (e.owner === h && e.state !== 'dead') n++; return n; }
-  get offer() { return [this.g.o0, this.g.o1, this.g.o2]; }
 
-  start() { this.g.room = 0; this.g.kills = 0; for (const p of this.heroes) p.kills = 0; this.newRoom(); }
+  start() { this.g.room = 0; this.g.kills = 0; this.g.seen = ''; for (const p of this.heroes) p.kills = 0; this.newRoom(); }
 
   // ---------------- salle d'armes ----------------
   startHub() {
     const g = this.g;
-    g.room = 0; g.act = 1; g.roomType = 'hub'; g.kills = 0;
+    g.room = 0; g.kills = 0; g.seen = ''; g.rn++; g.vault = false; g.vaultNext = false;
+    g.act = 1; g.roomType = 'hub'; g.lootKind = 'combat';
     g.mapVote0 = g.mapVote1 = ''; g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
     this.map = this.useMap ? generateMap(this.runSeed, 1) : null;
     for (const p of this.heroes) p.kills = 0;
+    this.pk = [];
     const obs = HUB_PADS.filter((pd) => pd.t === 'hero').map((pd) => ({ ...padStand(pd), r: OBS_R.stand, kind: 'stand' }));
     // comptoir du marchand (trois cercles côte à côte)
     for (const dx of [-0.8, 0, 0.8]) obs.push({ x: MERCHANT.x + dx, z: MERCHANT.counterZ, r: OBS_R.stand, kind: 'counter' });
+    // le sorcier : sa tente (deux cercles contre le mur) et son chaudron
+    for (const dx of [-0.55, 0.55]) obs.push({ x: SORCERER.tentX + dx, z: SORCERER.tentZ, r: 0.75, kind: 'tent' });
+    obs.push({ x: SORCERER.x, z: SORCERER.cauldronZ, r: 0.42, kind: 'cauldron' });
+    obs.push({ x: SORCERER.manX, z: SORCERER.z, r: 0.35, kind: 'npc' });
     for (const [x, z] of [[5.3, -2.4], [5.3, -1.2], [5.3, 5.3]]) obs.push({ x, z, r: OBS_R.barrel, kind: 'barrel' });
     this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, roomType: 'hub', act: 1, pads: HUB_PADS };
     this.heroes.forEach((p, i) => {
       const x = this.g.np > 1 ? (i ? 1.6 : 0.4) : 1, yaw = Math.PI * 0.75;
-      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
+      Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopK: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: spellOf(p).cd });
       p.resetN++;
       this.toIdle(p);
     });
@@ -287,7 +271,7 @@ export class DungeonSim extends Sim {
     this.ais = this.f.map(() => null);
     this.pr = [];
     g.phase = 'hub'; g.t = 0;
-    g.exitOpen = true; g.chest = 0;
+    g.exitOpen = true;
     this.emit('room', 0);
     this.emit('announce', "SALLE D'ARMES", '', 1.3);
   }
@@ -300,7 +284,7 @@ export class DungeonSim extends Sim {
     p.pad = on;
     if (on < 0) return;
     const pd = pads[on];
-    if (pd.t === 'shop') { this.enterShop(p, pd); return; }
+    if (pd.t === 'shop' || pd.t === 'spell') { this.enterShop(p, pd); return; }
     if (pd.id === p.kind) return;
     if (!this.canPick(p.idx, pd.id)) {
       this.emit('pop', 'VERROUILLÉ', p.x, p.y + 2.1, p.z, 'miss');
@@ -324,15 +308,16 @@ export class DungeonSim extends Sim {
   // ---------------- boutique du marchand ----------------
   enterShop(p, pd) {
     if (p.state === 'dead' || p.shop) return;
-    p.shop = 1 + Math.max(0, WEAPON_IDS.indexOf(p.wpn));
+    p.shopK = pd.t === 'spell' ? 1 : 0;
+    p.shop = 1 + Math.max(0, p.shopK ? SPELL_IDS.indexOf(spellKey(p)) : WEAPON_IDS.indexOf(p.wpn));
     p.shopIn = 7;                       // ignore la direction tenue en arrivant, jusqu'à ce qu'on la relâche
-    const yaw = Math.PI;                // face au marchand (vers −z)
+    const yaw = Math.PI;                // face au marchand ou au sorcier (vers −z)
     // à deux devant le comptoir : on se décale légèrement pour ne pas se pousser hors de la dalle
-    const busy = this.heroes.some((q) => q !== p && q.shop > 0);
+    const busy = this.heroes.some((q) => q !== p && q.shop > 0 && q.shopK === p.shopK);
     const x = busy ? pd.x + (p.idx ? 0.52 : -0.52) : pd.x;
     Object.assign(p, { x, z: pd.z, vx: 0, vz: 0, yaw, visTarget: yaw });
     this.toIdle(p);
-    this.emit('sfx', 'coin');
+    this.emit('sfx', p.shopK ? 'spell' : 'coin');
   }
   leaveShop(p) { p.shop = 0; p.shopIn = 0; }
   // entrée d'un héros dans la boutique (sa vraie entrée est ensuite remplacée par NEUTRAL)
@@ -345,7 +330,7 @@ export class DungeonSim extends Sim {
     else if (dir !== p.shopIn) {
       p.shopIn = dir;
       if (dir) {
-        const N = WEAPON_IDS.length;
+        const N = shopList(p).length;
         p.shop = 1 + ((p.shop - 1 + dir + N) % N);
         this.emit('sfx', 'tick');
       }
@@ -353,19 +338,30 @@ export class DungeonSim extends Sim {
     if (p.shopIn !== 7 && src.press & (PRESS.atk | PRESS.jump)) this.buy(p, p.shop - 1);
   }
   buy(p, n) {
+    if (p.shopK) { this.learn(p, n); return; }
     const id = WEAPON_IDS[n];
     this.leaveShop(p);
-    if (id === p.wpn) return;
+    if (!id || id === p.wpn) return;
     equip(p, p.kind, id);
     this.emit('sfx', 'coin');
     this.equipped(p, WEAPONS[id].name);
+  }
+  // sorcier : p apprend le sort n de SPELL_IDS (celui de son propre héros = '' : il suivra ses changements de héros)
+  learn(p, n) {
+    const id = SPELL_IDS[n];
+    this.leaveShop(p);
+    if (!id || id === spellKey(p)) return;
+    p.spell = id === p.kind ? '' : id;
+    Object.assign(p, { spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: spellCdOf(p) });
+    this.emit('sfx', 'spell');
+    this.equipped(p, SPELLS[id].name);
   }
 
   // ---------------- sauvegarde (rollback en ligne & reprise de run) ----------------
   save() {
     return { f: this.f.map((o) => ({ ...o })), g: { ...this.g }, inp: this.inp.map((o) => ({ ...o })), rng: this.rng.s,
       runSeed: this.runSeed, useMap: this.useMap, map: cloneMap(this.map),
-      room: this.room, ai: this.ais.map((a) => (a ? a.save() : null)), pr: this.pr.map((a) => ({ ...a })) };
+      room: this.room, ai: this.ais.map((a) => (a ? a.save() : null)), pr: this.pr.map((a) => ({ ...a })), pk: this.pk.map((o) => ({ ...o })) };
   }
   load(s) {
     this.f = s.f.map((o) => ({ ...o }));
@@ -378,7 +374,9 @@ export class DungeonSim extends Sim {
     this.room = s.room;            // jamais modifiée après sa création : partage sans risque
     this.ais = s.ai.map((a, i) => (a ? AI.restore(this, i, a) : null));
     this.pr = (s.pr ?? []).map((a) => ({ ...a }));
+    this.pk = (s.pk ?? []).map((o) => ({ ...o }));
   }
+
   hash() { return hashState(this.save()); }
 
   // ---------------- carte des chemins (style Slay the Spire) ----------------
@@ -418,10 +416,12 @@ export class DungeonSim extends Sim {
   }
 
   // ---------------- génération d'une salle ----------------
+  // node : salle choisie sur la carte (type, graine) ; sans carte : salles numérotées, boss toutes les 5
   newRoom(node = null) {
     const g = this.g, np = g.np;
     const r = node ? new Rng(node.roomSeed) : this.rng;
-    g.room++;
+    g.room++; g.rn++; g.vault = false; g.vaultNext = false;
+    this.pk = [];
     const n = g.room;
     const roomType = node ? node.type : (n % BOSS_EVERY === 0 ? 'boss' : 'combat');
     const boss = roomType === 'boss';
@@ -431,7 +431,7 @@ export class DungeonSim extends Sim {
     const bossId = boss ? (node ? BOSS_ORDER[(Math.max(1, g.act) - 1) % BOSS_ORDER.length] : bossOf(n)) : '';
     const act = this.useMap ? g.act : Math.floor((Math.max(1, n) - 1) / BOSS_EVERY) + 1;
     g.roomType = roomType;
-    g.chestKind = elite ? 'elite' : treasure ? 'treasure' : 'combat';
+    g.lootKind = elite ? 'elite' : 'combat';
     g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
 
     const exit = r.next() < 0.5 ? 'z' : 'x';
@@ -495,16 +495,7 @@ export class DungeonSim extends Sim {
 
     // les héros entrent par le mur opposé à la sortie (les héros tombés se relèvent)
     const ent = ROOM_R - 0.7;
-    this.heroes.forEach((p, i) => {
-      const off = np > 1 ? (i ? 0.8 : -0.8) : 0;
-      const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
-      if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
-      else if (p.roomHeal > 0) heal(p, Math.round(p.maxHp * p.roomHeal));
-      const smax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
-      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: smax });
-      p.resetN++;
-      this.toIdle(p);
-    });
+    this.enterHeroes(exit);
 
     // Salles sans combat initial : Trésor & Événement '?'
     if (treasure || isEvent) {
@@ -512,11 +503,15 @@ export class DungeonSim extends Sim {
       this.inp = this.f.map(() => newInput());
       this.pr = [];
       this.ais = this.f.map(() => null);
-      g.slow = 1; g.slowT = 0; g.hitstop = 0; g.pick0 = g.pick1 = -1;
+      g.slow = 1; g.slowT = 0; g.hitstop = 0;
+      if (node) this.rng.s = r.s;
       if (treasure) {
+        // salle au trésor de la carte : objets sur des piédestaux (comme newVault), porte ouverte
+        g.vault = true;
+        this.room = { ...this.room, vault: true };
+        this.placeItems('vault');
         g.phase = 'clear'; g.t = 0;
-        g.exitOpen = true; g.chest = 1; g.chestX = 0; g.chestZ = 0;
-        if (node) this.rng.s = r.s;
+        g.exitOpen = true;
         this.emit('room', n);
         this.emit('announce', 'SALLE AU TRÉSOR', '', 1.4);
         this.emit('sfx', 'coin');
@@ -526,8 +521,7 @@ export class DungeonSim extends Sim {
       const evId = EVENT_IDS[(r.next() * EVENT_IDS.length) | 0];
       g.eventId = evId;
       g.phase = 'event'; g.t = 0;
-      g.exitOpen = false; g.chest = 0;
-      if (node) this.rng.s = r.s;
+      g.exitOpen = false;
       this.emit('room', n);
       this.emit('announce', EVENTS[evId].title.toUpperCase(), '', 1.4);
       this.emit('sfx', 'spell');
@@ -591,10 +585,13 @@ export class DungeonSim extends Sim {
     const aseed = (r.next() * 4294967296) >>> 0;
     this.ais = this.f.map((e, i) => (i < np ? null : new AI(this, i, FOES[e.foe].lv, (aseed + i * 104729) >>> 0)));
     if (node) this.rng.s = r.s;
+    // objets « chien à chaque salle » (Sifflet de berger, Os de Cerbère…) : la meute entre avec son maître
+    for (const p of this.heroes) for (let k = 0; k < p.dogRoom && this.dogsOf(p.idx) < this.dogCap(p); k++) this.spawnDog(p, (k + 1) * 0.9);
 
     g.phase = 'intro'; g.t = 0;
-    g.exitOpen = false; g.chest = 0; g.pick0 = g.pick1 = -1;
+    g.exitOpen = false;
     g.slow = 1; g.slowT = 0; g.hitstop = 0;
+
     this.emit('room', n);
     this.emit('announce', boss ? FOES[bossId].name.toUpperCase() + ' !' : elite ? 'SALLE ÉLITE !' : `SALLE ${n}`, boss || elite ? 'ko' : '', 1.3);
     this.emit('sfx', 'gong');
@@ -619,10 +616,8 @@ export class DungeonSim extends Sim {
       this.spawnAmbush(res.ambush);
       return true;
     }
-    if (res && typeof res === 'object' && res.spawnChest) {
-      g.chestKind = res.spawnChest;
-      g.chest = 1; g.chestX = 0; g.chestZ = 0;
-    }
+    // objets sur des piédestaux au milieu de la salle (Coffre maudit ouvert sans piège)
+    if (res && typeof res === 'object' && res.spawnItems) this.placeItems(res.spawnItems);
     if (!this.heroes.some((_, i) => this.mustPickEvent(i))) {
       g.phase = 'clear'; g.t = 0;
       g.exitOpen = true;
@@ -638,10 +633,10 @@ export class DungeonSim extends Sim {
       const e = this.addFoe(id, sx, sz);
       if (k === 0) { e.size = 1.28; e.hp = e.maxHp = Math.round(e.hp * 1.45); e.pow *= 1.15; e.eliteChamp = 1; }
     });
-    g.chestKind = 'elite';
+    g.lootKind = 'elite';      // une fois l'embuscade vaincue : butin d'élite
     g.eventId = '';
     g.phase = 'fight'; g.t = 0;
-    g.exitOpen = false; g.chest = 0;
+    g.exitOpen = false;
     this.emit('announce', 'EMBUSCADE !', 'ko', 1.3);
   }
   // ennemi n° idx de type id (PV et dégâts selon la profondeur et le nombre de héros)
@@ -649,7 +644,7 @@ export class DungeonSim extends Sim {
     const T = FOES[id], n = Math.max(1, this.g.room);
     const np = this.g.np, hp = Math.round(T.hp * (1 + 0.07 * (n - 1)) * coop(np, T.boss ? 'bossHp' : 'hp'));
     const e = Object.assign(newFighter(idx), { x, z, yaw, visTarget: yaw, kind: T.kind, wpn: T.wpn ?? defaultWeapon(T.kind), foe: id, size: T.size,
-      boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)) * coop(np, T.boss ? 'bossPow' : 'pow'), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, team: 1, owner: -1 });
+      boss: !!T.boss, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)) * coop(np, T.boss ? 'bossPow' : 'pow'), armor: 0, leech: 0, staMul: 1, trapT: 0, team: 1, owner: -1, ...STATUS0 });
     e.arch = !!wpnOf(e).bow;
     if (T.moves) Object.assign(e, { sp: '', spT: 0, spA: 0, spX: 0, spZ: 0, spHit: 0, spCd: BOSS.first * coop(np, 'bossCd'), rage: 0, spTick: 0 });
     if (T.brute) e.brute = 1;
@@ -669,13 +664,127 @@ export class DungeonSim extends Sim {
     this.emit('ring', x, e.y + 0.05, z, 0x7aff7a, 1.6, 0.5, true);
     return e;
   }
+  // les héros entrent par le mur opposé à la sortie ; les héros tombés se relèvent ; on remet à zéro ce qui
+  // ne dure qu'une salle (sort, états, effets d'objets « jusqu'à la fin de la salle »)
+  enterHeroes(exit) {
+    const ent = ROOM_R - 0.7, np = this.g.np;
+    this.heroes.forEach((p, i) => {
+      const off = np > 1 ? (i ? 0.8 : -0.8) : 0;
+      const [px, pz, yaw] = exit === 'z' ? [off, ent, Math.PI] : [ent, off, -Math.PI / 2];
+      if (p.state === 'dead') p.hp = Math.round(p.maxHp * 0.4);
+      else if (p.roomHeal > 0) heal(p, Math.round(p.maxHp * p.roomHeal));
+      const smax = spellCdOf(p);
+      Object.assign(p, { x: px, y: 0, z: pz, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, hitDone: false, combo: 0, airAtk: false, trapT: 0, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, stoneT: 0, totT: 0, spellMax: smax,
+        ...STATUS0, took: 0, frenzyN: 0, rollBuffOn: 0, rollHit: 0, hitN: 0, zeusN: 0, auraT: 0, stormT: FX.storm.every });
+      p.resetN++;
+      this.toIdle(p);
+    });
+  }
+  // salle au trésor : pas d'ennemi, des objets sur des piédestaux (un par héros, plus les choix en plus),
+  // porte ouverte. Elle ne compte pas comme une salle (g.room ne change pas).
+  newVault() {
+    const g = this.g, r = this.rng;
+    g.rn++; g.vault = true; g.vaultNext = false;
+    this.pk = [];
+    const exit = r.next() < 0.5 ? 'z' : 'x';
+    this.room = { exit, obs: [], surf: [], traps: [], boss: false, bossId: '', lair: '', vault: true };
+    this.enterHeroes(exit);
+    this.f = this.heroes;
+    this.inp = this.f.map(() => newInput());
+    this.ais = this.f.map(() => null);
+    this.pr = [];
+    this.placeItems('vault');
+    g.phase = 'clear'; g.t = 0;
+    g.exitOpen = true;
+    g.slow = 1; g.slowT = 0; g.hitstop = 0;
+    this.emit('room', g.room);
+    this.emit('announce', 'SALLE AU TRÉSOR', '', 1.4);
+    this.emit('sfx', 'coin');
+  }
+
+  // ---------------- objets à ramasser ----------------
+  // position d'un objet : a en travers de l'allée de la porte, b le long (allées : jamais d'obstacle ni de piège)
+  lanePos(a, b) { return this.room.exit === 'z' ? [a, b] : [b, a]; }
+  addPk(t, v, a, b, q = 0) {
+    const [x, z] = this.lanePos(a, b);
+    const o = { n: this.g.pkN++, t, v, x, z, grp: PK_GRP[t], q, arm: t === 'item' ? 0 : 1 };
+    this.pk.push(o);
+    return o;
+  }
+  // objets sur des piédestaux : un par héros, plus les choix en plus (Trèfle…) ; on n'en garde qu'un chacun
+  placeItems(src) {
+    const g = this.g, hs = this.heroes;
+    let n = g.np;
+    for (const p of hs) n += p.choice;
+    n = Math.min(VAULT.maxItems, n);
+    const luck = Math.max(0, ...hs.map((p) => p.luck));
+    for (let k = 0; k < n; k++) {
+      const id = rollItem(this.rng, src, Math.max(1, g.room), luck, g.seen) || 'eclat';
+      if (id !== 'eclat') g.seen += (g.seen ? ',' : '') + id;
+      this.addPk('item', id, (k - (n - 1) / 2) * VAULT.spacing, 0, itemOf(id).q);
+    }
+  }
+  dropHeart(x, z) {
+    const lim = ROOM_R - 1;
+    this.pk.push({ n: this.g.pkN++, t: 'heart', v: '', x: clamp(x, -lim, lim), z: clamp(z, -lim, lim), grp: PK_GRP.heart, q: 0, arm: 1 });
+    this.emit('ring', x, 0.1, z, 0xff5a6a, 1, 0.3, true);
+  }
+  // butin d'une salle nettoyée
+  dropLoot() {
+    const r = this.rng, hs = this.heroes, abund = hs.some((p) => p.abund);
+    let hearts = abund ? 1 : 0;
+    if (this.room.boss) { this.placeItems('boss'); hearts++; }
+    else if (this.g.lootKind === 'elite') { this.placeItems('elite'); hearts++; }   // salle élite (carte) : objet rare ou mieux
+    else {
+      const u = r.next();
+      if (u < LOOT.heart) hearts++;
+      else if (u < LOOT.minor) hs.forEach((p, k) => this.addPk('minor', MINOR_IDS[(r.next() * MINOR_IDS.length) | 0], hs.length > 1 ? (k ? 1.5 : -1.5) : 0, 0));
+    }
+    for (let k = 0; k < hearts; k++) this.addPk('heart', '', 0, k ? -1.5 : 1.5);
+  }
+  // un héros ramasse ce qu'il touche
+  pickups() {
+    if (!this.pk.length) return;
+    const hs = this.heroes;
+    for (const o of this.pk) if (!o.arm && hs.every((p) => hypot(p.x - o.x, p.z - o.z) > PICK_R.arm)) o.arm = 1;
+    for (let k = this.pk.length - 1; k >= 0; k--) {
+      const o = this.pk[k];
+      if (!o.arm) continue;
+      const p = hs.find((h) => h.state !== 'dead' && h.y - this.groundY(h) < 0.6 && !(h.took & (1 << o.grp) && o.grp !== PK_GRP.heart) &&
+        hypot(h.x - o.x, h.z - o.z) < PICK_R[o.t] * Math.max(1, h.size ?? 1) && (o.t !== 'heart' || h.hp < h.maxHp));
+      if (!p) continue;
+      this.pk.splice(k, 1);
+      if (o.t === 'heart') {
+        this.healPop(p, Math.round(FX.heart * p.heartMul));
+        this.emit('sfx', 'coin');
+        this.emit('emit', o.x, 0.6, o.z, 14, { color: [0xff5a6a, 0xffb0b8, 0xffffff], speed: 2, up: 3, size: 0.07, life: 0.7, grav: 4 });
+        continue;
+      }
+      p.took |= 1 << o.grp;
+      if (o.t === 'item') this.giveItem(p, o.v); else this.giveMinor(p, o.v);
+      this.emit('take', p.idx, o.n);
+      // chacun a pris son objet : les autres disparaissent
+      if (hs.every((h) => h.took & (1 << o.grp))) {
+        for (let j = this.pk.length - 1; j >= 0; j--) {
+          const q = this.pk[j];
+          if (q.grp !== o.grp) continue;
+          this.emit('emit', q.x, 1, q.z, 16, { color: [0xd8d0ff, 0x8a80b0, 0xffffff], speed: 1.6, up: 2, size: 0.08, life: 0.7, grav: -1 });
+          this.pk.splice(j, 1);
+        }
+        if (k > this.pk.length) k = this.pk.length;
+      }
+    }
+  }
+
 
   // ---------------- points d'extension de Sim ----------------
   target(i) {
     const me = this.f[i], hero = this.isHero(me);
+    // Pomme de discorde : un ennemi semé dans la discorde s'en prend à ses alliés (s'il en reste)
+    const conf = me.sConf > 0 && me.team === 1 && this.foesAlive() > 1;
     let best = null, bd = hero ? LOCK_R : 1e9;
     for (const o of this.f) {
-      if (o === me || o.state === 'dead' || o.team === me.team) continue;
+      if (o === me || o.state === 'dead' || (conf ? o.team !== me.team : o.team === me.team)) continue;
       const d = hypot(o.x - me.x, o.z - me.z);
       if (d < bd) { bd = d; best = o; }
     }
@@ -695,30 +804,36 @@ export class DungeonSim extends Sim {
   }
 
   foeOf(o, f) { const s = this.f[o]; return !!s && s.team !== f.team; }
-  canCastSpell(f) { return this.isHero(f) && !!SPELLS[f.kind]; }
+  canCastSpell(f) { return this.isHero(f) && !!(SPELLS[f.spell] || SPELLS[f.kind]); }
   mitigateSpell(def, dmg) { return dmg; }   // appliqué directement dans DungeonSim.damage()
 
   // ---------------- grimoire : chiens invoqués ----------------
   canSummon(f) {
     const ph = this.g.phase;
-    return this.isHero(f) && (ph === 'fight' || ph === 'intro' || ph === 'clear' || ph === 'hub') && this.dogsOf(f.idx) < CAST.max;
+    return this.isHero(f) && (ph === 'fight' || ph === 'intro' || ph === 'clear' || ph === 'hub') && this.dogsOf(f.idx) < this.dogCap(f);
   }
-  // un chien apparaît devant le héros p et se bat avec lui (piloté par une IA, dans la simulation)
-  summon(p) {
-    if (!this.canSummon(p)) return;
+  // chiens au plus pour le héros p (grimoire : CAST.max, plus les objets de la meute)
+  dogCap(p) { return CAST.max + (p.dogMax ?? 0); }
+  summon(p) { if (this.canSummon(p)) this.spawnDog(p); }
+  // un chien apparaît devant le héros p (ou à côté : side) et se bat avec lui (piloté par une IA, dans la simulation)
+  // Objets : Collier clouté (dogMul : PV et dégâts), Portée infernale (hellPack : chiens des enfers)
+  spawnDog(p, side = 0) {
     const g = this.g, T = FOES.dog, n = Math.max(1, g.room), idx = this.f.length;
-    const lim = ROOM_R - 0.6;
-    const x = clamp(p.x + sin(p.yaw), -lim, lim), z = clamp(p.z + cos(p.yaw), -lim, lim);
-    const hp = Math.round(T.hp * (1 + 0.07 * (n - 1)));
-    const d = Object.assign(newFighter(idx), { x, z, yaw: p.yaw, visTarget: p.yaw, kind: 'dog', wpn: 'bite', arch: false, foe: 'dog', size: T.size,
-      boss: false, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)), armor: 0, leech: 0, staMul: 1, boons: '', trapT: 0, pad: -1, team: 0, owner: p.idx });
+    const lim = ROOM_R - 0.6, a = p.yaw + side;
+    const x = clamp(p.x + sin(a), -lim, lim), z = clamp(p.z + cos(a), -lim, lim);
+    const buff = 1 + (p.dogMul ?? 0), hell = p.hellPack ? 1 : 0;
+    const hp = Math.round(T.hp * (1 + 0.07 * (n - 1)) * buff);
+    const d = Object.assign(newFighter(idx), { x, z, yaw: p.yaw, visTarget: p.yaw, kind: 'dog', wpn: 'bite', arch: false, foe: 'dog', size: hell ? 1 : T.size,
+      boss: false, hp, maxHp: hp, pow: T.pow * (1 + 0.04 * (n - 1)) * buff * (hell ? 1.5 : 1), armor: 0, leech: 0, staMul: 1, trapT: 0, pad: -1, team: 0, owner: p.idx, ...STATUS0, hell });
     d.y = this.groundY(d);
     this.f.push(d);
     this.inp.push(newInput());
     this.ais.push(new AI(this, idx, T.lv, (this.rng.next() * 4294967296) >>> 0));
-    this.emit('emit', x, d.y + 0.4, z, 26, { color: [0xb98aff, 0x7a4adf, 0xffffff], speed: 2.4, up: 3, size: 0.08, life: 0.7, grav: 4 });
-    this.emit('ring', x, d.y + 0.05, z, 0xa070ff, 1.6, 0.5, true);
+    const col = hell ? [0xff7a2e, 0xff3a10, 0xffe27a] : [0xb98aff, 0x7a4adf, 0xffffff];
+    this.emit('emit', x, d.y + 0.4, z, 26, { color: col, speed: 2.4, up: 3, size: 0.08, life: 0.7, grav: 4 });
+    this.emit('ring', x, d.y + 0.05, z, col[0], 1.6, 0.5, true);
     this.emit('sfx', 'bark');
+    return d;
   }
   arrowWall(a) {
     if (Math.abs(a.x) > ROOM_R || Math.abs(a.z) > ROOM_R || a.y < 0.02) return true;
@@ -737,6 +852,16 @@ export class DungeonSim extends Sim {
         else { f.x = o.x + dx / d * m; f.z = o.z + dz / d * m; }
       }
     }
+    // piédestaux des objets
+    for (const o of this.pk) {
+      if (o.t !== 'item') continue;
+      const dx = f.x - o.x, dz = f.z - o.z, d = hypot(dx, dz), m = PICK_R.ped + BODY * (f.size ?? 1);
+      if (d < m && f.y < 0.9) {
+        if (d < 1e-6) f.z = o.z + m;
+        else { f.x = o.x + dx / d * m; f.z = o.z + dz / d * m; }
+      }
+    }
+
     // salle d'armes : les rangées de statues et de présentoirs forment un mur (sauf devant la porte)
     if (this.room.hub) {
       if (f.x < HUB_WALL) f.x = HUB_WALL;
@@ -780,18 +905,23 @@ export class DungeonSim extends Sim {
 
   damage(att, def, dmg, knock, dur, cx, cy, cz) {
     if (def.god) { this.emit('pop', 'INVINCIBLE', def.x, def.y + 1.8, def.z, 'miss'); return; }
-    const fury = att.berserk && att.hp < att.maxHp * FURY.below ? FURY.mul : 1;     // bénédiction « Fureur »
-    const exec = att.execPow && def.hp < def.maxHp * 0.45 ? 1 + att.execPow : 1;    // bénédiction « Coup de grâce »
-    const vsBoss = def.boss && att.bossPow > 1 ? att.bossPow : 1;                   // bénédiction « Chasseur de géants »
-    const isCrit = att.crit > 0 && this.rng.next() < Math.min(0.85, att.crit);      // coups critiques (Œil de lynx, Olympe, Faucheur)
+    if (def.fireImmune && this.src === 'fire') return;                              // Avatar d'Héphaïstos
+    const hero = this.itemHero(att);                                                  // héros dont les objets comptent (ou null)
+    const fury = att.berserk && att.hp < att.maxHp * FURY.below ? FURY.mul : 1;     // Rage d'Arès
+    const exec = att.execPow && def.hp < def.maxHp * 0.45 ? 1 + att.execPow : 1;
+    const vsBoss = def.boss && att.bossPow > 1 ? att.bossPow : 1;
+    // coups critiques (Œil de lynx, Faucheur…) ; Cœur de l'hiver : toujours critique sur un ennemi congelé
+    const isCrit = (att.crit > 0 && this.rng.next() < Math.min(CAPS.crit, att.crit)) || (att.frzCrit > 0 && def.sFrz > 0);
     const critK = isCrit ? (att.critMul ?? 2) : 1;
-    const aegis = def.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;                // sort Rempart sacré
-    dmg = Math.max(1, Math.round(dmg * att.pow * fury * exec * vsBoss * critK * (1 - def.armor) * aegis));
+    const aegis = spellShield(def);                                                   // sorts Rempart sacré, Peau de pierre
+    const amp = hero && def.team !== hero.team ? this.heroMul(att, def) : 1;        // bonus des objets (états, Midas…)
+    const armor = Math.min(CAPS.armor, def.armor ?? 0);
+    dmg = Math.max(1, Math.round(dmg * att.pow * fury * exec * vsBoss * critK * amp * (1 - armor) * aegis));
     if (isCrit) {
       this.emit('pop', 'CRIT !', def.x, def.y + 2.15, def.z, 'spell');
       if (att.critHeal > 0) heal(att, att.critHeal);
     }
-    if (att.leech) heal(att, att.leech);
+    if (att.leech) heal(att, Math.min(CAPS.leech, att.leech * (att.leechMul ?? 1)));
     // « Plume de phénix » : le coup qui l'aurait mis à terre le fait renaître (une fois)
     if (def.phoenix && def.hp - dmg <= 0) { this.rebirth(def); return; }
     if (def.boss) knock *= 0.4;               // le chef ne recule presque pas
@@ -800,7 +930,13 @@ export class DungeonSim extends Sim {
     this.enrage(def);
     // « Épines de bronze » : une part des dégâts revient à l'attaquant
     if (def.thorns && att !== def && att.team !== def.team && att.state !== 'dead') this.thornsHit(def, att, Math.max(1, Math.round(dmg * def.thorns)));
+    // objets : effets au coup porté (feu, poison, foudre…) et au coup reçu (Paratonnerre)
+    if (hero && def.team !== hero.team) this.onHitItems(att, def, dmg, isCrit);
+    if (this.isHero(def) && def.state !== 'dead') this.onHurtItems(def, att);
+    // Bacchanale : un ennemi sous l'effet de la discorde qui frappe un allié soigne le héros
+    if (att.team === 1 && def.team === 1 && att.sConf > 0) { const h = this.f[att.sConfBy]; if (h && h.confHeal && h.state !== 'dead') this.healPop(h, h.confHeal); }
   }
+
   // un héros à terre se relève (réanimé par son équipier, ou salle nettoyée)
   getUp(p, msg) {
     p.down = 0; p.revT = 0;
@@ -831,6 +967,8 @@ export class DungeonSim extends Sim {
     this.emit('ring', p.x, p.y + 0.1, p.z, 0xffa020, 2.6, 0.6, true);
     this.emit('emit', p.x, p.y + 0.8, p.z, 40, { color: [0xffa020, 0xffe27a, 0xff5a20], speed: 3, up: 4, size: 0.1, life: 1, grav: -1 });
     this.emit('shake', 0.25);
+    // Renaissance ardente (Plume de phénix + Cœur de forge) : on renaît en explosant
+    if (p.phoenixBoom) this.blast(p, p.x, p.y, p.z, 40, 'fire', 2.8);
   }
   thornsHit(def, att, back) {
     att.hp = Math.max(0, att.hp - back);
@@ -971,7 +1109,7 @@ export class DungeonSim extends Sim {
           if (d.state === 'dead' || d.team === e.team) continue;
           const dx = d.x - e.x, dz = d.z - e.z, dist = hypot(dx, dz);
           if (dist > R.R || dist < 0.01) continue;
-          d.vx = dx / dist * R.knock; d.vz = dz / dist * R.knock;
+          d.vx = dx / dist * R.knock * knockOf(d); d.vz = dz / dist * R.knock * knockOf(d);
           if (d.state !== 'air' && d.state !== 'roll') { this.setState(d, 'hit', 0.4); this.play(d, 'idle', { fade: 0.05 }); }
         }
         // renforts : un de plus à deux
@@ -1005,7 +1143,9 @@ export class DungeonSim extends Sim {
         if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
         continue;
       }
+      this.src = 'fire';
       this.damage(e, d, F.dmg, F.knock, 0.15, d.x, d.y + 1, d.z);
+      this.src = '';
     }
   }
   // retombée du saut : onde de choc autour du point d'impact
@@ -1028,14 +1168,14 @@ export class DungeonSim extends Sim {
       const nx = dist > 0.05 ? dx / dist : sin(e.yaw), nz = dist > 0.05 ? dz / dist : cos(e.yaw);
       if (d.state === 'block') {
         d.guard -= S.guard * guardOf(d); d.guardT = 0;
-        d.vx = nx * 3; d.vz = nz * 3;
+        d.vx = nx * 3 * knockOf(d); d.vz = nz * 3 * knockOf(d);
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
         if (d.guard <= 0) this.guardBreak(e, d, d.x, d.y + 1, d.z, 0);
         continue;
       }
       this.damage(e, d, S.dmg, 0, 0.5, d.x, d.y + 0.6, d.z);
-      if (d.state !== 'dead') { d.vx = nx * S.knock; d.vz = nz * S.knock; }
+      if (d.state !== 'dead') { d.vx = nx * S.knock * knockOf(d); d.vz = nz * S.knock * knockOf(d); }
     }
   }
   // la charge renverse ceux qu'elle traverse (une fois chacun : spHit, un bit par combattant)
@@ -1052,7 +1192,7 @@ export class DungeonSim extends Sim {
       const kx = e.spX * 0.8 + e.spZ * side * 0.6, kz = e.spZ * 0.8 - e.spX * side * 0.6;
       if (d.state === 'block' && sin(d.yaw) * e.spX + cos(d.yaw) * e.spZ < -0.2) {
         d.guard -= C.guard * guardOf(d); d.guardT = 0;
-        d.vx = kx * 4; d.vz = kz * 4;
+        d.vx = kx * 4 * knockOf(d); d.vz = kz * 4 * knockOf(d);
         this.emit('fx', d.idx, 'blocked');
         this.emit('sfx', 'clang');
         this.emit('shake', 0.15);
@@ -1060,7 +1200,7 @@ export class DungeonSim extends Sim {
         continue;
       }
       this.damage(e, d, C.dmg, 0, 0.55, d.x, d.y + 1, d.z);
-      if (d.state !== 'dead') { d.vx = kx * C.knock; d.vz = kz * C.knock; }
+      if (d.state !== 'dead') { d.vx = kx * C.knock * knockOf(d); d.vz = kz * C.knock * knockOf(d); }
     }
   }
   // la charge va-t-elle heurter un mur ou un obstacle ?
@@ -1075,7 +1215,7 @@ export class DungeonSim extends Sim {
   // pics d'un piège
   trapHit(f) {
     if (f.god) return;
-    const aegis = f.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1;
+    const aegis = spellShield(f);
     const g = this.g, dmg = Math.max(1, Math.round(TRAP.dmg * (1 - f.armor) * aegis));
     f.trapT = 1.0;
     if (f.phoenix && f.hp - dmg <= 0) { this.rebirth(f); return; }
@@ -1116,17 +1256,16 @@ export class DungeonSim extends Sim {
       return;
     }
     g.kills++;
-    // victime d'un héros ou de son chien : comptée pour ses défis (kills, remis à zéro à chaque donjon)
-    const k = att ? (this.isHero(att) ? att.idx : att.owner) : -1;
-    if (k >= 0 && this.f[k]) {
+    // victime d'un héros, de son chien ou d'un ennemi qu'il a semé dans la discorde : comptée pour ses défis
+    // (kills, remis à zéro à chaque donjon) et pour ses objets « à l'élimination »
+    const k = !att ? -1 : this.isHero(att) ? att.idx : att.team === 0 ? att.owner : att.sConf > 0 ? att.sConfBy : -1;
+    if (k >= 0 && k < g.np && this.f[k]) {
       const hero = this.f[k];
       hero.kills++;
-      // bénédiction « Trophée de victoire » : soin et réduction du temps de recharge du sort par élimination
-      if (hero.onKillHeal > 0 && hero.state !== 'dead') {
-        const gain = Math.min(hero.maxHp - hero.hp, hero.onKillHeal);
-        if (gain > 0) { hero.hp += gain; this.emit('pop', `+${Math.round(gain)} PV`, hero.x, hero.y + 1.9, hero.z, 'heal'); }
-      }
+      // Calice de sang : soin par élimination
+      if (hero.onKillHeal > 0 && hero.state !== 'dead') this.healPop(hero, hero.onKillHeal);
       if (hero.onKillCd > 0 && hero.spellCd > 0) hero.spellCd = Math.max(0, hero.spellCd - hero.onKillCd);
+      this.onKillItems(hero, def, att);
     }
     this.emit('sfx', 'coin');
     this.emit('emit', def.x, def.y + 1, def.z, 18, { color: [0xffd34a, 0xffe27a, 0xfff0a0], speed: 2.5, up: 4, size: 0.08, life: 0.9, grav: 9 });
@@ -1134,9 +1273,11 @@ export class DungeonSim extends Sim {
       g.phase = 'clear'; g.t = 0;
       g.exitOpen = true;
       for (const p of this.heroes) if (p.down) this.getUp(p, 'DEBOUT !');     // salle nettoyée : les héros tombés se relèvent
-      g.chest = 1; g.chestX = 0; g.chestZ = 0;
-      // le coffre apparaît au centre, ou à côté si un héros s'y trouve
-      if (this.heroes.some((p) => hypot(p.x, p.z) < 1.5)) g.chestX = this.f[0].x > 0 ? -1.5 : 1.5;
+      for (const e of this.f) { e.sBurnT = 0; e.sPsn = 0; e.sPsnT = 0; e.sChill = 0; e.sConf = 0; }
+      this.dropLoot();
+      // salle au trésor ensuite ? (jamais après un boss : il laisse déjà ses objets)
+      const m = g.room % BOSS_EVERY;
+      g.vaultNext = !this.useMap && !this.room.boss && (m === VAULT.always || (m === VAULT.maybe && this.rng.next() < VAULT.chance));
       g.slow = 0.35; g.slowT = 0.7;
       this.emit('announce', this.room.boss ? FOES[this.room.bossId || 'boss'].name.toUpperCase() + ' VAINCU !' : 'SALLE NETTOYÉE', '', 1.5);
       this.emit('sfx', 'cheer', 0.6);
@@ -1145,70 +1286,23 @@ export class DungeonSim extends Sim {
   }
 
   updateFighter(i, canAct) {
-    if (this.f[i].sp) this.special(this.f[i], canAct);
+    const f = this.f[i], dt0 = this.dt, wasAir = f.state === 'air', hero = this.isHero(f);
+    // le froid ralentit tout le temps de l'ennemi ; la vitesse d'attaque accélère les coups du héros
+    let k = f.sChill > 0 ? FX.chill.slow : 1;
+    if (hero && (f.state === 'attack' || f.state === 'shoot')) k *= this.aspdOf(f);
+    this.dt = dt0 * k;
+    if (f.sp) this.special(f, canAct);
     super.updateFighter(i, canAct);
-    const f = this.f[i];
+    this.dt = dt0;
+    if (hero && this.g.phase === 'fight') {
+      if (f.state === 'roll' && (f.rollDmg || f.rollBurn || f.rollFreeze)) this.rollTouch(f);
+      if (wasAir && f.state !== 'air' && f.state !== 'dead') this.landItems(f);
+    }
+
     // bénédiction « Second souffle » : récupération d'endurance supplémentaire
     if (f.staMul > 1 && f.staT > STA.delay && f.state !== 'roll') f.sta = Math.min(100, f.sta + STA.regen * this.dt * (f.staMul - 1));
     // bénédiction « Source d'immortalité » : régénération continue pendant les combats
     if (f.regen > 0 && this.g.phase === 'fight' && f.state !== 'dead' && f.hp < f.maxHp) f.hp = Math.min(f.maxHp, f.hp + f.regen * this.dt);
-  }
-
-  // ---------------- coffre et bénédictions ----------------
-  rollOffer() {
-    const g = this.g, r = this.rng, base = boonOdds(Math.max(1, g.room));
-    const kind = g.chestKind || 'combat';
-    // une bénédiction unique que tous les héros ont déjà n'est plus proposée
-    const owned = (id) => BOONS[id].unique && this.heroes.every((p) => p.boons.split(',').includes(id));
-    const draw = (out, rare, legend, minTier = 0) => {
-      const u = r.next();
-      const tier = Math.max(minTier, u < legend ? 2 : u < legend + rare ? 1 : 0);
-      for (let t = tier; t >= 0; t--) {
-        const pool = Object.keys(BOONS).filter((id) => id !== 'potion' && BOONS[id].rare === t && !out.includes(id) && !owned(id));
-        if (pool.length) { out.push(pool[(r.next() * pool.length) | 0]); return; }
-      }
-    };
-    const out = [];
-    if (kind === 'treasure') {
-      // Coffre au trésor : 3 bénédictions (sans Potion), au moins 1 Rare/Légendaire garantie
-      draw(out, Math.min(0.85, base.rare * 2), Math.min(0.35, base.legend * 2.5), 1);
-      draw(out, Math.min(0.75, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
-      draw(out, Math.min(0.75, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
-    } else if (kind === 'elite') {
-      // Coffre d'élite : Potion + 1 Rare/Légendaire garantie + 1 tirage boosté
-      out.push('potion');
-      draw(out, Math.min(0.85, base.rare * 2), Math.min(0.4, base.legend * 3), 1);
-      draw(out, Math.min(0.7, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
-    } else {
-      out.push('potion');
-      for (let k = 1; k < 3; k++) draw(out, base.rare, base.legend, 0);
-    }
-    [g.o0, g.o1, g.o2] = out;
-  }
-  // le héros h prend la bénédiction n° c du coffre
-  choose(h, c) {
-    const g = this.g, p = this.f[h], id = this.offer[c];
-    if (g.phase !== 'reward' || !BOONS[id] || g['pick' + h] >= 0) return false;
-    if (BOONS[id].unique && p.boons.split(',').includes(id)) return false;     // déjà prise
-    BOONS[id].apply(p);
-    p.spellMax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
-    p.boons += (p.boons ? ',' : '') + id;
-    g['pick' + h] = c;
-    const rare = BOONS[id].rare;
-    this.emit('pop', BOONS[id].name, p.x, p.y + 2.1, p.z, 'parry');
-    this.emit('sfx', rare ? 'spell' : 'parry');
-    this.emit('ring', p.x, p.y + 1, p.z, [0xffd34a, 0x6fb8ff, 0xffa020][rare], 2.2 + rare * 0.6, 0.5);
-    if (rare) this.emit('emit', p.x, p.y + 1, p.z, 18 + 12 * rare, { color: rare > 1 ? [0xffa020, 0xffe27a, 0xffffff] : [0x6fb8ff, 0xc8e4ff], speed: 2.5, up: 3, size: 0.08, life: 0.9, grav: 4 });
-    return true;
-  }
-  // vrai si le héros h doit encore choisir
-  mustPick(h) { return this.g.phase === 'reward' && h < this.g.np && this.f[h].state !== 'dead' && this.g['pick' + h] < 0; }
-  // vrai si le héros h peut prendre la bénédiction c (évite de bloquer sur une unique déjà possédée)
-  canChoose(h, c) {
-    if (!this.mustPick(h)) return false;
-    const id = this.offer[c], p = this.f[h];
-    if (!BOONS[id] || !p) return false;
-    return !(BOONS[id].unique && p.boons.split(',').includes(id));
   }
 
   // retire proprement un héros qui quitte la partie en cours de donjon (passage fluide en solo)
@@ -1228,6 +1322,9 @@ export class DungeonSim extends Sim {
       const e = this.f[old];
       e.idx = ni;
       if (e.owner >= 0) e.owner = map.get(e.owner) ?? -1;
+      // auteurs des états (brûlure, poison, discorde) ; masques de cibles déjà touchées : à refaire
+      for (const key of ['sBurnBy', 'sPsnBy', 'sConfBy']) if (e[key] >= 0) e[key] = map.get(e[key]) ?? -1;
+      e.rollHit = 0;
       return e;
     });
     this.inp = keepIdx.map((old) => this.inp[old]);
@@ -1236,22 +1333,86 @@ export class DungeonSim extends Sim {
       if (a) a.me = ni;
       return a;
     });
-    this.pr = this.pr.filter((a) => map.has(a.o)).map((a) => ({ ...a, o: map.get(a.o) }));
+    this.pr = this.pr.filter((a) => map.has(a.o)).map((a) => ({ ...a, o: map.get(a.o), hb: 0 }));
     if (this.unlocked) this.unlocked = [this.unlocked[1 - idx] ?? []];
-    if (idx === 0) { g.pick0 = g.pick1; g.mapVote0 = g.mapVote1; g.evPick0 = g.evPick1; }
-    g.pick1 = -1; g.mapVote1 = ''; g.evPick1 = -1;
+    if (idx === 0) { g.mapVote0 = g.mapVote1; g.evPick0 = g.evPick1; }
+    g.mapVote1 = ''; g.evPick1 = -1;
     g.np = 1;
     // si le héros restant était à terre en attendant son équipier, il se relève pour continuer seul
     const p = this.f[0];
     if (p && p.down) this.getUp(p, 'EN SOLO !');
-    if (g.phase === 'reward' && !this.mustPick(0)) { g.phase = 'clear'; g.t = 0; }
     if (g.phase === 'event' && !this.mustPickEvent(0)) { g.phase = 'clear'; g.t = 0; g.exitOpen = true; }
     if (g.phase === 'map' && g.mapVote0 && this.map) {
       const node = advanceMap(this.map, g.mapVote0);
       if (node) this.newRoom(node);
     }
+    // objets à ramasser : si le héros restant a déjà pris sa part, ce qui restait pour l'autre disparaît
+    if (p) for (const grp of [PK_GRP.item, PK_GRP.minor]) if (p.took & (1 << grp)) this.pk = this.pk.filter((o) => o.grp !== grp);
+    return true;
+
+  }
+
+  // ---------------- points d'accroche des objets dans la mécanique de combat ----------------
+  resolve(att, def) { this.src = 'melee'; super.resolve(att, def); this.src = ''; }
+  arrowHit(a, d) {
+    // Écu poli : bloquer face à un projectile le renvoie (par trois avec le Miroir aux alouettes)
+    if (d.blockReflect && d.state === 'block' && this.isHero(d)) {
+      const sp = hypot(a.vx, a.vz) || 1;
+      if (sin(d.yaw) * a.vx / sp + cos(d.yaw) * a.vz / sp < -0.2) {
+        a.vx = -a.vx; a.vz = -a.vz; a.vy = -a.vy; a.o = d.idx; a.t = 0; a.hb = 0; a.it = 1;
+        d.guard = Math.max(1, d.guard - 4 * guardOf(d)); d.guardT = 0;
+        if (d.reflectSplit) for (const ang of [-0.3, 0.3]) {
+          const s = sin(ang), c = cos(ang);
+          this.pr.push({ ...a, vx: a.vx * c + a.vz * s, vz: -a.vx * s + a.vz * c });
+        }
+        this.emit('fx', d.idx, 'blocked');
+        this.emit('ring', a.x, a.y, a.z, 0xffe066, 1.4, 0.3);
+        this.emit('pop', 'RENVOI !', d.x, d.y + 2.0, d.z, 'parry');
+        this.emit('sfx', 'clang');
+        return false;
+      }
+    }
+    this.src = 'shot';
+    const r = super.arrowHit(a, d);
+    this.src = '';
+    return r;
+  }
+  // Lame fantôme : chaque coup d'arme lance une lame spectrale
+  startAttack(f, chain = false) {
+    super.startAttack(f, chain);
+    if (f.blades && this.isHero(f)) this.blade(f, f.yaw, f.blades);
+  }
+  startShot(f) {
+    super.startShot(f);
+    if (f.blades && this.isHero(f) && !wpnOf(f).summon) this.blade(f, f.yaw, f.blades);
+  }
+  startRoll(f, mx, mz) {
+    super.startRoll(f, mx, mz);
+    if (this.isHero(f) && this.g.phase === 'fight') this.rollItems(f);
+    else if (this.isHero(f) && f.rollBuff) f.rollBuffOn = 1;
+  }
+  parried(att, def, cx, cy, cz) {
+    super.parried(att, def, cx, cy, cz);
+    if (this.isHero(def) && att.team !== def.team) this.parryItems(def, att);
+  }
+  blocked(att, def, cost, cx, cy, cz) {
+    super.blocked(att, def, cost, cx, cy, cz);
+    // Égide d'Athéna : bloquer un coup blesse l'attaquant
+    if (def.blockThorns && this.isHero(def) && att.team !== def.team && att.state !== 'dead') this.procHit(def, att, def.blockThorns, 'dmg');
+  }
+  startSpell(f, opp, mx, mz) {
+    if (!super.startSpell(f, opp, mx, mz)) return false;
+    if (!this.isHero(f)) return true;
+    // Sablier brisé : chaque sort coûte des PV (sans descendre sous 1)
+    if (f.hourglass) {
+      const n = Math.min(f.hourglass, Math.max(0, Math.round(f.hp) - 1));
+      if (n > 0) { f.hp -= n; this.emit('pop', `-${n}`, f.x + 0.3, f.y + 1.6, f.z, 'dmg'); }
+    }
+    // Surcharge : le sort déclenche un éclair
+    if (f.spellZap && this.g.phase === 'fight') { const e = this.target(f.idx); if (e) this.zap(f, e, 3, FX.zap.dmg * f.zapMul * 1.5, true); }
     return true;
   }
+
 
   // frappe de att sur une liste de cibles : un même coup peut en toucher plusieurs
   strike(att, targets) {
@@ -1294,7 +1455,23 @@ export class DungeonSim extends Sim {
     this.bound(p);
     this.emit('ring', p.x, p.y + 0.05, p.z, 0x8fd8ff, 1.4, 0.4, true);
   }
+  // donne l'objet id au héros h (ou un éclat : identifiant de MINORS)
+  debugItem(h, id) {
+    const p = this.f[h];
+    if (!p || !this.isHero(p)) return false;
+    if (MINOR_IDS.includes(id)) return this.giveMinor(p, id);
+    if (!itemOf(id)) return false;
+    if (id !== 'eclat' && !(',' + this.g.seen + ',').includes(',' + id + ',')) this.g.seen += (this.g.seen ? ',' : '') + id;
+    return this.giveItem(p, id);
+  }
+  // va dans une salle au trésor (après la salle en cours)
+  debugVault() {
+    if (this.g.phase === 'hub' || this.g.phase === 'menu') this.g.room = Math.max(1, this.g.room);
+    for (const p of this.heroes) if (p.state === 'dead') { p.hp = Math.round(p.maxHp * 0.4); p.down = 0; p.revT = 0; this.toIdle(p); }
+    this.newVault();
+  }
   // le boss de la salle lance tout de suite une attaque spéciale ('slam', 'charge'), ou enrage ('rage')
+
   debugBoss(kind) {
     const e = this.f.find((o) => o.sp !== undefined && o.state !== 'dead');
     if (e && this.g.phase === 'intro') { this.g.phase = 'fight'; this.g.t = 0; }
@@ -1311,14 +1488,8 @@ export class DungeonSim extends Sim {
     const g = this.g, f = this.f, np = g.np;
     if (g.phase === 'menu' || g.phase === 'end') return;
     g.frame++;
-    if (g.phase === 'reward') {
-      // le temps est suspendu pendant que chacun choisit sa bénédiction
-      [in0, in1].forEach((src, h) => { if (this.mustPick(h)) { const c = readPick(src); if (c >= 0) this.choose(h, c); } });
-      if (!this.heroes.some((p, h) => this.mustPick(h))) { g.phase = 'clear'; g.t = 0; }
-      return;
-    }
     if (g.phase === 'map') {
-      // choix du chemin sur la carte (en solo : immédiat ; à deux : vote option B)
+      // choix du chemin sur la carte (en solo : immédiat ; à deux : vote)
       [in0, in1].forEach((src, h) => { if (h < np && g.phase === 'map') { const c = readMapIn(src); if (c >= 0) this.voteMap(h, c); } });
       return;
     }
@@ -1330,15 +1501,15 @@ export class DungeonSim extends Sim {
     const adt = this.effectiveDt();
     let dt = DT * g.slow;
     if (g.hitstop > 0) { g.hitstop -= DT; dt = 0; }
-    this.dt = dt;
+    this.dt = this.wdt = dt;
     g.t += DT;
     if (g.slowT > 0) { g.slowT -= DT; if (g.slowT <= 0) g.slow = 1; }
     const ph = g.phase;
 
-    // (un choix de bénédiction/carte/événement/boutique qui arrive hors phase est ignoré) ; un héros dans la boutique ne bouge pas
+    // (un choix de carte/événement/boutique qui arrive hors phase est ignoré) ; un héros dans la boutique ne bouge pas
     const hin = (src, p) => {
       if (ph === 'hub' && p.shop) { this.shopStep(p, src); return NEUTRAL; }
-      return readPick(src) >= 0 || readShop(src) >= 0 || readMapIn(src) >= 0 || readEventIn(src) >= 0 ? NEUTRAL : src;
+      return readShop(src) >= 0 || readMapIn(src) >= 0 || readEventIn(src) >= 0 ? NEUTRAL : src;
     };
     // attaques spéciales des boss ; pendant l'une d'elles, le boss n'écoute plus son IA
     if (ph === 'fight') for (let i = np; i < f.length; i++) if (f[i].sp !== undefined) this.bossThink(f[i], adt);
@@ -1348,6 +1519,12 @@ export class DungeonSim extends Sim {
       inp.mx = src.mx / 127; inp.mz = src.mz / 127; inp.blk = !!src.blk;
       for (let k = 0; k < ACTS.length; k++) if (src.press & PRESS[ACTS[k]]) inp[ACTS[k]] = 0.18;
       for (const a of ACTS) inp[a] = Math.max(0, inp[a] - dt);
+      // Ivresse de Dionysos : le héros titube (sa direction tourne d'avant en arrière)
+      if (p < np && f[p].drunk && ph !== 'hub') {
+        const a = 0.55 * sin(g.t * 1.9 + p * 2) + 0.25 * sin(g.t * 4.3), s = sin(a), c = cos(a);
+        const mx = inp.mx, mz = inp.mz;
+        inp.mx = mx * c + mz * s; inp.mz = -mx * s + mz * c;
+      }
     }
 
     const heroAct = ph === 'intro' || ph === 'fight' || ph === 'clear' || ph === 'hub';
@@ -1368,13 +1545,21 @@ export class DungeonSim extends Sim {
     }
 
     if (ph === 'hub') for (const p of this.heroes) this.hubPads(p);
+    if (this.pr.length) this.itemizeShots();
     this.updateArrows();
     if (g.phase === 'fight') {
       // camp des héros (héros et chiens) contre les ennemis
       const heroes = f.filter((e) => e.team === 0), foes = f.filter((e) => e.team === 1);
       for (const h of heroes) if (h.state !== 'dead') this.strike(h, foes);
-      for (const e of foes) if (g.phase === 'fight' && e.state !== 'dead') this.strike(e, heroes);
+      // un ennemi semé dans la discorde frappe ses alliés
+      for (const e of foes) if (g.phase === 'fight' && e.state !== 'dead') this.strike(e, e.sConf > 0 ? foes.filter((o) => o !== e) : heroes);
     }
+    // objets : états des combattants (brûlure, poison, froid…) et effets permanents des héros (auras, orage…)
+    if (g.phase === 'fight') {
+      for (let i = 0; i < this.f.length; i++) this.statusTick(this.f[i], dt);
+      for (const p of this.heroes) if (g.phase === 'fight') this.heroTick(p, dt);
+    }
+    if (g.phase === 'fight' || g.phase === 'clear') this.pickups();
 
     // pièges à pics
     if (ph === 'intro' || ph === 'fight' || ph === 'clear') {
@@ -1393,22 +1578,17 @@ export class DungeonSim extends Sim {
       case 'intro':
         if (g.t > 1.1) { g.phase = 'fight'; g.t = 0; this.emit('announce', 'EN GARDE !', '', 0.8); }
         break;
-      case 'clear':
-        if (g.chest === 1 && g.t > 0.4 && this.heroes.some((p) => p.state !== 'dead' && hypot(p.x - g.chestX, p.z - g.chestZ) < 1.0)) {
-          g.chest = 2;
-          g.phase = 'reward';
-          g.pick0 = g.pick1 = -1;
-          this.rollOffer();
-          this.emit('sfx', 'coin');
-          this.emit('reward');
-        }
-        break;
       case 'exit':
-        if (g.t > 0.45) { if (this.useMap) this.openMap(); else this.newRoom(); }
+        // avec la carte, c'est elle qui mène aux salles au trésor (g.vaultNext reste faux)
+        if (g.t > 0.45) { if (this.useMap) this.openMap(); else if (g.vaultNext) this.newVault(); else this.newRoom(); }
         break;
+
       case 'dead':
         if (g.t > 2.6 && !g.flagEnd) { g.flagEnd = true; g.phase = 'end'; this.emit('end'); }
         break;
     }
   }
 }
+
+// moteur des effets des objets (items.js) : méthodes ajoutées à la simulation du donjon
+Object.assign(DungeonSim.prototype, ITEM_METHODS);

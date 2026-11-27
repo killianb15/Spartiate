@@ -27,6 +27,8 @@ export const SHOT = { rel: 0.2, chain: 0.36, dur: 0.5, speed: 15, dmg: 10, life:
 export const FIRE = { speed: 8.5, life: 1.3, radius: 1.7, dmg: 9, guard: 20, knock: 3.2, rel: 0.26, chain: 0.62, dur: 0.66, touch: 0.5 };
 // grimoire : incantation qui invoque un chien (rel : le chien apparaît ; chain/dur : fin de l'incantation)
 export const CAST = { rel: 0.4, chain: 0.85, dur: 0.85, max: 2 };
+// lame spectrale (projectile k = 2, objets du donjon) : vitesse, durée de vol, dégâts par défaut
+export const BLADE = { speed: 12, life: 0.5, dmg: 6, guard: 10 };
 export const HIT_W = 0.72;
 // Armes : portée du coup, dégâts, coups d'un enchaînement, vitesse de course, coût du blocage
 // (multiplie la garde perdue), crush (multiplie la garde que fait perdre un coup bloqué).
@@ -96,8 +98,29 @@ export const SPELLS = {
     desc: 'Onde électrique qui brise les gardes et étourdit les ennemis proches',
     cd: 7.5, dur: 0.58, hitAt: 0.26, radius: 2.8, dmg: 15, knock: 4.2, stun: 0.85, color: 0x6fc3ff,
   },
+  // sorts sans héros attitré : on les apprend chez le sorcier de la salle d'armes (comme tous les autres)
+  stone: {
+    id: 'stone', name: 'Peau de pierre',
+    desc: 'Se change en pierre 5 s : −60 % de dégâts, inébranlable, mais deux fois plus lent',
+    cd: 13, dur: 0.5, hitAt: 0.22, buff: 5, reduce: 0.6, slow: 0.5, knock: 0.25, stagger: 0.4, color: 0xb8b4a8,
+  },
+  totem: {
+    id: 'totem', name: 'Totem de vie',
+    desc: 'Plante un totem 8 s qui soigne 5 PV par seconde à tous les alliés autour',
+    cd: 16, dur: 0.55, hitAt: 0.3, life: 8, R: 3, tick: 1, heal: 5, color: 0x8fe36a,
+  },
 };
-export const spellOf = (f) => SPELLS[f?.kind] ?? SPELLS.soldier;
+// tous les sorts, dans l'ordre de l'étal du sorcier ; f.spell = l'un d'eux, ou '' = le sort de son héros
+export const SPELL_IDS = Object.keys(SPELLS);
+export const spellOf = (f) => SPELLS[f?.spell] ?? SPELLS[f?.kind] ?? SPELLS.soldier;
+// recharge réelle du sort (objets : spellCdMul), jamais sous 1,2 s ; sert aussi de maximum à la jauge (spellMax)
+export const spellCdOf = (f) => Math.max(1.2, spellOf(f).cd * (f.spellCdMul ?? 1));
+// part des dégâts encore subie sous les sorts défensifs (Rempart sacré : spellBuffT, Peau de pierre : stoneT)
+export const spellShield = (f) => (f.spellBuffT > 0 ? 1 - SPELLS.knight.reduce : 1) * (f.stoneT > 0 ? 1 - SPELLS.stone.reduce : 1);
+// vitesse de déplacement (Peau de pierre : ralenti)
+export const slowOf = (f) => (f.stoneT > 0 ? SPELLS.stone.slow : 1);
+// recul subi (Peau de pierre : presque inébranlable)
+export const knockOf = (f) => (f.stoneT > 0 ? SPELLS.stone.knock : 1);
 
 // Entrée d'un joueur pour une image : déplacement quantifié (-127..127), blocage, touches pressées (bits)
 export const PRESS = { atk: 1, par: 2, brk: 4, jump: 8, roll: 16, spell: 32 };
@@ -107,7 +130,11 @@ export const quant = (v) => Math.max(-127, Math.min(127, Math.round(v * 127)));
 
 const fx = (f) => sin(f.yaw);
 const fz = (f) => cos(f.yaw);
-export const canRoll = (f) => f.sta >= STA.roll;
+// coût d'une roulade (réduit par certains objets du donjon : rollCost)
+export const rollCost = (f) => STA.roll * (f.rollCost ?? 1);
+export const canRoll = (f) => f.sta >= rollCost(f);
+// fenêtre de parade (allongée par certains objets du donjon : parryWin)
+export const parryWin = (f) => PAR.win * (f.parryWin ?? 1);
 
 export function newFighter(idx) {
   return {
@@ -122,6 +149,10 @@ export function newFighter(idx) {
     wpn: 'sword', // arme (clé de WEAPONS)
     // sort actif et temps de recharge
     spellCd: 0, spellMax: SPELLS.soldier.cd, spellTick: 0, spellHit: 0, spellBuffT: 0, spellDx: 0, spellDz: 0,
+    spell: '',   // sort choisi chez le sorcier (clé de SPELLS) ; '' = celui du personnage
+    stoneT: 0,   // Peau de pierre : temps restant
+    // Totem de vie (un par lanceur) : temps restant, position, prochain soin
+    totT: 0, totX: 0, totY: 0, totZ: 0, totK: 0,
   };
 }
 export const newInput = () => ({ mx: 0, mz: 0, blk: false, atk: 0, par: 0, brk: 0, jump: 0, roll: 0, spell: 0 });
@@ -172,12 +203,14 @@ export class Sim {
   // invocation (grimoire) : l'arène n'en a pas, le donjon les ajoute
   canSummon(f) { return false; }
   summon(f) {}
+  // projectile à tête chercheuse (hm) : le donjon l'oriente vers un ennemi
+  steer(a, dt) {}
   // la flèche heurte-t-elle le décor ?
   arrowWall(a) { return a.y < 0.02 || hypot(a.x, a.z) > 9.6; }
   // qui peut lancer le sort actif de son personnage ? (en arène : tout le monde ; en donjon : héros seulement)
-  canCastSpell(f) { return !!SPELLS[f.kind]; }
-  // réduction de dégâts du buff défensif (Rempart sacré) ; DungeonSim l'intègre à son calcul d'armure
-  mitigateSpell(def, dmg) { return def.spellBuffT > 0 ? Math.max(1, Math.round(dmg * (1 - SPELLS.knight.reduce))) : dmg; }
+  canCastSpell(f) { return !!(SPELLS[f.spell] || SPELLS[f.kind]); }
+  // réduction de dégâts des sorts défensifs (Rempart sacré, Peau de pierre) ; DungeonSim l'intègre à son calcul d'armure
+  mitigateSpell(def, dmg) { const k = spellShield(def); return k < 1 ? Math.max(1, Math.round(dmg * k)) : dmg; }
 
   // ---------------- sauvegarde / restauration / empreinte ----------------
   save() {
@@ -200,7 +233,7 @@ export class Sim {
   }
   reset(f, x, z, yaw) {
     const n = f.resetN + 1, an = f.animN + 1;
-    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an, kind: f.kind, arch: f.arch, wpn: f.wpn, spellMax: spellOf(f).cd });
+    Object.assign(f, newFighter(f.idx), { x, z, yaw, visTarget: yaw, resetN: n, animN: an, kind: f.kind, arch: f.arch, wpn: f.wpn, spell: f.spell ?? '', spellMax: spellOf(f).cd });
   }
   startMatch() {
     const g = this.g;
@@ -240,7 +273,7 @@ export class Sim {
     const g = this.g, f = this.f;
     let dt = DT * g.slow;
     if (g.hitstop > 0) { g.hitstop -= DT; dt = 0; }
-    this.dt = dt;
+    this.dt = this.wdt = dt;
     g.frame++;
     g.t += DT;
     if (g.slowT > 0) { g.slowT -= DT; if (g.slowT <= 0) g.slow = 1; }
@@ -354,7 +387,7 @@ export class Sim {
         continue;
       }
       this.damage(att, d, FIRE.dmg, FIRE.knock, 0.3, d.x, d.y + 1, d.z);
-      if (d.state !== 'dead' && dist > 0.05) { d.vx = dx / dist * FIRE.knock; d.vz = dz / dist * FIRE.knock; }   // soufflé loin du centre
+      if (d.state !== 'dead' && dist > 0.05) { d.vx = dx / dist * FIRE.knock * knockOf(d); d.vz = dz / dist * FIRE.knock * knockOf(d); }   // soufflé loin du centre
     }
   }
   // déplace les flèches ; elles ne blessent que pendant le combat
@@ -364,7 +397,8 @@ export class Sim {
       const a = this.pr[k];
       a.t += dt; a.x += a.vx * dt; a.y += a.vy * dt; a.z += a.vz * dt;
       const fb = a.k === 1;
-      let gone = a.t > (fb ? FIRE.life : SHOT.life), boom = gone && fb;
+      if (a.hm) this.steer(a, dt);
+      let gone = a.t > (a.life ?? (fb ? FIRE.life : a.k === 2 ? BLADE.life : SHOT.life)), boom = gone && fb;
       if (!gone && this.arrowWall(a)) {
         gone = true; boom = fb;
         if (!fb) {
@@ -374,9 +408,14 @@ export class Sim {
       }
       if (!gone && fight) for (const d of this.f) {
         if (d.state === 'dead' || !this.foeOf(a.o, d)) continue;
-        const sz = d.size ?? 1;
+        const sz = d.size ?? 1, bit = 1 << (d.idx & 31);
+        if (a.hb & bit) continue;                 // projectile perçant : chaque cible une seule fois
         if (hypot(d.x - a.x, d.z - a.z) > (fb ? FIRE.touch : 0.4) * sz || a.y < d.y + 0.15 || a.y > d.y + 1.55 * sz) continue;
-        if (this.arrowHit(a, d)) { gone = true; boom = fb; break; }
+        if (this.arrowHit(a, d)) {
+          // perçant (pc : cibles qu'il peut encore traverser) : il continue sa route
+          if (a.pc > 0 && !fb) { a.pc--; a.hb = (a.hb | 0) | bit; continue; }
+          gone = true; boom = fb; break;
+        }
       }
       if (gone) this.pr.splice(k, 1);
       if (boom) this.explode(a);
@@ -387,7 +426,7 @@ export class Sim {
     if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) return false;   // traverse la roulade
     const att = this.f[a.o] ?? d, g = this.g;
     const sp = hypot(a.vx, a.vz) || 1, facing = fx(d) * a.vx / sp + fz(d) * a.vz / sp < -0.2;
-    if (d.state === 'parry' && d.stateT <= PAR.win && facing) {
+    if (d.state === 'parry' && d.stateT <= parryWin(d) && facing) {
       // parade : la flèche repart vers le tireur
       a.vx = -a.vx; a.vz = -a.vz; a.vy = -a.vy; a.o = d.idx; a.t = 0;
       this.emit('fx', d.idx, 'parried');
@@ -399,14 +438,14 @@ export class Sim {
     }
     if (a.k === 1) return true;      // boule de feu : elle explose (dégâts de zone dans explode)
     if (d.state === 'block' && facing) {
-      d.guard -= SHOT.guard * guardOf(d); d.guardT = 0;
+      d.guard -= (a.k === 2 ? BLADE.guard : SHOT.guard) * guardOf(d); d.guardT = 0;
       this.emit('fx', d.idx, 'blocked');
       this.emit('emit', a.x, a.y, a.z, 8, { color: [0xffe27a, 0xffffff], speed: 3, up: 2, size: 0.05, life: 0.3, grav: 10 });
       this.emit('sfx', 'clang');
       if (d.guard <= 0) this.guardBreak(att, d, a.x, a.y, a.z, 0);
       return true;
     }
-    this.damage(att, d, Math.round(SHOT.dmg * (a.mul ?? 1)), 1.6, 0.22, a.x, a.y, a.z);
+    this.damage(att, d, Math.round((a.dmg ?? SHOT.dmg) * (a.mul ?? 1)), 1.6, 0.22, a.x, a.y, a.z);
     return true;
   }
   startBreak(f) {
@@ -464,7 +503,7 @@ export class Sim {
   startSpell(f, opp, mx, mz) {
     if (!this.canCastSpell(f) || f.spellCd > 0) return false;
     const S = spellOf(f);
-    const cd = Math.max(1.2, S.cd * (f.spellCdMul ?? 1));
+    const cd = spellCdOf(f);
     f.spellCd = cd;
     f.spellMax = cd;
     f.spellTick = 0;
@@ -511,6 +550,12 @@ export class Sim {
       this.emit('sfx', 'nova');
     } else if (S.id === 'overload') {
       this.play(f, 'emote-yes', { loop: false, restart: true, ts: 1.1, fade: 0.05 });
+      this.emit('sfx', 'spell');
+    } else if (S.id === 'stone') {
+      this.play(f, 'crouch', { loop: false, restart: true, ts: 1.3, fade: 0.05 });
+      this.emit('sfx', 'aegis');
+    } else if (S.id === 'totem') {
+      this.play(f, 'interact-right', { loop: false, restart: true, ts: 1.2, fade: 0.05 });
       this.emit('sfx', 'spell');
     }
     return true;
@@ -620,8 +665,48 @@ export class Sim {
         this.emit('shake', 0.28);
         this.spellAoE(f, S.radius, S.dmg, S.knock, 0, { stun: S.stun, breakGuard: true });
       }
+    } else if (S.id === 'stone') {
+      const k = exp(-dt * 14); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        f.stoneT = S.buff * (f.spellPow ?? 1);
+        this.emit('ring', f.x, f.y + 0.08, f.z, S.color, 1.6, 0.4, true);
+        this.emit('emit', f.x, f.y + 0.3, f.z, 26, { color: [0x9a968c, S.color, 0x6e6a60], speed: 2.6, up: 2.4, size: 0.11, life: 0.6, grav: 9 });
+        this.emit('sfx', 'land');
+        this.emit('shake', 0.18);
+      }
+    } else if (S.id === 'totem') {
+      const k = exp(-dt * 12); f.vx *= k; f.vz *= k;
+      if (!f.spellTick && t >= S.hitAt) {
+        f.spellTick = 1;
+        // planté à ses pieds (un seul par lanceur : le nouveau remplace l'ancien)
+        Object.assign(f, { totT: S.life, totX: f.x, totY: this.groundY(f), totZ: f.z, totK: S.tick });
+        this.emit('ring', f.x, f.totY + 0.06, f.z, S.color, S.R, 0.5, true);
+        this.emit('emit', f.x, f.totY + 0.4, f.z, 20, { color: [S.color, 0xd8ffc0, 0xffffff], speed: 2, up: 3, size: 0.08, life: 0.7, grav: 2 });
+        this.emit('sfx', 'land');
+      }
     }
     if (t >= S.dur) this.toIdle(f);
+  }
+
+  // Totem de vie : soigne chaque seconde les alliés debout autour de lui (le lanceur compris)
+  totemTick(f, dt) {
+    const S = SPELLS.totem;
+    f.totT = Math.max(0, f.totT - dt);
+    f.totK -= dt;
+    if (f.totK > 0) return;
+    f.totK += S.tick;
+    const n = Math.max(1, Math.round(S.heal * (f.spellPow ?? 1)));
+    this.emit('ring', f.totX, f.totY + 0.06, f.totZ, S.color, S.R, 0.35);
+    for (const d of this.f) {
+      if (d.state === 'dead' || (d !== f && this.foeOf(f.idx, d))) continue;
+      if (hypot(d.x - f.totX, d.z - f.totZ) > S.R || Math.abs(d.y - f.totY) > 2) continue;
+      const gain = Math.min((d.maxHp ?? 100) - d.hp, n);
+      if (gain <= 0) continue;
+      d.hp += gain;
+      this.emit('pop', `+${gain} PV`, d.x, d.y + 1.9, d.z, 'heal');
+      this.emit('emit', d.x, d.y + 0.6, d.z, 6, { color: [S.color, 0xffffff], speed: 0.8, up: 2.4, size: 0.06, life: 0.6, grav: -1 });
+    }
   }
 
   // coup de zone radial d'un sort : retourne le nombre de cibles touchées (non bloquées)
@@ -713,20 +798,20 @@ export class Sim {
       case 'idle': case 'walk': case 'block': {
         if (!canAct) { f.vx = f.vz = 0; if (st !== 'idle') this.toIdle(f); break; }
         if (this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
-        if (this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (this.take(i, 'brk') && this.spend(f, STA.brk)) { this.startBreak(f); break; }
         // archer : tir, ou coup d'arc si l'adversaire est collé
         // grimoire : invocation (si on peut encore invoquer), sinon coup de livre
         if (wpnOf(f).summon && this.canSummon(f) && this.inp[i].atk > 0 && f.sta >= STA.summon) { this.take(i, 'atk'); this.spend(f, STA.summon); this.startShot(f); break; }
         if (this.take(i, 'atk') && this.spend(f, STA.atk)) { if (f.arch && !(opp && dOpp < SHOT.melee)) this.startShot(f); else this.startAttack(f); break; }
         if (this.take(i, 'par') && this.spend(f, STA.par)) { this.startParry(f); break; }
-        if (this.take(i, 'jump') && this.spend(f, STA.jump)) { this.doJump(f, mx, mz); break; }
+        if (this.take(i, 'jump') && this.spend(f, STA.jump * (f.jumpCost ?? 1))) { this.doJump(f, mx, mz); break; }
         if (inp.blk) {
           if (st !== 'block') { this.setState(f, 'block'); this.play(f, 'idle', { ts: 0.5 }); }
-          f.vx = mx * 1.1; f.vz = mz * 1.1;
+          f.vx = mx * 1.1 * slowOf(f); f.vz = mz * 1.1 * slowOf(f);
           break;
         }
-        const spd = (f.sta < STA.tired ? 2.5 : 3.4) * wpnOf(f).run * (f.runMul ?? 1);   // l'archer est plus léger, le pavois plus lourd
+        const spd = (f.sta < STA.tired ? 2.5 : 3.4) * wpnOf(f).run * (f.runMul ?? 1) * slowOf(f);   // l'archer est plus léger, le pavois plus lourd
         f.vx = mx * spd; f.vz = mz * spd;
         if (moving) {
           if (st !== 'walk') this.setState(f, 'walk');
@@ -749,7 +834,7 @@ export class Sim {
         else { const k = exp(-dt * 12); f.vx *= k; f.vz *= k; }
         if (canAct && t > ATK.chain && f.combo < wpnOf(f).combo && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
         if (canAct && t > ATK.end && this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
-        if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (t >= ATK.dur) { f.combo = 0; this.toIdle(f); }
         break;
       }
@@ -763,7 +848,7 @@ export class Sim {
         const S = shotOf(f);
         if (!f.hitDone && t >= S.rel) { f.hitDone = true; if (wpnOf(f).summon) this.summon(f); else this.fire(f, opp); }
         if (canAct && t > S.chain && !wpnOf(f).summon && this.take(i, 'atk') && this.spend(f, STA.atk)) { this.startShot(f); break; }
-        if (canAct && t > S.rel && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && t > S.rel && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (t >= S.dur) this.toIdle(f);
         break;
       }
@@ -783,12 +868,12 @@ export class Sim {
       case 'hit': {
         const k = exp(-dt * 7); f.vx *= k; f.vz *= k;
         // on peut se sortir d'un enchaînement par une roulade
-        if (canAct && grounded && f.stateT > 0.1 && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && grounded && f.stateT > 0.1 && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (f.stateT >= f.dur && grounded) this.toIdle(f);
         break;
       }
       case 'roll': {
-        const t = f.stateT, sp = ROLL.speed * (1 - 0.75 * t / ROLL.dur);
+        const t = f.stateT, sp = ROLL.speed * (1 - 0.75 * t / ROLL.dur) * (f.stoneT > 0 ? 0.6 : 1);
         f.vx = f.rdx * sp; f.vz = f.rdz * sp;
         f.dustT -= dt;
         if (f.dustT < 0) { f.dustT = 0.06; this.emit('emit', f.x, f.y + 0.05, f.z, 1, { color: 0xc8a070, speed: 0.5, up: 0.5, size: 0.08, life: 0.4, grav: 2 }); }
@@ -803,8 +888,8 @@ export class Sim {
       case 'air':
         if (canAct) {
           const k = Math.min(1, dt * 3);
-          f.vx += (mx * 3.3 - f.vx) * k;
-          f.vz += (mz * 3.3 - f.vz) * k;
+          f.vx += (mx * 3.3 * slowOf(f) - f.vx) * k;
+          f.vz += (mz * 3.3 * slowOf(f) - f.vz) * k;
           if (!f.airAtk && f.arch && this.take(i, 'atk') && this.spend(f, STA.atk)) {
             // tir en plein saut (airAtkT hors de la fenêtre de coup : pas de coup au corps à corps)
             f.airAtk = true; f.airAtkT = 9;
@@ -847,6 +932,10 @@ export class Sim {
     f.staFail = Math.max(0, f.staFail - dt);
     if (f.spellCd > 0) f.spellCd = Math.max(0, f.spellCd - dt);
     if (f.spellBuffT > 0) f.spellBuffT = Math.max(0, f.spellBuffT - dt);
+    // temps du monde (wdt) : la vitesse d'attaque du lanceur n'accélère ni sa pierre ni son totem
+    const wdt = this.wdt ?? dt;
+    if (f.stoneT > 0) f.stoneT = Math.max(0, f.stoneT - wdt);
+    if (f.totT > 0) this.totemTick(f, wdt);
     if (f.staT > STA.delay && f.state !== 'roll') f.sta = Math.min(100, f.sta + STA.regen * dt * (f.state === 'block' ? 0.5 : 1));
   }
 
@@ -865,8 +954,9 @@ export class Sim {
     const along = dx * afx + dz * afz, lateral = Math.abs(dx * afz - dz * afx);
     // une grande cible (boss) a un corps plus large : la portée compte depuis sa surface, pas son centre
     // (deux corps restent à 0,45 x (somme des tailles) l'un de l'autre, voir DungeonSim)
-    const big = 0.45 * Math.max(0, (def.size ?? 1) - 1), hitW = HIT_W + big;
-    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45) + big) return;
+    // une petite cible (héros rapetissé) est plus étroite ; un grand attaquant a plus d'allonge (reachMul)
+    const sz = def.size ?? 1, big = 0.45 * Math.max(0, sz - 1), hitW = HIT_W * Math.min(1, sz) + big;
+    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45) * (att.reachMul ?? 1) + big) return;
     if (kind === 'air' ? (dy > 0.6 || dy < -1.7) : Math.abs(dy) > 0.9) return;
     const reach = Math.min(Math.max(along - big, 0.3), 0.75);
     const cx = att.x + afx * reach, cy = Math.max(att.y, def.y) + 0.85, cz = att.z + afz * reach;
@@ -884,7 +974,7 @@ export class Sim {
       this.damage(att, def, 14, 5.5, 0.45, cx, cy, cz);
       return;
     }
-    if (def.state === 'parry' && def.stateT <= PAR.win && facingOk) { this.parried(att, def, cx, cy, cz); return; }
+    if (def.state === 'parry' && def.stateT <= parryWin(def) && facingOk) { this.parried(att, def, cx, cy, cz); return; }
     if (def.state === 'block' && facingOk) { this.blocked(att, def, kind === 'air' ? 34 : 22, cx, cy, cz); return; }
     this.damage(att, def, kind === 'air' && !att.arch ? 11 : wpnOf(att).dmg, 3.2, 0.3, cx, cy, cz);
   }
@@ -895,6 +985,8 @@ export class Sim {
     const g = this.g;
     if (def.state === 'stun') dmg = Math.round(dmg * 1.25);
     dmg = this.mitigateSpell(def, dmg);
+    // Peau de pierre : on recule à peine et on se reprend vite
+    if (def.stoneT > 0) { knock *= knockOf(def); dur *= SPELLS.stone.stagger; }
     def.hp = Math.max(0, def.hp - dmg);
     this.emit('fx', def.idx, 'hit');
     this.push(def, att, knock);
@@ -988,5 +1080,6 @@ export function hashState(s) {
   mix(s.rng);
   if (s.ai) for (const a of s.ai) if (a) for (const k in a) mix(a[k]);   // état des IA (donjon)
   if (s.pr) for (const a of s.pr) for (const k in a) mix(a[k]);            // flèches en vol
+  if (s.pk) for (const a of s.pk) for (const k in a) mix(a[k]);            // objets à ramasser (donjon)
   return h >>> 0;
 }

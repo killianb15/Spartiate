@@ -7,7 +7,10 @@
 //  2. Chromium :         "%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe" --headless=new
 //                        --remote-debugging-port=9333 --user-data-dir=<dossier temporaire> --window-size=1280,720
 //                        --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run about:blank
-//  3. node tools/browser-test.mjs <tome|staff|shop|biomes|boss|gloves> <dossier des captures>   (shop : le marchand d'armes ;
+//  3. node tools/browser-test.mjs <tome|staff|shop|sorcier|biomes|boss|gloves|objets> <dossier des captures>   (shop : le marchand d'armes ;
+//     sorcier : l'étal des sorts, puis le Totem de vie et la Peau de pierre en salle 1 ;
+//     objets : salle au trésor, fiche, ramassage, transformation, états des ennemis, fin de partie ;
+//     carte : la carte des chemins (choix au clavier, consultation M), un événement, une élite, un trésor ;
 //     biomes : une salle de chaque biome, boss compris ; boss : le colosse et l'outil de débogage F2 ;
 //     gloves : les gants de boxe, gros plans du héros au repos, en garde, en frappe, puis en salle 1)
 //  Sortie : CHARGE true/false, lignes ETAT (combattants : [type, camp, état, PV]), ERREURS n + détail.
@@ -36,7 +39,7 @@ ws.addEventListener('message', (ev) => {
 });
 const send = (method, params = {}) => new Promise((r) => { const i = ++id; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
 const evalJs = async (expr) => (await send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true })).result?.result?.value;
-const VK = { KeyF: 70, Digit8: 56, Digit9: 57, KeyW: 87, KeyA: 65, KeyS: 83, KeyD: 68, KeyG: 71, KeyE: 69, Space: 32 };
+const VK = { Digit1: 49, KeyM: 77, KeyQ: 81, KeyF: 70, Digit8: 56, Digit9: 57, KeyW: 87, KeyA: 65, KeyS: 83, KeyD: 68, KeyG: 71, KeyE: 69, Space: 32 };
 const key = (type, code) => send('Input.dispatchKeyEvent', { type, code, key: code.replace('Key', '').toLowerCase(), windowsVirtualKeyCode: VK[code], nativeVirtualKeyCode: VK[code] });
 const tap = async (code, ms = 80) => { await key('keyDown', code); await sleep(ms); await key('keyUp', code); };
 const hold = async (codes, ms) => { for (const c of codes) await key('keyDown', c); await sleep(ms); for (const c of codes) await key('keyUp', c); };
@@ -48,6 +51,11 @@ const shot = async (name) => {
   console.log('CAPTURE', f);
 };
 const waitFor = async (expr, ms = 90000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await evalJs(expr)) return true; await sleep(300); } return false; };
+// franchir la porte de la salle d'armes : la carte des chemins s'ouvre, touche 1 = première salle proposée
+const passDoor = async (w = 'spartiate') => {
+  await evalJs(`(() => { const g = ${w}.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+  if (await waitFor(`${w}.sim.g.phase === 'map'`, 60000)) { await sleep(300); await tap('Digit1'); }
+};
 
 await send('Runtime.enable'); await send('Log.enable'); await send('Page.enable'); await send('Network.enable'); await send('Network.setCacheDisabled', { cacheDisabled: true });
 await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
@@ -73,7 +81,7 @@ if (scenario === 'compte') {
   await sleep(2500);
   await shot('salle-armes-verrous');
   // un donjon de Gladiateur au glaive : 120 victimes, tombé en salle 1 → débloque le Mirmillon
-  await evalJs(`(() => { const g = __game.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+  await passDoor('__game');
   console.log('SALLE 1', await waitFor(`__game.sim.g.room === 1 && __game.game.phase === 'fight'`, 60000));
   await evalJs(`(() => { const s = __game.sim, p = s.f[0], e = s.f.find((f) => f.team === 1); p.kills = 120; s.damage(e, p, 9999, 0, 0.3, p.x, 1, p.z); return p.state; })()`);
   console.log('FIN', await waitFor(`!document.getElementById('result').classList.contains('hidden') && document.getElementById('resDefis').textContent.length > 0`, 60000));
@@ -91,7 +99,7 @@ if (scenario === 'compte') {
   ws.close();
   process.exit(0);
 }
-const wpn = { tome: 'tome', staff: 'staff', shop: 'sword', gloves: 'gloves' }[scenario] ?? 'tome';
+const wpn = { tome: 'tome', staff: 'staff', shop: 'sword', sorcier: 'sword', gloves: 'gloves' }[scenario] ?? 'tome';
 await evalJs(`localStorage.setItem('spartiate-cfg', JSON.stringify({ game: 'dungeon', mode: 'solo', diff: '1', p1: '${scenario === 'gloves' ? 'soldier' : 'archer'}', p2: 'orc', w1: '${wpn}', arena: 'colisee' })); true`);
 // le panneau F2 demande un code : déverrouillé pour cet onglet (sauf dans le scénario qui teste ce verrou)
 if (scenario !== 'code') await evalJs(`sessionStorage.setItem('spartiate-dbg', '1'); true`);
@@ -104,6 +112,54 @@ await shot('salle-armes');
 await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: 640, y: 600, button: 'left', clickCount: 1 });
 await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 640, y: 600, button: 'left', clickCount: 1 });
 
+if (scenario === 'sorcier') {
+  // gros plan recadré autour d'un point du monde (projeté par la caméra du jeu)
+  const zoomAt = async (name, x, y, z, w = 320, h = 240, scale = 2) => {
+    const c = await evalJs(`(() => { const v = new spartiate.camera.position.constructor(${x}, ${y}, ${z}).project(spartiate.camera);
+      return [(v.x + 1) / 2 * innerWidth, (1 - v.y) / 2 * innerHeight]; })()`);
+    const r = await send('Page.captureScreenshot', { format: 'png', clip: { x: Math.max(0, c[0] - w / 2), y: Math.max(0, c[1] - h / 2), width: w, height: h, scale } });
+    const f = path.join(outDir, `${String(++shotN).padStart(2, '0')}-${name}.png`);
+    fs.writeFileSync(f, Buffer.from(r.result.data, 'base64'));
+    console.log('CAPTURE', f);
+  };
+  const st = () => evalJs(`(() => { const p = spartiate.sim.f[0]; return JSON.stringify({ shop: p.shop, shopK: p.shopK, spell: p.spell, kind: p.kind, pv: Math.round(p.hp), stoneT: +(p.stoneT || 0).toFixed(1), totT: +(p.totT || 0).toFixed(1),
+    talk: document.getElementById('talkWho').textContent + ' : ' + document.getElementById('talkTxt').textContent, panneau: !document.getElementById('shop').classList.contains('hidden'), nom: document.getElementById('shopName').textContent, hud: document.getElementById('spn1').textContent + ' ' + document.getElementById('spc1').textContent }); })()`);
+  await zoomAt('tente', -3.2, 0.9, -5.4, 420, 300);
+  await evalJs(`(() => { const p = spartiate.sim.f[0]; p.x = -3.1; p.z = -2.3; return true; })()`);
+  await sleep(1500); await shot('approche'); console.log('ETAT', await st());
+  await evalJs(`(() => { const p = spartiate.sim.f[0]; p.x = -3.1; p.z = -3.55; p.pad = -1; return true; })()`);
+  await sleep(1800); await shot('etal'); console.log('ETAT', await st());
+  await tap('KeyD'); await sleep(700); await shot('defile-1'); console.log('ETAT', await st());
+  await tap('KeyA'); await sleep(250); await tap('KeyA'); await sleep(900); await shot('defile-pierre'); console.log('ETAT', await st());
+  // choix direct : touche 9 = Totem de vie
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', code: 'Digit9', key: '9', windowsVirtualKeyCode: 57 });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', code: 'Digit9', key: '9', windowsVirtualKeyCode: 57 });
+  await sleep(700); await shot('appris'); console.log('ETAT touche 9', await st());
+  // salle 1 : le totem soigne
+  await passDoor();
+  console.log('SALLE 1', await waitFor(`spartiate.sim.g.room === 1 && spartiate.sim.g.phase === 'fight'`, 60000));
+  await evalJs(`(() => { const s = spartiate.sim; s.debugGod(true); for (const e of s.f) if (e.team === 1) { e.x = 5; e.z = 5; } s.f[0].hp = 40; return true; })()`);
+  await tap('KeyQ'); await sleep(1500);
+  console.log('ETAT totem', await st());
+  await shot('totem');
+  const p0 = await evalJs(`JSON.stringify([spartiate.sim.f[0].x, spartiate.sim.f[0].z])`);
+  const [tx, tz] = JSON.parse(p0);
+  await zoomAt('totem-pres', tx, 0.6, tz, 360, 280);
+  await sleep(2500); console.log('ETAT soins', await st());
+  // Peau de pierre
+  await evalJs(`(() => { const p = spartiate.sim.f[0]; p.spell = 'stone'; p.spellCd = 0; return true; })()`);
+  await tap('KeyQ'); await sleep(1200);
+  console.log('ETAT pierre', await st());
+  const p1 = JSON.parse(await evalJs(`JSON.stringify([spartiate.sim.f[0].x, spartiate.sim.f[0].z])`));
+  await zoomAt('pierre', p1[0], 0.8, p1[1], 300, 260);
+  await hold(['KeyD'], 900); await shot('pierre-marche');
+  console.log('ETAT', await st());
+  console.log('GPU', await evalJs(`JSON.stringify(spartiate.renderer.info.memory)`));
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
 if (scenario === 'shop') {
   // le marchand : on approche (bulle « Approche… »), on monte sur sa dalle, on fait défiler, on achète
   const st = () => evalJs(`(() => { const p = spartiate.sim.f[0]; return JSON.stringify({ shop: p.shop, wpn: p.wpn, x: +p.x.toFixed(2), z: +p.z.toFixed(2), talk: document.getElementById('talkTxt').textContent, panneau: !document.getElementById('shop').classList.contains('hidden'), nom: document.getElementById('shopName').textContent }); })()`);
@@ -160,7 +216,7 @@ if (scenario === 'gloves') {
   await shot('boutique-gants');
   console.log('ETAT', await hero(), await evalJs(`document.getElementById('shopName').textContent + ' | ' + document.getElementById('talkTxt').textContent`));
   await hold(['KeyS'], 600);
-  await evalJs(`(() => { const g = spartiate.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+  await passDoor();
   await sleep(2600);
   for (let k = 0; k < 6; k++) {
     await key('keyDown', 'KeyG'); await sleep(700); await key('keyUp', 'KeyG');
@@ -286,18 +342,109 @@ if (scenario === 'rea') {
   ws.close();
   process.exit(0);
 }
-if (scenario === 'benedictions') {
-  // écran du coffre avec une bénédiction de chaque rareté, puis choix de la légendaire (touche 3)
-  await evalJs(`spartiate.debugGoto(1); true`);
-  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
-  await evalJs(`(() => { const s = spartiate.sim; s.debugKill(); s.g.phase = 'reward'; s.g.pick0 = -1; s.g.o0 = 'potion'; s.g.o1 = 'lame'; s.g.o2 = 'phenix'; return true; })()`);
-  await waitFor(`!document.getElementById('reward').classList.contains('hidden')`, 20000);
+if (scenario === 'carte') {
+  // carte des chemins : porte de la salle d'armes → carte, choix au clavier, consultation (M), événement « ? »,
+  // salle d'élite (objets rares sur piédestaux), salle au trésor
+  const st = () => evalJs(`(() => { const s = spartiate.sim, g = s.g, vis = (id) => !document.getElementById(id).classList.contains('hidden');
+    return JSON.stringify({ salle: g.room, acte: g.act, type: g.roomType, phase: g.phase, courant: s.map?.currentId, carte: vis('mapOv'), noeuds: document.querySelectorAll('#mapOv .map-node, #mapOv [data-id]').length,
+      evt: vis('eventOv') ? document.getElementById('evTitle').textContent : '', choix: document.querySelectorAll('#evChoices button').length, log: g.eventLog,
+      pk: s.pk.map((o) => o.t + ':' + o.v + ':' + o.q), objets: s.f[0].items, timer: document.getElementById('timer').textContent, lbl: document.getElementById('roundLbl').textContent }); })()`);
+  await evalJs(`(() => { const g = spartiate.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+  console.log('CARTE', await waitFor(`spartiate.sim.g.phase === 'map' && !document.getElementById('mapOv').classList.contains('hidden')`, 60000));
   await sleep(800);
-  console.log('BOUTONS', await evalJs(`[...document.querySelectorAll('#reward button')].map((b) => b.className + ':' + b.textContent.slice(0, 40)).join(' | ')`));
-  await shot('coffre-raretes');
-  await evalJs(`document.querySelectorAll('#reward button')[2].click(); true`);
+  console.log('ETAT', await st());
+  await shot('carte');
+  await tap('Digit1');
+  console.log('SALLE 1', await waitFor(`spartiate.sim.g.room === 1 && ['intro', 'fight'].includes(spartiate.sim.g.phase)`, 60000));
   await sleep(1500);
-  console.log('CHOIX', await evalJs(`spartiate.sim.f[0].boons + ' phénix=' + spartiate.sim.f[0].phoenix`));
+  console.log('ETAT', await st());
+  await shot('salle-1');
+  await tap('KeyM'); await sleep(800);
+  console.log('ETAT consultation', await st());
+  await shot('carte-consultee');
+  await tap('KeyM'); await sleep(500);
+  console.log('ETAT refermee', await st());
+  // événement « ? » (l'autel : un objet épique contre du sang)
+  await evalJs(`(() => { const s = spartiate.sim; s.newRoom({ id: '2-0', floor: 2, col: 0, type: 'event', next: [], roomSeed: 77 }); s.g.eventId = 'autel'; return true; })()`);
+  console.log('EVENEMENT', await waitFor(`!document.getElementById('eventOv').classList.contains('hidden')`, 30000));
+  await sleep(1200);
+  console.log('ETAT', await st());
+  await shot('evenement');
+  await tap('Digit1'); await sleep(1500);
+  console.log('ETAT choisi', await st());
+  await shot('evenement-choisi');
+  // élite : champion, puis objets rares sur des piédestaux
+  await evalJs(`(() => { const s = spartiate.sim; s.debugGod(true); s.newRoom(s.map.nodes.find((n) => n.type === 'elite')); return true; })()`);
+  await waitFor(`spartiate.sim.g.roomType === 'elite' && ['intro', 'fight'].includes(spartiate.sim.g.phase)`, 30000);
+  await sleep(2000);
+  await shot('elite');
+  await evalJs(`spartiate.sim.debugKill(); true`);
+  await sleep(2000);
+  console.log('ETAT elite nettoyee', await st());
+  await shot('elite-butin');
+  // trésor : pas de combat, objets posés
+  await evalJs(`(() => { const s = spartiate.sim; s.newRoom(s.map.nodes.find((n) => n.type === 'treasure')); return true; })()`);
+  await waitFor(`spartiate.sim.g.roomType === 'treasure'`, 30000);
+  await sleep(2000);
+  console.log('ETAT tresor', await st());
+  await shot('tresor');
+  // sortie : retour sur la carte
+  await evalJs(`(() => { const g = spartiate.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+  console.log('RETOUR CARTE', await waitFor(`spartiate.sim.g.phase === 'map' && !document.getElementById('mapOv').classList.contains('hidden')`, 30000));
+  await sleep(600);
+  await shot('carte-2');
+  console.log('INFO', await evalJs(`JSON.stringify(spartiate.renderer.info.memory) + ' programmes ' + spartiate.renderer.info.programs.length`));
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
+if (scenario === 'objets') {
+  // objets : salle au trésor (piédestaux, fiche de l'objet), ramassage, transformation, combo, états des ennemis,
+  // lames tournoyantes et spectrales, éclairs, taille ; fin de partie avec la liste des objets
+  const st = () => evalJs(`(() => { const s = spartiate.sim, p = s.f[0]; return JSON.stringify({ salle: s.g.room, rn: s.g.rn, phase: s.g.phase, vault: s.g.vault, pk: s.pk.map((o) => o.t + ':' + o.v + ':' + o.q), objets: p.items, tf: p.tf, combos: p.combos, taille: p.size, fiche: document.getElementById('itemCard').classList.contains('hidden') ? '' : document.getElementById('icName').textContent, hud: document.getElementById('it1').children.length, lbl: document.getElementById('roundLbl').textContent }); })()`);
+  await evalJs(`spartiate.debugGoto(2); true`);
+  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
+  await evalJs(`(() => { const s = spartiate.sim; s.debugVault(); return true; })()`);
+  await waitFor(`spartiate.sim.g.vault && document.getElementById('timer').textContent.includes('TRÉSOR')`, 30000);
+  await sleep(1500);
+  console.log('ETAT', await st());
+  await shot('salle-tresor');
+  // devant le premier piédestal : la fiche s'affiche
+  await evalJs(`(() => { const s = spartiate.sim, o = s.pk[0], p = s.f[0]; p.x = o.x + (s.room.exit === 'z' ? 0 : 1.6); p.z = o.z + (s.room.exit === 'z' ? 1.6 : 0); spartiate.views[0].snapPos = true; return true; })()`);
+  await sleep(1200);
+  console.log('ETAT', await st());
+  await shot('fiche-objet');
+  // on marche dessus : pris, annonce, icône dans le HUD
+  await evalJs(`(() => { const s = spartiate.sim, o = s.pk[0], p = s.f[0]; p.x = o.x; p.z = o.z; return true; })()`);
+  await sleep(700);
+  console.log('ETAT', await st());
+  await shot('objet-pris');
+  // une transformation (feu), un combo (silex + givre), des lames tournoyantes, un titan
+  await evalJs(`(() => { const s = spartiate.sim; for (const id of ['silex', 'naphte', 'braise', 'givre', 'anneau', 'titan', 'fantome', 'tonnerre', 'cigue']) s.debugItem(0, id); return true; })()`);
+  await sleep(2600);
+  console.log('ETAT', await st());
+  await shot('transformation');
+  // salle suivante : ennemis brûlés, empoisonnés, gelés, en discorde
+  await evalJs(`spartiate.debugGoto(3); true`);
+  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0], foes = s.f.filter((e) => e.team === 1); s.debugGod(true);
+    foes.forEach((e, k) => { [() => s.ignite(p, e, 4, 5), () => s.poison(p, e, 5), () => s.freeze(p, e, 5), () => s.confuse(p, e, 5), () => s.chill(e, 5)][k % 5](); });
+    return foes.length; })()`);
+  await sleep(500);
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0], e = s.f.find((f) => f.team === 1 && f.state !== 'dead'); if (e) s.zap(p, e, 3, 1, false); return true; })()`);
+  await sleep(120);
+  await shot('etats-ennemis');
+  console.log('ENNEMIS', await evalJs(`JSON.stringify(spartiate.sim.f.filter((e) => e.team === 1).map((e) => [e.kind, e.sBurnT > 0, e.sPsn > 0, e.sFrz > 0, e.sConf > 0, e.sChill > 0]))`));
+  // lames spectrales (roulade avec le Fantôme)
+  await tap('Space'); await sleep(200);
+  await shot('roulade');
+  console.log('INFO', await evalJs(`JSON.stringify(spartiate.renderer.info.memory) + ' programmes ' + spartiate.renderer.info.programs.length`));
+  // fin de partie : liste des objets
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0]; s.debugGod(false); p.phoenix = 0; p.armor = 0; s.damage(s.f.find((f) => f.team === 1) ?? p, p, 99999, 0, 0.3, p.x, 1, p.z); return p.state; })()`);
+  console.log('FIN', await waitFor(`!document.getElementById('result').classList.contains('hidden')`, 30000), await evalJs(`document.getElementById('resItems').textContent`));
+  await sleep(600);
+  await shot('fin');
   console.log('ERREURS', errors.length);
   for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
   ws.close();
@@ -380,7 +527,7 @@ if (scenario === 'tome') {
   await tap('KeyF'); await sleep(1400); await shot('chien-2');
 }
 // passage direct à la salle 1 (comme si on franchissait la porte)
-await evalJs(`(() => { const g = spartiate.sim.g; g.phase = 'exit'; g.t = 0; return true; })()`);
+await passDoor();
 await sleep(2600);
 await shot('salle-1');
 const etat = () => evalJs(`JSON.stringify(spartiate.sim.f.map((e) => [e.kind, e.team, e.state, Math.round(e.hp)]))`);

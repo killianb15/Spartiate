@@ -7,12 +7,12 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Lancer / tester
 - Jeu : `python serveur.py` (port 8123) → http://localhost:8123 ; `?dungeon` lance le donjon directement,
   `&debug` expose `window.spartiate.sim` / `.views` dans la console. Ouvrir index.html en fichier ne marche pas.
-- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~90 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
+- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~185 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
 - Après une modif de `game.js`, l'utilisateur doit faire **Ctrl+F5** (cache).
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
   (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
-  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure). Chromium headless est lent (quelques images/s) : pour une capture
+  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure, objets, sorcier, carte). Chromium headless est lent (quelques images/s) : pour une capture
   précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
@@ -61,10 +61,10 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - `sim.js` : simulation pure et **déterministe** (pas de Three.js/DOM/son, pas de `Math.random`, pas de
   `Math.sin/cos` : utiliser `dmath.js`). Pas fixe 1/60 s, état « plat » (save/load/hash) pour le rollback.
   Ce qui se voit/s'entend sort en événements `sim.ev` (`sfx`, `emit`, `ring`, `pop`, `fx`, `shake`…).
-- `dungeon.js` : `DungeonSim extends Sim` (salles, ennemis, IA dans la sim, coffre/bénédictions,
+- `dungeon.js` : `DungeonSim extends Sim` (salles, ennemis, IA dans la sim, butin/salles au trésor,
   salle d'armes, chiens invoqués). `ai.js` : IA (vise toujours `sim.target(i)`). `rollback.js`, `net.js` : en ligne.
 - `game.js` : tout l'affichage (vues, caméra, HUD, menus, sons). Il **lit** l'état de la sim, ne le modifie pas.
-  Les entrées passent par `step(entrée0, entrée1)` (y compris les choix de bénédiction) pour le rollback.
+  Les entrées passent par `step(entrée0, entrée1)` (objets ramassés en marchant dessus : rien à transmettre) pour le rollback.
 - Toute nouvelle règle de jeu va dans la sim (sinon désynchronisation en ligne) et se teste dans `tests/`.
 
 ## Donjon : points clés
@@ -79,6 +79,18 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   directement (clic, touches 1 à 9). Affichage (`buildMerchant`, `shopSync`) : la caméra passe derrière
   le héros local en boutique (`camAng = 0`, donc les flèches suivent l'écran), bulle `#talk`, panneau
   `#shop`, carrousel d'armes sur le comptoir, réactions du marchand déduites de l'état (pas d'événements).
+- **Sorts** (`SPELLS` dans sim.js, touche Q) : un par héros (clé = `kind`) + `stone` (Peau de pierre : `f.stoneT`,
+  −60 % de dégâts via `spellShield`, ×0,5 vitesse `slowOf`, recul réduit `knockOf`, aussi pour les coups des boss)
+  et `totem` (Totem de vie : `f.totT/totX/totY/totZ/totK`, `totemTick` soigne les alliés à moins de `R`, jamais
+  au-dessus de maxHp, disparaît à la salle suivante). `SPELL_IDS` ; `f.spell` = clé choisie, `''` = sort du héros
+  (`spellOf(f)`, `spellKey(p)`) ; gardé au changement de héros (`equip(p, kind, wpn, spell)`), transmis comme les
+  armes (`new DungeonSim(seed, kinds, wpns, unlocked, spells)`, `s1/s2` dans cfg, `hello`/`start`, `net.peerSpell`,
+  `packFighter`). Tous les sorts sont choisissables par tous les héros.
+- **Sorcier** (`SORCERER`, à gauche de la porte : tente = 2 obstacles `kind 'tent'`, chaudron, `npc`) : dalle
+  `t: 'spell'`, même boutique que le marchand avec `p.shopK = 1` (`shopList(p)` = SPELL_IDS ou WEAPON_IDS,
+  `buy` → `learn`). Affichage `buildSorcerer` : carrousel d'icônes au-dessus du chaudron, caméra plongeante,
+  `#shop.spells` (bordure violette), `TALKERS` choisit qui parle dans `#talk`. Modèles : `tools/blender/sorcier.py`.
+  Tests : `tests/sorts.test.js` ; scénario navigateur `sorcier`.
 - **Salons** (game.js, `lobby*`, `hallStart`, panneau `#lobby` d'index.html) : seul dans la salle d'armes, on
   ouvre son salon (`{t:'open', kind, wpn}` : listé par serveur.py, `rooms[code]['hall']`) ou on rejoint
   celui d'un autre (liste `{t:'list'}` redemandée toutes les 2 s en temps réel, ou code). Quand l'invité
@@ -92,12 +104,39 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Salle nettoyée : tous les héros tombés se relèvent. Tous à terre (ou seul) : fin de partie comme avant.
   Affichage : `FighterView` penché en avant (`downK`, rotation 'YXZ'), jauge verte `revive()`, anneau qui clignote.
   Tests : `tests/rea.test.js` ; scénario navigateur `rea`.
-- **Bénédictions** (`BOONS` dans dungeon.js, `rare` 0 commune / 1 rare / 2 légendaire, `RARITY`, `unique`) : coffre =
-  Potion + 2 tirages par rareté (`rollOffer`, chances `boonOdds(n)` qui montent en profondeur ; rareté épuisée → un
-  cran en dessous ; une unique que tous ont n'est plus proposée). Champs des héros posés par `equip` : pow, maxHp,
-  armor, leech, staMul, guardMul (`guardOf` dans sim.js), runMul, phoenix (`rebirth`), thorns (`thornsHit`),
-  berserk (`FURY`) ; branchés dans `DungeonSim.damage` / `trapHit`. Écran du coffre : classe `r0/r1/r2` des boutons.
-  Tests : `tests/boons.test.js` ; scénario navigateur `benedictions`.
+- **Objets** (façon Isaac, `items.js`, passifs seulement) : `ITEMS` (~70, qualité `q` 0 commun / 1 rare / 2 épique /
+  3 légendaire, `QUALITY`, `fam`, `curse` = maudit), 9 familles `FAMILIES` (3 objets = transformation, `TF_N`, champ `p.tf`),
+  `COMBOS` (deux objets précis, `p.combos`), petits bonus `MINORS`. Effets = champs plats du héros (`ITEM_BASE`, posés par
+  `equip`), lus par `ITEM_METHODS` (mêlé à DungeonSim) : `onHitItems`, `onKillItems`, `onHurtItems`, `procHit`, `heroTick`…
+  États sur tous les combattants (`STATUS0` : `sBurnT`, `sPsn`, `sChill`, `sFrz`, `sConf`, `shrunk`, `hell`) ; `this.src`
+  ('melee'/'shot'/'fire') = nature du coup en cours. Garde-fous : bonus additifs, `CAPS`, effets secondaires sans
+  « au coup porté ». Obtention : `sim.pk` (objets au sol `{n, t: item|heart|minor, v, x, z, grp, q, arm}`, pris en marchant
+  dessus par `pickups`, un par héros et par groupe : `p.took`) ; boss = piédestaux (`ODDS.boss`), salle au trésor après la
+  salle n si n % 5 = 2 (toujours) ou 4 (une fois sur deux) (`VAULT`, `g.vaultNext`, `newVault` : `g.vault`, ne change pas
+  `g.room`, mais `g.rn` change à chaque salle) ; salle normale : cœur, petit bonus ou rien (`LOOT`, `dropLoot`). Un objet
+  ne sort qu'une fois par partie (`g.seen`, repli `eclat`). Mesure des tirages : `node tools/objets.mjs [parties] [salles]
+  [malin|hasard]` (partie « cassée » ≈ 1 sur 8 à 10 à la salle 20). Débogage : `debugItem(h, id)`, `debugVault()` (F2).
+  Affichage (game.js) : `pkSync` (piédestal + gemme couleur de qualité + icône émoji, lueur réservée `dng.glow`),
+  `itemCard` (`#itemCard`), `itemBanner` (`#itemBanner`, 3 au plus en file), `itemsHud` (`#it1/#it2`), `statusPre/Post`
+  (lueur `stGlow` des états, taille, aura, lames `orbit`), `animK` (gel/froid/vitesse d'attaque), éclairs `bolt`
+  (événement), lames spectrales `k: 2` dans `syncArrows`, `vaultDecor`. Icônes : `emojiMat` (cache gardé par `keep`).
+  En ligne : `packFighter` envoie `st` (bits des états), `items/tf/combos/orbit/minors/took/drunk`, et `pk`.
+  Tests : `tests/items.test.js` ; scénario navigateur `objets` ; `tools/lobby-test.mjs` vérifie l'invité en salle au trésor.
+- **Carte des chemins** (façon Slay the Spire, active dans le jeu : `new DungeonSim(…, spells, { useMap: true })` ;
+  sans l'option, l'ancien enchaînement des salles reste, utilisé par les tests) : `map.js` (`generateMap(runSeed, act)`,
+  réglages dans `map-config.js` : 6 étages + boss par acte, types combat/elite/event/treasure/boss), `map-ui.js`
+  (`renderMap`, rendu HTML de `#mapOv`). La porte ouvre la phase `'map'` (`openMap`) ; `mapInput(n)` choisit la n-ième
+  destination (`availableNextIds`), à deux = vote `g.mapVote0/1` (accord = départ, désaccord = tirage par la rng).
+  `newRoom(node)` : la salle prend la graine du nœud. Récompenses par type (adaptées aux objets) : combat = butin
+  normal ; élite = champion (`eliteChamp`) + `g.lootKind = 'elite'` → piédestaux `ODDS.elite` (rare minimum) et un
+  cœur ; trésor = `g.vault`, piédestaux `'vault'` sans combat ; la salle au trésor automatique (`vaultNext`) est
+  coupée avec la carte. Événements « ? » (`events.js`, `EVENTS`, phase `'event'`, `eventInput(n)`, `chooseEvent`) :
+  bonus additifs puis `itemRefresh`, objets par `grantItem` (non maudit, pas encore sorti), embuscade
+  (`spawnAmbush` → butin d'élite), `spawnItems` (piédestaux). Après le boss : acte suivant, nouvelle carte, biome
+  `biomeOfAct`. Touche M : consulter la carte (`toggleMapPeek`) ; reprise d'une partie solo sauvegardée
+  (`saveRun`/`resumeDungeon`, `spartiate-run` dans localStorage). En ligne : la carte vient de l'hôte et passe par
+  `sanitizeMap` (types en liste blanche, identifiants `\d-\d`, liens vérifiés) ; `map-ui.js` échappe aussi tout (`esc`).
+  Tests : `tests/map.test.js`, `tests/map-sim.test.js` ; scénario navigateur `carte` ; vote en ligne dans `lobby-test.mjs`.
 - **Équilibrage à deux** (`COOP` dans dungeon.js, `coop(np, clé)`) : adapté pour rester jouable au corps à corps
   (notamment avec un allié à distance). Salles normales : ×1,4 ennemis (max 7), PV ×1,15, dégâts ×1 ;
   boss : PV ×1,65, dégâts ×1,1, attaques spéciales ×0,85 d'attente ; escorte du chef orc ×1,5 (max 5). Mesurable avec
@@ -158,7 +197,7 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - `FighterView.dispose()` libère aussi ses matériaux clonés, son squelette (texture des os) et sa barre de vie.
 - Lumières : leur nombre fait partie des shaders (un nombre nouveau = tout recompiler) ; `padLights()` complète
   au multiple de 4 en fin de construction. Une lumière qui apparaît en cours de jeu doit exister dès la
-  construction, éteinte (comme celle du coffre).
+  construction, éteinte (comme la lueur des piédestaux, `dng.glow`).
 - Dalles plates et immobiles : `PT()` au lieu de `P()` (regroupées en InstancedMesh par `flushTiles()`,
   sans ombre projetée). `inst()` ne fait pas projeter d'ombre aux modèles `*floor*` ni à la lave.
 - Anneaux (`ring`) : réserve réutilisée, ne pas recréer de matériau par effet. Particules : retrait par échange.
@@ -187,6 +226,8 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Modèles 3D : Blender en ligne de commande
 - Blender 5.3 installé (winget `BlenderFoundation.Blender` 5.3.0, le 25/11/2026) : `"C:\Program Files\Blender Foundation\Blender 5.3\blender.exe" -b --factory-startup -P tools/blender/<script>.py`
   (passer des chemins **absolus** Windows aux scripts ; `cygpath -wa` depuis bash).
+  Sous Linux (sans Blender installé) : l'archive portable `blender-5.3.0-linux-x64.tar.xz` de blender.org suffit
+  (`blender -b --factory-startup -P <chemin absolu>`).
 - `tools/blender/kenney.py` : boîte à outils. Positions/rotations écrites dans le **repère du jeu** (+Y haut,
   radians, ordre XYZ, comme three.js). Couleurs par nom = cases de la palette Kenney (`colormap.png`,
   grille 16×16 de 32 px ; colonnes paires unies, impaires en dégradé). `kenney_character()` importe un
@@ -198,7 +239,9 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   (`assets/summons/dog.glb` : `dog` > `body` > head/tail/leg-fl/fr/bl/br/glow), `check_weapons.py`,
   `cerbere.py` (Cerbère : pièces articulées comme `dog.py`, trois têtes `head-*` avec yeux `eyes-*`),
   `merchant.py` (vieux marchand : Kenney male-b chauve et barbu, barbe blanche ALLONGÉE en déplaçant ses
-  sommets, robe violette, couronne de cheveux ; + étal `stall.glb` → `assets/npc/`).
+  sommets, robe violette, couronne de cheveux ; + étal `stall.glb` → `assets/npc/`),
+  `sorcier.py` (sorcier : Kenney male-b en robe bleue, barbe grise allongée, chapeau pointu ; tente rayée
+  `tent.glb`, chaudron `cauldron.glb` (nœud `brew`) → `assets/npc/` ; totem `assets/summons/totem.glb` (nœud `gem`)).
   Aperçus dans `tools/blender/previews/`. Base de l'archère : `tools/blender/sources/character-female-f.glb`.
 - Squelette Kenney : os root, leg-left/right, torso, arm-left/right, head ; rotations de repos nulles,
   bras à l'horizontale, visage vers +z. Les nœuds nommés exportés gardent leur nom ; exporter un objet
@@ -209,7 +252,8 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Assets
 - Packs Kenney CC0 : `assets/arena`, `assets/dungeon`, `assets/characters` (Mini Characters : seulement
   knight, zombie, robot + colormap). **Pas de personnages modernes** (demande de l'utilisateur).
-- Nos modèles : `assets/archer`, `assets/weapons`, `assets/summons`, `assets/npc` (marchand, étal).
+- Nos modèles : `assets/archer`, `assets/weapons`, `assets/summons` (chien, Cerbère, totem), `assets/npc`
+  (marchand, étal, sorcier, tente, chaudron).
 
 ## Préférences de l'utilisateur
 - Veut le **style Kenney** partout (mêmes proportions, palette, peu de détails). Pour modifier un perso

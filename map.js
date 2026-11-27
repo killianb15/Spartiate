@@ -243,10 +243,34 @@ export function cloneMap(map) {
 
 export const serializeMap = (map) => JSON.stringify(cloneMap(map));
 
+// Carte venue de l'extérieur (équipier en ligne, localStorage) : on n'accepte que des nombres entiers bornés,
+// des identifiants « étage-colonne » et des types de salle connus (sinon null). Elle finit dans du HTML
+// (map-ui.js) : rien d'autre ne doit pouvoir passer.
+const ROOM_TYPES = ['combat', 'elite', 'event', 'treasure', 'boss'];
+const ID_RE = /^\d{1,2}-\d{1,2}$/;
+const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+export function sanitizeMap(m) {
+  if (!m || typeof m !== 'object' || !Array.isArray(m.nodes) || m.nodes.length > 200) return null;
+  if (!int(m.act, 1, 999) || !int(m.floors, 1, 30) || !int(m.cols, 1, 12)) return null;
+  if (!int(m.runSeed, 0, 0xffffffff) || !int(m.seed, 0, 0xffffffff)) return null;
+  const nodes = [];
+  for (const n of m.nodes) {
+    if (!n || typeof n !== 'object' || typeof n.id !== 'string' || !ID_RE.test(n.id) || !ROOM_TYPES.includes(n.type)) return null;
+    if (!int(n.floor, 0, m.floors) || !int(n.col, 0, m.cols - 1) || !int(n.roomSeed, 0, 0xffffffff)) return null;
+    if (!Array.isArray(n.next) || n.next.length > 12 || !n.next.every((id) => typeof id === 'string' && ID_RE.test(id))) return null;
+    nodes.push({ id: n.id, floor: n.floor, col: n.col, type: n.type, next: [...n.next], roomSeed: n.roomSeed });
+  }
+  const ids = new Set(nodes.map((n) => n.id));
+  if (m.currentId !== null && !ids.has(m.currentId)) return null;
+  if (!Array.isArray(m.visited) || !m.visited.every((id) => ids.has(id))) return null;
+  if (!nodes.every((n) => n.next.every((id) => ids.has(id)))) return null;
+  return { act: m.act, runSeed: m.runSeed, seed: m.seed, floors: m.floors, cols: m.cols, currentId: m.currentId, visited: [...m.visited], nodes };
+}
+
 export function deserializeMap(raw) {
-  const m = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  if (!m || typeof m !== 'object' || !Array.isArray(m.nodes) || !Number.isInteger(m.floors) || !Number.isInteger(m.cols)) return null;
-  return cloneMap(m);
+  let m = raw;
+  if (typeof raw === 'string') { try { m = JSON.parse(raw); } catch { return null; } }
+  return sanitizeMap(m);
 }
 
 // =====================================================================

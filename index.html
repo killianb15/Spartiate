@@ -758,6 +758,13 @@
   .pop.spell { color: #ffe27a; font-size: 30px; text-shadow: 0 3px 0 #000, 0 0 14px rgba(255,210,80,.7); }
   .pop.heal { color: #8fe36a; font-size: 28px; }
   .pop.miss { color: #d8d8d8; font-size: 22px; }
+  .pop.burn { font-family: 'Barlow Condensed'; font-size: 24px; color: #ff9a3a; }
+  .pop.psn { font-family: 'Barlow Condensed'; font-size: 24px; color: #8fe36a; }
+  .pop.zap { font-family: 'Barlow Condensed'; font-size: 26px; color: #bfe6ff; text-shadow: 0 2px 0 #000, 0 0 10px rgba(140,200,255,.8); }
+  .pop.ice { font-family: 'Barlow Condensed'; font-size: 26px; color: #aef0ff; }
+  .pop.orb { font-family: 'Barlow Condensed'; font-size: 22px; color: #e8dcff; }
+  .pop.echo { font-family: 'Barlow Condensed'; font-size: 22px; color: #d8f4ff; }
+  .pop.conf { color: #ff8ae8; font-size: 24px; }
   @keyframes pop { 0% { opacity: 0; transform: translate3d(-50%, calc(-50% + 10px), 0) scale(.6); }
     15% { opacity: 1; transform: translate3d(-50%, -50%, 0) scale(1.15); } 30% { transform: translate3d(-50%, -50%, 0) scale(1); }
     100% { opacity: 0; transform: translate3d(-50%, calc(-50% - 60px), 0); } }
@@ -768,7 +775,7 @@
   #flash { background: #dfe8ff; }
 
   /* =====================================================================
-     Écrans modaux (Pause, Fin de partie, Bénédictions, Touches, Guide)
+     Écrans modaux (Pause, Fin de partie, Touches, Guide)
      ===================================================================== */
   .overlay {
     position: fixed; inset: 0; z-index: 20;
@@ -836,63 +843,49 @@
   }
 
   /* =====================================================================
-     Donjon : HUD & Cartes de Bénédictions (Coffre)
+     Donjon : HUD & objets
      ===================================================================== */
   #hud.dng .pips, #hud.dng.solo .p2 { visibility: hidden; }
   #hud.dng #timer { font-size: 26px; letter-spacing: .08em; }
-  #reward { padding: 20px; }
-  .reward-wrap { max-width: 840px; width: 100%; }
-  #rewardTxt {
-    display: inline-block; padding: 6px 16px; border-radius: 99px;
-    background: rgba(18, 12, 8, 0.82); border: 1px solid var(--line);
-    font-size: 18px; color: var(--ink); margin: 8px 0 22px;
-  }
-  .boons { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
-  .boons button {
-    display: flex; flex-direction: column; gap: 8px;
-    width: 244px; min-height: 168px; text-align: left; padding: 16px 18px;
-    border-radius: 14px; border: 2px solid rgba(217, 164, 65, 0.42);
-    background: linear-gradient(180deg, rgba(36, 24, 14, 0.94), rgba(16, 10, 6, 0.96));
-    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 240, 200, 0.14);
-    transition: transform .16s ease, border-color .16s, box-shadow .16s;
-    position: relative;
-  }
-  .boons button:hover:not(:disabled) {
-    transform: translateY(-6px);
-    border-color: var(--gold);
-    box-shadow: 0 18px 36px rgba(0, 0, 0, 0.65), 0 0 24px rgba(244, 204, 116, 0.3);
-  }
-  .boons button:disabled { opacity: .45; cursor: default; transform: none; }
-  .boons button small {
-    font-family: var(--font-display); font-size: 11px; font-weight: 800;
-    letter-spacing: .2em; display: inline-block; align-self: flex-start;
-    padding: 2px 8px; border-radius: 99px;
-    background: rgba(255,255,255,.07); color: var(--muted);
-  }
-  .boons button b {
-    font-family: var(--font-display); font-weight: 800; font-size: 17px;
-    letter-spacing: .03em; color: var(--gold); line-height: 1.2;
-    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
-  }
-  .boons button span {
-    font-family: var(--font-ui); font-weight: 500; font-size: 17px;
-    letter-spacing: 0; color: var(--ink); line-height: 1.3;
-  }
-  .boons button.r1 {
-    border-color: #6ab6ff;
-    background: linear-gradient(180deg, rgba(28, 52, 86, 0.95), rgba(14, 22, 38, 0.96));
-    box-shadow: 0 12px 30px rgba(0,0,0,.6), 0 0 18px rgba(106,182,255,.22);
-  }
-  .boons button.r1 small { background: rgba(106,182,255,.2); color: #9cd4ff; }
-  .boons button.r1 b { color: #b8e0ff; }
-  .boons button.r2 {
-    border-color: #ffbd42;
-    background: linear-gradient(180deg, rgba(74, 42, 12, 0.96), rgba(28, 14, 6, 0.97));
-    box-shadow: 0 12px 34px rgba(0,0,0,.65), 0 0 28px rgba(255,176,48,.42), inset 0 0 18px rgba(255,205,96,.18);
-  }
-  .boons button.r2 small { background: rgba(255,189,66,.22); color: #ffd473; }
-  .boons button.r2 b { color: #ffe79e; }
-  .boons button .owned { font-size: 14px; font-weight: 700; color: #ff9a7a; margin-top: auto; }
+  /* objets possédés (sous la barre de sort) */
+  .items { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 5px; max-width: 70%; font-size: 19px; line-height: 1; min-height: 0; }
+  .p2 .items { margin-left: auto; justify-content: flex-end; }
+  .items i { font-style: normal; display: inline-grid; place-items: center; width: 25px; height: 25px; border-radius: 6px;
+    background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.18); filter: drop-shadow(0 1px 1px #000); }
+  .items i.q1 { border-color: #5fb0ff; } .items i.q2 { border-color: #c58aff; }
+  .items i.q3 { border-color: #ffb02e; box-shadow: 0 0 6px rgba(255,170,40,.6); }
+  .items i.tf { width: auto; padding: 0 6px; font-family: Cinzel, serif; font-weight: 800; font-size: 11px; letter-spacing: .06em;
+    color: #1b0f05; background: linear-gradient(180deg, #ffe27a, #d9a441); border-color: #fff0a0; }
+  .items i.cb { width: auto; padding: 0 6px; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 13px;
+    color: #ffd0f4; border-color: #ff5ad8; }
+  .items i.mn { width: auto; padding: 0 5px; font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 13px; color: var(--muted); }
+  #resItems { display: block; max-width: none; margin: -10px auto 18px; font-size: 24px; }
+  #resItems .row { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; align-items: center; margin: 4px 0; }
+  #resItems .row b { font-family: Cinzel, serif; font-size: 16px; color: var(--muted); margin-right: 6px; }
+  #resItems .row span { font-size: 17px; color: var(--muted); }
+  #resItems i:not(.tf) { width: 32px; height: 32px; }
+  #resItems i.tf { height: 32px; font-size: 14px; }
+  /* fiche de l'objet du piédestal le plus proche */
+  #itemCard { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+    width: min(460px, calc(100vw - 32px)); background: rgba(14,9,5,.88); border: 2px solid var(--qc, #e4dccb); border-radius: 14px;
+    padding: 10px 16px 11px; text-align: center; box-shadow: 0 0 22px color-mix(in srgb, var(--qc, #e4dccb) 35%, transparent); }
+  #icHead { display: flex; align-items: center; justify-content: center; gap: 10px; }
+  #icIcon { font-size: 34px; line-height: 1; }
+  #icName { font-family: Cinzel, serif; font-weight: 900; font-size: 23px; color: var(--ink); letter-spacing: .03em; }
+  #icQual { font-family: Cinzel, serif; font-weight: 800; font-size: 12px; letter-spacing: .2em; color: var(--qc, #e4dccb); }
+  #icQual .curse { color: #ff6a8a; margin-left: 8px; }
+  #icDesc { font-size: 19px; color: var(--ink); margin-top: 4px; line-height: 1.2; }
+  #icFam { font-size: 16px; color: var(--muted); margin-top: 5px; }
+  #icFam b { color: #ffe27a; }
+  #icFam .syn { color: #ff8ae8; }
+  #icTake { font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: .04em; }
+  /* annonce d'un objet pris, d'une transformation ou d'un combo */
+  #itemBanner { position: fixed; left: 0; right: 0; top: 19%; text-align: center; z-index: 8; pointer-events: none; opacity: 0; }
+  #itemBanner.show { animation: biome 2.8s ease-out forwards; }
+  #ibTitle { font-family: Cinzel, serif; font-weight: 900; font-size: clamp(24px, 4.4vw, 46px); letter-spacing: .06em; color: var(--qc, #f1c66d);
+    text-shadow: 0 3px 0 #2a1806, 0 0 24px rgba(0,0,0,.8); }
+  #ibSub { font-family: 'Barlow Condensed', sans-serif; font-weight: 600; font-size: clamp(17px, 2.2vw, 24px); color: #f5ead4;
+    text-shadow: 0 2px 0 #000, 0 0 12px rgba(0,0,0,.9); max-width: min(640px, calc(100vw - 32px)); margin: 2px auto 0; }
 
   /* =====================================================================
      Marchand d'armes (Salle d'armes)
@@ -955,6 +948,11 @@
   }
   #shopList button.mine { box-shadow: inset 0 -3px 0 #7ecbff; }
   #shopKeys { font-size: 14.5px; color: var(--muted); margin-top: 8px; }
+  /* chez le sorcier : teinte violette */
+  #shop.spells { border-color: #b98aff; box-shadow: 0 16px 44px rgba(0,0,0,.7), 0 0 22px rgba(185,138,255,.25); }
+  #shop.spells #shopName { color: #d4b8ff; }
+  #shop.spells #shopList button.on, #shop.spells #shopList button:hover { border-color: #b98aff; }
+  #shop.spells #shopList button.on { background: rgba(150,100,255,.22); }
 
   /* =====================================================================
      Salons coop de la salle d'armes
@@ -1327,6 +1325,7 @@
   #dbg input { width: 56px; padding: 2px 6px; border-radius: 5px; border: 1px solid #3c4670; background: #0c0f1c; color: inherit; font: inherit; }
   #dbg.off .grid, #dbg.off .row { opacity: .4; pointer-events: none; }
   #dbg .row { display: flex; gap: 4px; align-items: center; }
+  #dbg select { flex: 1; min-width: 0; padding: 2px 4px; border-radius: 5px; border: 1px solid #3c4670; background: #0c0f1c; color: inherit; font: inherit; }
   #dbgLock { position: fixed; right: 12px; top: 230px; z-index: 30; width: 260px; max-width: calc(100vw - 32px); padding: 10px 12px;
     background: rgba(12,15,28,.94); border: 1px solid #3c4670; border-radius: 10px; font-family: var(--font-ui); color: #dfe6ff; }
   #dbgLock h4 { margin: 0 0 8px; font-family: var(--font-display); font-size: 14px; letter-spacing: .2em; color: #9fb4ff; }
@@ -1511,11 +1510,11 @@
           </div>
           <div class="dng-step">
             <div class="dng-num">2</div>
-            <div><b>Le vieux marchand</b><span>Équipe-toi parmi 9 armes (glaive, lance, hache, marteau, sceptre, grimoire, gants, arc…).</span></div>
+            <div><b>Le marchand et le sorcier</b><span>Équipe-toi parmi 9 armes (glaive, lance, hache, marteau, sceptre, grimoire, gants, arc…) et apprends le sort de ton choix.</span></div>
           </div>
           <div class="dng-step">
             <div class="dng-num">3</div>
-            <div><b>Salles, coffres &amp; boss</b><span>Nettoie chaque salle, choisis une bénédiction et affronte un boss toutes les 5 salles.</span></div>
+            <div><b>Salles, objets &amp; boss</b><span>Nettoie chaque salle, ramasse des objets (salles au trésor, butin des boss) et affronte un boss toutes les 5 salles.</span></div>
           </div>
         </div>
         <div class="dng-note"><b>Astuce coop :</b> depuis la salle d'armes solo, tu peux ouvrir un salon ou rejoindre un ami en un clic.</div>
@@ -1612,6 +1611,7 @@
       <div class="spmeta"><span class="spname" id="spn1">Sort</span><span class="spcd" id="spc1">PRÊT</span></div>
       <div class="spbar"><div class="spfill" id="spf1"></div></div>
     </div>
+    <div class="items" id="it1"></div>
     <div class="pips" id="w1"><i></i><i></i></div>
   </div>
   <div class="center">
@@ -1629,12 +1629,13 @@
       <div class="spmeta"><span class="spname" id="spn2">Sort</span><span class="spcd" id="spc2">PRÊT</span></div>
       <div class="spbar"><div class="spfill" id="spf2"></div></div>
     </div>
+    <div class="items" id="it2"></div>
     <div class="pips" id="w2"><i></i><i></i></div>
   </div>
 </div>
 
 <div id="help" class="hidden"></div>
-<div id="talk" class="hidden"><b>Le vieux marchand</b><span id="talkTxt"></span></div>
+<div id="talk" class="hidden"><b id="talkWho">Le vieux marchand</b><span id="talkTxt"></span></div>
 <div id="shop" class="hidden">
   <div class="shop-head"><span id="shopName"></span><span id="shopMine" class="hidden">✓ TON ARME</span></div>
   <div id="shopDesc"></div>
@@ -1672,6 +1673,9 @@
   <div class="lbl">Aller à</div><div class="grid" id="dbgRooms"></div>
   <div class="lbl">Héros</div>
   <div class="grid"><button id="dbgHeal">Soigner</button><button id="dbgGod">Invincible</button><button id="dbgTp">Clic = téléporter</button><button id="dbgKill">Tuer les ennemis</button></div>
+  <div class="lbl">Objets</div>
+  <div class="row"><select id="dbgItem"></select><button id="dbgGive">Donner</button></div>
+  <div class="grid"><button id="dbgVault">Salle au trésor</button></div>
   <div class="lbl">Faire apparaître</div><div class="grid" id="dbgFoes"></div>
   <div class="lbl">Boss (colosse, Cerbère)</div>
   <div class="grid"><button data-boss="slam">Saut écrasant</button><button data-boss="charge">Charge</button><button data-boss="fire">Souffle de feu</button><button data-boss="rage">Rage (50 % PV)</button></div>
@@ -1680,6 +1684,14 @@
 
 <div id="announce"></div>
 <div id="biome"></div>
+<div id="itemBanner"><div id="ibTitle"></div><div id="ibSub"></div></div>
+<div id="itemCard" class="hidden">
+  <div id="icHead"><span id="icIcon"></span><span id="icName"></span></div>
+  <div id="icQual"></div>
+  <div id="icDesc"></div>
+  <div id="icFam"></div>
+  <div id="icTake"></div>
+</div>
 <div id="pops"></div>
 <div id="flash"></div>
 <div id="fade"></div>
@@ -1708,6 +1720,7 @@
   <div class="modal-card">
     <h2 id="resTitle">VICTOIRE</h2>
     <p id="resSub">2 – 1</p>
+    <div id="resItems" class="items"></div>
     <div id="resDefis"></div>
     <div class="btns">
       <button class="main" id="againBtn">Revanche</button>
@@ -1716,14 +1729,6 @@
   </div>
 </div>
 
-<!-- Coffre de bénédictions -->
-<div id="reward" class="overlay hidden">
-  <div class="reward-wrap">
-    <h2>BÉNÉDICTION</h2>
-    <div id="rewardTxt">Choisis un présent</div>
-    <div class="btns boons"><button></button><button></button><button></button></div>
-  </div>
-</div>
 
 <!-- Configuration des touches -->
 <div id="keysOv" class="overlay hidden">

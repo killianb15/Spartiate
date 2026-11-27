@@ -2,8 +2,7 @@
 //  Événements mystérieux (« ? ») du mode Donjon.
 //  Logique 100 % pure et déterministe : tous les tirages passent par sim.rng.
 // =====================================================================
-import { BOONS } from './dungeon.js';
-import { spellOf } from './sim.js';
+import { ITEMS, ITEM_IDS, QUALITY, itemOf } from './items.js';
 
 const heal = (p, n) => {
   const before = p.hp;
@@ -16,21 +15,25 @@ const hurt = (p, n) => {
   return loss;
 };
 
-// Tire une bénédiction aléatoire d'une rareté donnée non encore possédée (si unique)
-function grantRandomBoon(sim, p, minRare) {
-  const owned = new Set(p.boons ? p.boons.split(',') : []);
-  for (let r = minRare; r >= 0; r--) {
-    const pool = Object.keys(BOONS).filter((id) => id !== 'potion' && BOONS[id].rare === r && !(BOONS[id].unique && owned.has(id)));
+// Donne au héros un objet (non maudit, pas encore sorti dans la partie) de qualité q
+// (0 commun, 1 rare, 2 épique, 3 légendaire) ; si cette qualité est épuisée : un cran au-dessus, puis en dessous.
+// Retourne « nom (qualité) ». En dernier recours : l'éclat de puissance.
+function grantItem(sim, p, q) {
+  const seen = ',' + sim.g.seen + ',';
+  for (const k of [q, q + 1, q - 1, q - 2, q + 2]) {
+    if (k < 0 || k > 3) continue;
+    const pool = ITEM_IDS.filter((id) => ITEMS[id].q === k && !ITEMS[id].curse && !seen.includes(',' + id + ','));
     if (!pool.length) continue;
     const id = pool[(sim.rng.next() * pool.length) | 0];
-    BOONS[id].apply(p);
-    p.spellMax = Math.max(1.2, spellOf(p).cd * (p.spellCdMul ?? 1));
-    p.boons += (p.boons ? ',' : '') + id;
-    return BOONS[id].name;
+    sim.g.seen += (sim.g.seen ? ',' : '') + id;
+    sim.giveItem(p, id);
+    return `${ITEMS[id].name} (${QUALITY[k].name.toLowerCase()})`;
   }
-  heal(p, 40);
-  return 'Potion';
+  sim.giveItem(p, 'eclat');
+  return itemOf('eclat').name;
 }
+// les statistiques changées par un événement restent dans les bornes des objets (et la jauge du sort suit)
+const done = (sim, p) => sim.itemRefresh(p);
 
 export const EVENTS = {
   autel: {
@@ -40,14 +43,12 @@ export const EVENTS = {
     choices: [
       {
         label: 'Offrir ton sang',
-        hint: '−25 % PV max → Bénédiction Légendaire aléatoire',
+        hint: '−25 % de tes PV → objet Épique (parfois Légendaire)',
         tone: 'risk',
         apply(sim, p) {
           const loss = hurt(p, p.maxHp * 0.25);
-          const name = grantRandomBoon(sim, p, 2);
-          sim.emit('sfx', 'spell');
-          sim.emit('pop', name, p.x, p.y + 2.1, p.z, 'spell');
-          return `−${loss} PV · Bénédiction obtenue : ${name}`;
+          const name = grantItem(sim, p, sim.rng.next() < 0.25 ? 3 : 2);
+          return `−${loss} PV · Objet obtenu : ${name}`;
         },
       },
       {
@@ -81,7 +82,7 @@ export const EVENTS = {
         tone: 'risk',
         apply(sim, p) {
           const loss = hurt(p, 15);
-          p.pow *= 1.15;
+          p.pow += 0.15; done(sim, p);
           sim.emit('sfx', 'clang');
           sim.emit('pop', '+15 % DÉGÂTS', p.x, p.y + 2.1, p.z, 'spell');
           return `+15 % dégâts (−${loss} PV)`;
@@ -92,7 +93,7 @@ export const EVENTS = {
         hint: '−12 % dégâts subis permanents',
         tone: 'safe',
         apply(sim, p) {
-          p.armor = 1 - (1 - p.armor) * 0.88;
+          p.armor = 1 - (1 - p.armor) * 0.88; done(sim, p);
           sim.emit('sfx', 'aegis');
           sim.emit('pop', 'ARMURE +12 %', p.x, p.y + 2.1, p.z, 'parry');
           return 'Armure renforcée (−12 % dégâts subis)';
@@ -122,9 +123,9 @@ export const EVENTS = {
         hint: '−15 % recharge du sort et +10 % critique',
         tone: 'safe',
         apply(sim, p) {
-          p.spellCdMul *= 0.85;
+          p.spellCdMul -= 0.15;
           p.crit += 0.10;
-          p.spellMax = Math.max(1.2, spellOf(p).cd * p.spellCdMul);
+          done(sim, p);
           sim.emit('sfx', 'spell');
           sim.emit('pop', 'ARME BÉNIE', p.x, p.y + 2.1, p.z, 'spell');
           return '−15 % CD sort et +10 % chances de critique';
@@ -140,12 +141,12 @@ export const EVENTS = {
     choices: [
       {
         label: 'Forcer le cadenas',
-        hint: '50 % coffre Rare/Légendaire · 50 % embuscade d’élites',
+        hint: '50 % objets sur piédestaux · 50 % embuscade d’élites',
         tone: 'risk',
         apply(sim, p) {
           if (sim.rng.next() < 0.5) {
             sim.emit('sfx', 'coin');
-            return { text: 'Coup de chance ! Le coffre s’ouvre sans piège.', spawnChest: 'treasure' };
+            return { text: 'Coup de chance ! Le coffre s’ouvre sans piège.', spawnItems: 'vault' };
           }
           sim.emit('sfx', 'roar');
           return { text: 'EMBUSCADE ! Des gardes surgissent de l’ombre !', ambush: 'coffre' };
@@ -172,7 +173,8 @@ export const EVENTS = {
         apply(sim, p) {
           p.maxHp += 40;
           heal(p, 40);
-          p.runMul *= 0.9;
+          p.runMul -= 0.1;
+          done(sim, p);
           sim.emit('sfx', 'heavy');
           sim.emit('pop', '+40 PV MAX', p.x, p.y + 2.1, p.z, 'heal');
           return '+40 PV max, −10 % vitesse de course';
@@ -183,8 +185,9 @@ export const EVENTS = {
         hint: '+10 % vitesse de course et +20 % endurance',
         tone: 'safe',
         apply(sim, p) {
-          p.runMul *= 1.1;
+          p.runMul += 0.1;
           p.staMul += 0.2;
+          done(sim, p);
           sim.emit('sfx', 'dodge');
           sim.emit('pop', 'AGILITÉ +', p.x, p.y + 2.1, p.z, 'parry');
           return '+10 % vitesse et +20 % endurance';
@@ -200,7 +203,7 @@ export const EVENTS = {
     choices: [
       {
         label: 'Relever le défi',
-        hint: 'Combat intense → Coffre d’Élite (Rare garantie)',
+        hint: 'Combat intense → objet Rare ou mieux',
         tone: 'risk',
         apply(sim) {
           sim.emit('sfx', 'gong');
@@ -226,7 +229,7 @@ export const EVENTS = {
         hint: '+25 % dégâts de sort permanents',
         tone: 'safe',
         apply(sim, p) {
-          p.spellPow *= 1.25;
+          p.spellPow += 0.25; done(sim, p);
           sim.emit('sfx', 'spell');
           sim.emit('pop', 'SORT +25 %', p.x, p.y + 2.1, p.z, 'spell');
           return '+25 % dégâts de sort';
@@ -255,14 +258,12 @@ export const EVENTS = {
     choices: [
       {
         label: 'Tenter le tout pour le tout',
-        hint: '60 % bénédiction Rare gratuite · 40 % piège (−20 PV)',
+        hint: '60 % objet Rare gratuit · 40 % piège (−20 PV)',
         tone: 'risk',
         apply(sim, p) {
           if (sim.rng.next() < 0.6) {
-            const name = grantRandomBoon(sim, p, 1);
-            sim.emit('sfx', 'spell');
-            sim.emit('pop', name, p.x, p.y + 2.1, p.z, 'spell');
-            return `Gagné ! Bénédiction obtenue : ${name}`;
+            const name = grantItem(sim, p, 1);
+            return `Gagné ! Objet obtenu : ${name}`;
           }
           const loss = hurt(p, 20);
           sim.emit('sfx', 'hit');
@@ -275,7 +276,7 @@ export const EVENTS = {
         hint: '+10 % dégâts permanents',
         tone: 'safe',
         apply(sim, p) {
-          p.pow *= 1.1;
+          p.pow += 0.1; done(sim, p);
           sim.emit('sfx', 'parry');
           sim.emit('pop', '+10 % DÉGÂTS', p.x, p.y + 2.1, p.z, 'parry');
           return '+10 % dégâts permanents';
