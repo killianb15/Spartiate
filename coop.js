@@ -5,7 +5,7 @@
 //  - L'HÔTE (CoopHost) fait tourner l'unique DungeonSim de référence à 60 Hz :
 //    jamais de gel, jamais de rollback sur 12 entités/IA, jamais de désynchronisation.
 //  - L'INVITÉ (CoopGuest) envoie ses déplacements continus + une file d'actions
-//    ponctuelles numérotées (coups, sauts, roulades, boutique, bénédictions) répétées
+//    ponctuelles numérotées (coups, sauts, roulades, boutique) répétées
 //    jusqu'à acquittement par l'hôte → aucune action perdue même sous forte perte de paquets.
 //  - L'HÔTE diffuse à 30 Hz (et immédiatement sur chaque transition) des instantanés
 //    compacts + les événements visuels/sonores numérotés (joués exactement une fois)
@@ -16,7 +16,7 @@
 //    partie précédente est ignoré.
 // =====================================================================
 import { DT, NEUTRAL, PRESS, WEAPONS } from './sim.js';
-import { BOONS, FIRST_HERO, HEROES, WEAPON_IDS, pickInput, shopInput } from './dungeon.js';
+import { FIRST_HERO, HEROES, WEAPON_IDS, shopInput } from './dungeon.js';
 import { clamp, lerpAng, hypot } from './dmath.js';
 
 const SNAP_EVERY = 2;       // instantané envoyé toutes les 2 images (30 Hz)
@@ -46,10 +46,19 @@ export function packFighter(f) {
     foe: f.foe || '', size: f.size ?? 1, boss: f.boss ? 1 : 0,
     team: f.team ?? 0, owner: f.owner ?? -1, kills: f.kills ?? 0,
     down: f.down ? 1 : 0, revT: r3(f.revT ?? 0), shop: f.shop ?? 0,
-    boons: f.boons || '', phoenix: f.phoenix ? 1 : 0,
+    phoenix: f.phoenix ? 1 : 0,
     spellCd: r3(f.spellCd ?? 0), spellMax: f.spellMax ?? 7, spellBuffT: r3(f.spellBuffT ?? 0),
   };
   if (f.brute) o.brute = 1;
+  // états visibles (objets) : brûlure, poison, froid, gel, discorde, rétréci, chien des enfers
+  const st = (f.sBurnT > 0 ? 1 : 0) | (f.sPsn > 0 ? 2 : 0) | (f.sChill > 0 ? 4 : 0) | (f.sFrz > 0 ? 8 : 0) |
+    (f.sConf > 0 ? 16 : 0) | (f.shrunk ? 32 : 0) | (f.hell ? 64 : 0);
+  if (st) { o.st = st; if (f.sPsn > 0) o.psn = f.sPsn; }
+  // objets des héros (affichage : icônes, transformations, lames tournoyantes…)
+  if (f.items !== undefined) {
+    o.items = f.items; o.tf = f.tf; o.combos = f.combos; o.orbit = f.orbit; o.minors = f.minors; o.took = f.took | 0;
+    o.drunk = f.drunk ? 1 : 0;
+  }
   if (f.sp !== undefined) {
     o.sp = f.sp; o.spT = r3(f.spT); o.spA = f.spA;
     o.spX = r3(f.spX); o.spZ = r3(f.spZ); o.rage = f.rage ? 1 : 0;
@@ -80,9 +89,15 @@ export function unpackFighter(p, prev = null) {
   f.foe = p.foe; f.size = p.size; f.boss = !!p.boss;
   f.team = p.team; f.owner = p.owner; f.kills = p.kills;
   f.down = p.down; f.revT = p.revT; f.shop = p.shop;
-  f.boons = p.boons; f.phoenix = p.phoenix;
+  f.phoenix = p.phoenix;
   f.spellCd = p.spellCd ?? 0; f.spellMax = p.spellMax ?? 7; f.spellBuffT = p.spellBuffT ?? 0;
   f.brute = p.brute ? 1 : 0;
+  const st = p.st | 0;
+  f.sBurnT = st & 1 ? 1 : 0; f.sPsn = st & 2 ? p.psn ?? 1 : 0; f.sChill = st & 4 ? 1 : 0; f.sFrz = st & 8 ? 1 : 0;
+  f.sConf = st & 16 ? 1 : 0; f.shrunk = st & 32 ? 1 : 0; f.hell = st & 64 ? 1 : 0;
+  if (p.items !== undefined) {
+    f.items = p.items; f.tf = p.tf; f.combos = p.combos; f.orbit = p.orbit | 0; f.minors = p.minors | 0; f.took = p.took | 0; f.drunk = p.drunk | 0;
+  }
   if (p.sp !== undefined) {
     f.sp = p.sp; f.spT = p.spT; f.spA = p.spA;
     f.spX = p.spX; f.spZ = p.spZ; f.rage = p.rage;
@@ -94,6 +109,9 @@ export function unpackFighter(p, prev = null) {
 
 const packPr = (a) => [r3(a.x), r3(a.y), r3(a.z), r3(a.vx), r3(a.vy), r3(a.vz), a.k | 0, a.o | 0];
 const unpackPr = (a) => ({ x: a[0], y: a[1], z: a[2], vx: a[3], vy: a[4], vz: a[5], k: a[6], o: a[7] });
+// objets à ramasser (piédestaux, cœurs, éclats)
+const packPk = (o) => [o.n, o.t, o.v, r3(o.x), r3(o.z), o.q | 0, o.arm | 0];
+const unpackPk = (a) => ({ n: a[0], t: a[1], v: a[2], x: a[3], z: a[4], q: a[5], arm: a[6] });
 
 // hauteur du sol (identique à DungeonSim.groundY, utilisée par l'affichage invité)
 function roomGroundY(room, f) {
@@ -134,7 +152,7 @@ export class CoopHost {
     this.lastRoom = sim.g.room;
     this.lastRoomRef = sim.room;
     this.lastPhase = sim.g.phase;
-    this.lastChest = sim.g.chest;
+    this.lastPk = '';
     this.lastEquip = '';
     this.sentTick = -99;
     this.stats = { ping: 0, sent: 0, recv: 0, lastRecv: now(), stalled: false };
@@ -167,7 +185,7 @@ export class CoopHost {
         for (const a of m.acts) {
           if (!Array.isArray(a) || !Number.isInteger(a[0]) || a[0] <= this.guestActSeq) continue;
           this.guestActSeq = a[0];
-          this.guestActs.push({ press: (a[1] | 0) & 63, shop: a[2] ?? -1, pick: a[3] ?? -1 });
+          this.guestActs.push({ press: (a[1] | 0) & 63, shop: a[2] ?? -1 });
         }
       }
     }
@@ -178,7 +196,6 @@ export class CoopHost {
     const g = this.sim.g;
     if (this.guestActs.length) {
       const a = this.guestActs.shift();
-      if (a.pick >= 0 && g.phase === 'reward') return pickInput(a.pick);
       if (a.shop >= 0 && g.phase === 'hub') return shopInput(a.shop);
       return { mx: this.guestHold.mx, mz: this.guestHold.mz, blk: this.guestHold.blk, press: a.press };
     }
@@ -208,10 +225,12 @@ export class CoopHost {
       this.lastRoom = sim.g.room;
       this.lastRoomRef = sim.room;
     }
-    const eq = sim.f.slice(0, sim.g.np).map((h) => h.kind + ':' + h.wpn + ':' + h.shop).join('|');
-    const urgent = roomChanged || sim.g.phase !== this.lastPhase || sim.g.chest !== this.lastChest || eq !== this.lastEquip;
+    // objets pris ou apparus : envoyés tout de suite
+    const eq = sim.f.slice(0, sim.g.np).map((h) => h.kind + ':' + h.wpn + ':' + h.shop + ':' + h.items).join('|');
+    const pk = sim.pk ? sim.pk.map((o) => o.n).join(',') : '';
+    const urgent = roomChanged || sim.g.phase !== this.lastPhase || pk !== this.lastPk || eq !== this.lastEquip;
     this.lastPhase = sim.g.phase;
-    this.lastChest = sim.g.chest;
+    this.lastPk = pk;
     this.lastEquip = eq;
 
     const needSend = urgent || (this.tickN - this.sentTick >= (sim.g.phase === 'end' ? HEARTBEAT_EVERY : SNAP_EVERY));
@@ -232,6 +251,7 @@ export class CoopHost {
       g: { ...sim.g },
       f: sim.f.map(packFighter),
       pr: sim.pr.map(packPr),
+      pk: (sim.pk ?? []).map(packPk),
     };
     if (this.evBuf.length) msg.ev = this.evBuf;
     if (needRoom) msg.room = sim.room;
@@ -252,7 +272,7 @@ export class CoopGuest {
     this.me = 1;
     this.tickN = 0;
     this.actSeq = 0;
-    this.actQueue = [];         // [[seq, press, shop, pick], ...] non acquittés
+    this.actQueue = [];         // [[seq, press, shop], ...] non acquittés
     this.hostAck = 0;
     this.lastSnapTick = -1;
     this.roomVer = 0;
@@ -270,22 +290,15 @@ export class CoopGuest {
       unlocked: unlocked ? unlocked.map((u) => (Array.isArray(u) ? u.filter((k) => HEROES[k]) : [])) : null,
       f: [],
       pr: [],
+      pk: [],
       ev: [],
       g: { phase: 'hub', np: 2, room: 0, kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
-        exitOpen: true, chest: 0, chestX: 0, chestZ: 0, o0: '', o1: '', o2: '', pick0: -1, pick1: -1, flagEnd: false },
+        exitOpen: true, flagEnd: false, rn: 0, vault: false, vaultNext: false, pkN: 0, seen: '' },
       room: { exit: 'z', obs: [], surf: [], traps: [], boss: false, hub: true, pads: [] },
       get heroes() { return this.f.slice(0, this.g.np); },
       get foesLeft() { let n = 0; for (let i = 0; i < this.f.length; i++) if (this.f[i].team === 1 && this.f[i].state !== 'dead') n++; return n; },
-      get offer() { return [this.g.o0, this.g.o1, this.g.o2]; },
       isHero(f) { return f.idx < this.g.np; },
       canPick(i, kind) { return !this.unlocked || kind === FIRST_HERO || !!this.unlocked[i]?.includes(kind); },
-      mustPick(h) { return this.g.phase === 'reward' && h < this.g.np && this.f[h]?.state !== 'dead' && this.g['pick' + h] < 0; },
-      canChoose(h, c) {
-        if (!this.mustPick(h)) return false;
-        const id = this.offer[c], p = this.f[h];
-        if (!BOONS[id] || !p) return false;
-        return !(BOONS[id].unique && p.boons.split(',').includes(id));
-      },
       groundY(f) { return roomGroundY(this.room, f); },
       effectiveDt() { return this.g.hitstop > 0 ? 0 : DT * this.g.slow; },
       _guest: guest,
@@ -332,6 +345,7 @@ export class CoopGuest {
       sim.f = next;
     }
     if (Array.isArray(m.pr)) sim.pr = m.pr.map(unpackPr);
+    if (Array.isArray(m.pk)) sim.pk = m.pk.map(unpackPk);
     if (Array.isArray(m.ev)) {
       for (let i = 0; i < m.ev.length; i++) {
         const item = m.ev[i];
@@ -343,12 +357,12 @@ export class CoopGuest {
   }
 
   // Enregistre l'entrée locale (touches maintenues + actions ponctuelles) et l'envoie à l'hôte
-  tick(inp = NEUTRAL, { shop = -1, pick = -1 } = {}) {
+  tick(inp = NEUTRAL, { shop = -1 } = {}) {
     this.tickN++;
     const mx = clampI(inp.mx), mz = clampI(inp.mz), blk = !!inp.blk, press = (inp.press | 0) & 63;
-    const hasAct = press !== 0 || shop >= 0 || pick >= 0;
+    const hasAct = press !== 0 || shop >= 0;
     if (hasAct) {
-      this.actQueue.push([++this.actSeq, press, shop, pick]);
+      this.actQueue.push([++this.actSeq, press, shop]);
       if (this.actQueue.length > MAX_ACTS) this.actQueue.shift();
     }
     const changed = hasAct || mx !== this.lastHold.mx || mz !== this.lastHold.mz || blk !== this.lastHold.blk;
@@ -358,8 +372,9 @@ export class CoopGuest {
       this.lastSend = this.tickN;
       const msg = { t: 'ci', sid: this.sid, mx, mz, blk, rAck: this.roomVer, eAck: this.lastEvId };
       if (this.actQueue.length) msg.acts = this.actQueue;
-      // shop/pick sont envoyés en fiable pour ne jamais rater un clic de menu
-      this.send(msg, shop >= 0 || pick >= 0);
+      // un choix d'arme est envoyé en fiable pour ne jamais rater un clic de menu
+      this.send(msg, shop >= 0);
+
       this.stats.sent++;
     }
     const tNow = this.now();

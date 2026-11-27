@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DungeonSim, BOONS, ROOM_R, PLAT_H, pickInput, trapUp, TRAP, biomeOf, BIOMES } from '../dungeon.js';
+import { DungeonSim, ROOM_R, PLAT_H, trapUp, TRAP, biomeOf, BIOMES } from '../dungeon.js';
 import { PRESS, NEUTRAL, quant, hashState } from '../sim.js';
 import { Rollback } from '../rollback.js';
 import { AI } from '../ai.js';
@@ -67,52 +67,44 @@ test('on reste dans la salle tant que la porte est fermée', () => {
   assert.equal(s.g.room, 1);
 });
 
-test('salle nettoyée => coffre, bénédiction (choisie par une entrée), porte, salle suivante', () => {
+test('salle nettoyée => butin (cœur, éclats ou rien), porte, salle suivante', () => {
   const s = flat(started(5));
   toFight(s);
   killAll(s);
   assert.equal(s.g.phase, 'clear');
-  assert.ok(s.g.exitOpen && s.g.chest === 1);
+  assert.ok(s.g.exitOpen);
+  assert.ok(s.pk.every((o) => o.t === 'heart' || o.t === 'minor'), 'pas d\'objet sur piédestal dans une salle normale');
+  assert.equal(s.g.vaultNext, false, 'pas de salle au trésor après la salle 1');
   const p = s.f[0];
-  p.x = s.g.chestX; p.z = s.g.chestZ;
-  run(s, 40);
-  assert.equal(s.g.phase, 'reward');
-  assert.equal(s.offer[0], 'potion');
-  const statsOf = (h) => ({
-    pow: h.pow, maxHp: h.maxHp, staMul: h.staMul, leech: h.leech, armor: h.armor,
-    crit: h.crit, spellCdMul: h.spellCdMul, spellPow: h.spellPow, runMul: h.runMul, guardMul: h.guardMul,
-    execPow: h.execPow, bossPow: h.bossPow, riposte: h.riposte, onKillHeal: h.onKillHeal,
-    phoenix: h.phoenix, thorns: h.thorns, berserk: h.berserk, regen: h.regen,
-  });
-  const before = statsOf(p);
-  run(s, 3, () => pickInput(1));
-  assert.equal(s.g.phase, 'clear');
-  assert.equal(p.boons, s.offer[1]);
-  assert.notDeepEqual(statsOf(p), before);
-  // un choix qui arrive encore après la phase ne fait pas bouger le héros
-  const [x0, z0] = [p.x, p.z];
-  run(s, 3, () => pickInput(1));
-  assert.ok(Math.abs(p.x - x0) < 1e-9 && Math.abs(p.z - z0) < 1e-9);
-  p.x = 0; p.z = 0;
+  p.x = 3; p.z = 3;
   run(s, 400, walk(...toExit(s)));
   assert.equal(s.g.room, 2);
   assert.equal(s.f[0], p, 'le héros garde son état d\'une salle à l\'autre');
 });
 
-test('à deux : chacun choisit sa bénédiction, la salle attend les deux', () => {
+test('à deux : salle au trésor après la salle 2, un objet chacun, les autres disparaissent', () => {
   const s = flat(started(5, ['soldier', 'orc']));
   assert.equal(s.g.np, 2);
   assert.ok(s.f.length >= 4, 'plus d\'ennemis à deux');
+  s.newRoom();
   toFight(s);
   killAll(s);
-  s.f[0].x = s.g.chestX; s.f[0].z = s.g.chestZ;
-  run(s, 40);
-  assert.equal(s.g.phase, 'reward');
-  run(s, 3, () => pickInput(2));
-  assert.equal(s.g.phase, 'reward');
-  run(s, 3, () => NEUTRAL, () => pickInput(0));
-  assert.equal(s.g.phase, 'clear');
-  assert.equal(s.f[1].boons, 'potion');
+  assert.ok(s.g.vaultNext, 'la porte de la salle 2 mène à une salle au trésor');
+  s.newVault();
+  assert.ok(s.g.vault && s.g.phase === 'clear' && s.g.exitOpen);
+  assert.equal(s.g.room, 2, 'la salle au trésor ne compte pas');
+  assert.equal(s.f.length, 2, 'aucun ennemi');
+  const items = s.pk.filter((o) => o.t === 'item');
+  assert.equal(items.length, 2, 'un piédestal par héros');
+  assert.notEqual(items[0].v, items[1].v);
+  run(s, 2);
+  // chacun marche sur un piédestal
+  const [a, b] = items;
+  s.f[0].x = a.x + 0.85; s.f[0].z = a.z; s.f[1].x = b.x - 0.85; s.f[1].z = b.z;
+  run(s, 2);
+  assert.ok(s.f[0].items.includes(a.v) || s.f[0].items.includes(b.v));
+  assert.ok(s.f[1].items.length > 0);
+  assert.equal(s.pk.filter((o) => o.t === 'item').length, 0);
 });
 
 test('à deux : un héros tombé se relève à la salle suivante, la partie finit quand les deux tombent', () => {
@@ -190,16 +182,15 @@ test('les pièges à pics blessent quand ils sortent', () => {
   assert.equal(p.hp, hp - TRAP.dmg);
 });
 
-test('bénédictions et dégâts des ennemis', () => {
+test('objets et dégâts des ennemis', () => {
   const s = started(1);
   const p = s.f[0];
-  p.hp = 50; BOONS.potion.apply(p); assert.equal(p.hp, 90);
-  BOONS.vita.apply(p); assert.equal(p.maxHp, 120); assert.equal(p.hp, 110);
-  BOONS.peau.apply(p); assert.ok(Math.abs(p.armor - 0.15) < 1e-9);
+  p.hp = 50; s.giveItem(p, 'ambroisie'); assert.equal(p.maxHp, 125); assert.equal(p.hp, 125);
+  s.giveItem(p, 'glace'); assert.ok(Math.abs(p.armor - 0.08) < 1e-9);
   toFight(s);
   const e = s.f[1], before = p.hp;
   s.damage(e, p, 9, 0, 0.3, 0, 1, 0);
-  assert.equal(p.hp, before - Math.max(1, Math.round(9 * e.pow * 0.85)));
+  assert.equal(p.hp, before - Math.max(1, Math.round(9 * e.pow * 0.92)));
 });
 
 test('la mort du héros seul termine la partie', () => {
@@ -235,7 +226,7 @@ test('en ligne : deux navigateurs restent synchronisés (rollback)', () => {
     const r = new Rng(k + 5);
     let cur = NEUTRAL;
     return () => {
-      if (sims[k].mustPick(k)) return pickInput(k);
+
       if (r.next() < 0.08) cur = { mx: quant(r.range(-1, 1)), mz: quant(r.range(-1, 1)), blk: r.next() < 0.2, press: 0 };
       return { ...cur, press: r.next() < 0.07 ? 1 << ((r.next() * 5) | 0) : 0 };
     };

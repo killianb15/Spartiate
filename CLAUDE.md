@@ -7,12 +7,12 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 ## Lancer / tester
 - Jeu : `python serveur.py` (port 8123) → http://localhost:8123 ; `?dungeon` lance le donjon directement,
   `&debug` expose `window.spartiate.sim` / `.views` dans la console. Ouvrir index.html en fichier ne marche pas.
-- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~90 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
+- Tests : `node --test tests/*.test.js` (tous doivent passer ; ~160 tests ; `node --test tests/` échoue ici). `tests/test_server.py` pour le serveur.
 - Après une modif de `game.js`, l'utilisateur doit faire **Ctrl+F5** (cache).
 - Test dans un vrai navigateur (pas de Chrome/Edge connecté ici) : Chromium de Playwright présent dans
   `%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe`, piloté par `tools/browser-test.mjs`
   (mode d'emploi en tête du fichier : serveur sur 8137, Chromium headless sur 9333, captures + ETAT + erreurs ;
-  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure). Chromium headless est lent (quelques images/s) : pour une capture
+  scénarios tome, staff, shop, biomes, boss, gloves, compte, cerbere, morsure, objets). Chromium headless est lent (quelques images/s) : pour une capture
   précise, figer la simulation (`s.step = () => {}`) et appeler l'ancien step à la main.
   Il a déjà trouvé des plantages invisibles aux tests de simulation : l'utiliser après un changement d'affichage.
 - Penser à arrêter ensuite le serveur et Chromium (ports 8137 / 9333).
@@ -61,10 +61,10 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - `sim.js` : simulation pure et **déterministe** (pas de Three.js/DOM/son, pas de `Math.random`, pas de
   `Math.sin/cos` : utiliser `dmath.js`). Pas fixe 1/60 s, état « plat » (save/load/hash) pour le rollback.
   Ce qui se voit/s'entend sort en événements `sim.ev` (`sfx`, `emit`, `ring`, `pop`, `fx`, `shake`…).
-- `dungeon.js` : `DungeonSim extends Sim` (salles, ennemis, IA dans la sim, coffre/bénédictions,
+- `dungeon.js` : `DungeonSim extends Sim` (salles, ennemis, IA dans la sim, butin/salles au trésor,
   salle d'armes, chiens invoqués). `ai.js` : IA (vise toujours `sim.target(i)`). `rollback.js`, `net.js` : en ligne.
 - `game.js` : tout l'affichage (vues, caméra, HUD, menus, sons). Il **lit** l'état de la sim, ne le modifie pas.
-  Les entrées passent par `step(entrée0, entrée1)` (y compris les choix de bénédiction) pour le rollback.
+  Les entrées passent par `step(entrée0, entrée1)` (objets ramassés en marchant dessus : rien à transmettre) pour le rollback.
 - Toute nouvelle règle de jeu va dans la sim (sinon désynchronisation en ligne) et se teste dans `tests/`.
 
 ## Donjon : points clés
@@ -92,12 +92,24 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   Salle nettoyée : tous les héros tombés se relèvent. Tous à terre (ou seul) : fin de partie comme avant.
   Affichage : `FighterView` penché en avant (`downK`, rotation 'YXZ'), jauge verte `revive()`, anneau qui clignote.
   Tests : `tests/rea.test.js` ; scénario navigateur `rea`.
-- **Bénédictions** (`BOONS` dans dungeon.js, `rare` 0 commune / 1 rare / 2 légendaire, `RARITY`, `unique`) : coffre =
-  Potion + 2 tirages par rareté (`rollOffer`, chances `boonOdds(n)` qui montent en profondeur ; rareté épuisée → un
-  cran en dessous ; une unique que tous ont n'est plus proposée). Champs des héros posés par `equip` : pow, maxHp,
-  armor, leech, staMul, guardMul (`guardOf` dans sim.js), runMul, phoenix (`rebirth`), thorns (`thornsHit`),
-  berserk (`FURY`) ; branchés dans `DungeonSim.damage` / `trapHit`. Écran du coffre : classe `r0/r1/r2` des boutons.
-  Tests : `tests/boons.test.js` ; scénario navigateur `benedictions`.
+- **Objets** (façon Isaac, `items.js`, passifs seulement) : `ITEMS` (~70, qualité `q` 0 commun / 1 rare / 2 épique /
+  3 légendaire, `QUALITY`, `fam`, `curse` = maudit), 9 familles `FAMILIES` (3 objets = transformation, `TF_N`, champ `p.tf`),
+  `COMBOS` (deux objets précis, `p.combos`), petits bonus `MINORS`. Effets = champs plats du héros (`ITEM_BASE`, posés par
+  `equip`), lus par `ITEM_METHODS` (mêlé à DungeonSim) : `onHitItems`, `onKillItems`, `onHurtItems`, `procHit`, `heroTick`…
+  États sur tous les combattants (`STATUS0` : `sBurnT`, `sPsn`, `sChill`, `sFrz`, `sConf`, `shrunk`, `hell`) ; `this.src`
+  ('melee'/'shot'/'fire') = nature du coup en cours. Garde-fous : bonus additifs, `CAPS`, effets secondaires sans
+  « au coup porté ». Obtention : `sim.pk` (objets au sol `{n, t: item|heart|minor, v, x, z, grp, q, arm}`, pris en marchant
+  dessus par `pickups`, un par héros et par groupe : `p.took`) ; boss = piédestaux (`ODDS.boss`), salle au trésor après la
+  salle n si n % 5 = 2 (toujours) ou 4 (une fois sur deux) (`VAULT`, `g.vaultNext`, `newVault` : `g.vault`, ne change pas
+  `g.room`, mais `g.rn` change à chaque salle) ; salle normale : cœur, petit bonus ou rien (`LOOT`, `dropLoot`). Un objet
+  ne sort qu'une fois par partie (`g.seen`, repli `eclat`). Mesure des tirages : `node tools/objets.mjs [parties] [salles]
+  [malin|hasard]` (partie « cassée » ≈ 1 sur 8 à 10 à la salle 20). Débogage : `debugItem(h, id)`, `debugVault()` (F2).
+  Affichage (game.js) : `pkSync` (piédestal + gemme couleur de qualité + icône émoji, lueur réservée `dng.glow`),
+  `itemCard` (`#itemCard`), `itemBanner` (`#itemBanner`, 3 au plus en file), `itemsHud` (`#it1/#it2`), `statusPre/Post`
+  (lueur `stGlow` des états, taille, aura, lames `orbit`), `animK` (gel/froid/vitesse d'attaque), éclairs `bolt`
+  (événement), lames spectrales `k: 2` dans `syncArrows`, `vaultDecor`. Icônes : `emojiMat` (cache gardé par `keep`).
+  En ligne : `packFighter` envoie `st` (bits des états), `items/tf/combos/orbit/minors/took/drunk`, et `pk`.
+  Tests : `tests/items.test.js` ; scénario navigateur `objets` ; `tools/lobby-test.mjs` vérifie l'invité en salle au trésor.
 - **Équilibrage à deux** (`COOP` dans dungeon.js, `coop(np, clé)`) : objectif « aussi dur qu'en solo » par joueur
   (dégâts reçus par héros et durée des salles). Salles normales : ×2 ennemis (max 10), PV ×1,3, dégâts ×1,25 ;
   boss : PV ×2,2, dégâts ×2, attaques spéciales ×0,6 d'attente ; escorte du chef orc ×1,5 + 1 (max 6). Réglé et
@@ -159,7 +171,7 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 - `FighterView.dispose()` libère aussi ses matériaux clonés, son squelette (texture des os) et sa barre de vie.
 - Lumières : leur nombre fait partie des shaders (un nombre nouveau = tout recompiler) ; `padLights()` complète
   au multiple de 4 en fin de construction. Une lumière qui apparaît en cours de jeu doit exister dès la
-  construction, éteinte (comme celle du coffre).
+  construction, éteinte (comme la lueur des piédestaux, `dng.glow`).
 - Dalles plates et immobiles : `PT()` au lieu de `P()` (regroupées en InstancedMesh par `flushTiles()`,
   sans ombre projetée). `inst()` ne fait pas projeter d'ombre aux modèles `*floor*` ni à la lave.
 - Anneaux (`ring`) : réserve réutilisée, ne pas recréer de matériau par effet. Particules : retrait par échange.

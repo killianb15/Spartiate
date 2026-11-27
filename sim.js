@@ -27,6 +27,8 @@ export const SHOT = { rel: 0.2, chain: 0.36, dur: 0.5, speed: 15, dmg: 10, life:
 export const FIRE = { speed: 8.5, life: 1.3, radius: 1.7, dmg: 9, guard: 20, knock: 3.2, rel: 0.26, chain: 0.62, dur: 0.66, touch: 0.5 };
 // grimoire : incantation qui invoque un chien (rel : le chien apparaît ; chain/dur : fin de l'incantation)
 export const CAST = { rel: 0.4, chain: 0.85, dur: 0.85, max: 2 };
+// lame spectrale (projectile k = 2, objets du donjon) : vitesse, durée de vol, dégâts par défaut
+export const BLADE = { speed: 12, life: 0.5, dmg: 6, guard: 10 };
 export const HIT_W = 0.72;
 // Armes : portée du coup, dégâts, coups d'un enchaînement, vitesse de course, coût du blocage
 // (multiplie la garde perdue), crush (multiplie la garde que fait perdre un coup bloqué).
@@ -107,7 +109,11 @@ export const quant = (v) => Math.max(-127, Math.min(127, Math.round(v * 127)));
 
 const fx = (f) => sin(f.yaw);
 const fz = (f) => cos(f.yaw);
-export const canRoll = (f) => f.sta >= STA.roll;
+// coût d'une roulade (réduit par certains objets du donjon : rollCost)
+export const rollCost = (f) => STA.roll * (f.rollCost ?? 1);
+export const canRoll = (f) => f.sta >= rollCost(f);
+// fenêtre de parade (allongée par certains objets du donjon : parryWin)
+export const parryWin = (f) => PAR.win * (f.parryWin ?? 1);
 
 export function newFighter(idx) {
   return {
@@ -172,6 +178,8 @@ export class Sim {
   // invocation (grimoire) : l'arène n'en a pas, le donjon les ajoute
   canSummon(f) { return false; }
   summon(f) {}
+  // projectile à tête chercheuse (hm) : le donjon l'oriente vers un ennemi
+  steer(a, dt) {}
   // la flèche heurte-t-elle le décor ?
   arrowWall(a) { return a.y < 0.02 || hypot(a.x, a.z) > 9.6; }
   // qui peut lancer le sort actif de son personnage ? (en arène : tout le monde ; en donjon : héros seulement)
@@ -364,7 +372,8 @@ export class Sim {
       const a = this.pr[k];
       a.t += dt; a.x += a.vx * dt; a.y += a.vy * dt; a.z += a.vz * dt;
       const fb = a.k === 1;
-      let gone = a.t > (fb ? FIRE.life : SHOT.life), boom = gone && fb;
+      if (a.hm) this.steer(a, dt);
+      let gone = a.t > (a.life ?? (fb ? FIRE.life : a.k === 2 ? BLADE.life : SHOT.life)), boom = gone && fb;
       if (!gone && this.arrowWall(a)) {
         gone = true; boom = fb;
         if (!fb) {
@@ -374,9 +383,14 @@ export class Sim {
       }
       if (!gone && fight) for (const d of this.f) {
         if (d.state === 'dead' || !this.foeOf(a.o, d)) continue;
-        const sz = d.size ?? 1;
+        const sz = d.size ?? 1, bit = 1 << (d.idx & 31);
+        if (a.hb & bit) continue;                 // projectile perçant : chaque cible une seule fois
         if (hypot(d.x - a.x, d.z - a.z) > (fb ? FIRE.touch : 0.4) * sz || a.y < d.y + 0.15 || a.y > d.y + 1.55 * sz) continue;
-        if (this.arrowHit(a, d)) { gone = true; boom = fb; break; }
+        if (this.arrowHit(a, d)) {
+          // perçant (pc : cibles qu'il peut encore traverser) : il continue sa route
+          if (a.pc > 0 && !fb) { a.pc--; a.hb = (a.hb | 0) | bit; continue; }
+          gone = true; boom = fb; break;
+        }
       }
       if (gone) this.pr.splice(k, 1);
       if (boom) this.explode(a);
@@ -387,7 +401,7 @@ export class Sim {
     if (d.state === 'roll' && d.stateT > ROLL.inv0 && d.stateT < ROLL.inv1) return false;   // traverse la roulade
     const att = this.f[a.o] ?? d, g = this.g;
     const sp = hypot(a.vx, a.vz) || 1, facing = fx(d) * a.vx / sp + fz(d) * a.vz / sp < -0.2;
-    if (d.state === 'parry' && d.stateT <= PAR.win && facing) {
+    if (d.state === 'parry' && d.stateT <= parryWin(d) && facing) {
       // parade : la flèche repart vers le tireur
       a.vx = -a.vx; a.vz = -a.vz; a.vy = -a.vy; a.o = d.idx; a.t = 0;
       this.emit('fx', d.idx, 'parried');
@@ -399,14 +413,14 @@ export class Sim {
     }
     if (a.k === 1) return true;      // boule de feu : elle explose (dégâts de zone dans explode)
     if (d.state === 'block' && facing) {
-      d.guard -= SHOT.guard * guardOf(d); d.guardT = 0;
+      d.guard -= (a.k === 2 ? BLADE.guard : SHOT.guard) * guardOf(d); d.guardT = 0;
       this.emit('fx', d.idx, 'blocked');
       this.emit('emit', a.x, a.y, a.z, 8, { color: [0xffe27a, 0xffffff], speed: 3, up: 2, size: 0.05, life: 0.3, grav: 10 });
       this.emit('sfx', 'clang');
       if (d.guard <= 0) this.guardBreak(att, d, a.x, a.y, a.z, 0);
       return true;
     }
-    this.damage(att, d, Math.round(SHOT.dmg * (a.mul ?? 1)), 1.6, 0.22, a.x, a.y, a.z);
+    this.damage(att, d, Math.round((a.dmg ?? SHOT.dmg) * (a.mul ?? 1)), 1.6, 0.22, a.x, a.y, a.z);
     return true;
   }
   startBreak(f) {
@@ -713,14 +727,14 @@ export class Sim {
       case 'idle': case 'walk': case 'block': {
         if (!canAct) { f.vx = f.vz = 0; if (st !== 'idle') this.toIdle(f); break; }
         if (this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
-        if (this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (this.take(i, 'brk') && this.spend(f, STA.brk)) { this.startBreak(f); break; }
         // archer : tir, ou coup d'arc si l'adversaire est collé
         // grimoire : invocation (si on peut encore invoquer), sinon coup de livre
         if (wpnOf(f).summon && this.canSummon(f) && this.inp[i].atk > 0 && f.sta >= STA.summon) { this.take(i, 'atk'); this.spend(f, STA.summon); this.startShot(f); break; }
         if (this.take(i, 'atk') && this.spend(f, STA.atk)) { if (f.arch && !(opp && dOpp < SHOT.melee)) this.startShot(f); else this.startAttack(f); break; }
         if (this.take(i, 'par') && this.spend(f, STA.par)) { this.startParry(f); break; }
-        if (this.take(i, 'jump') && this.spend(f, STA.jump)) { this.doJump(f, mx, mz); break; }
+        if (this.take(i, 'jump') && this.spend(f, STA.jump * (f.jumpCost ?? 1))) { this.doJump(f, mx, mz); break; }
         if (inp.blk) {
           if (st !== 'block') { this.setState(f, 'block'); this.play(f, 'idle', { ts: 0.5 }); }
           f.vx = mx * 1.1; f.vz = mz * 1.1;
@@ -749,7 +763,7 @@ export class Sim {
         else { const k = exp(-dt * 12); f.vx *= k; f.vz *= k; }
         if (canAct && t > ATK.chain && f.combo < wpnOf(f).combo && this.take(i, 'atk') && this.spend(f, STA.atk)) { f.yaw = toOpp; this.startAttack(f, true); break; }
         if (canAct && t > ATK.end && this.take(i, 'spell') && this.startSpell(f, opp, mx, mz)) break;
-        if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && t > ATK.end && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (t >= ATK.dur) { f.combo = 0; this.toIdle(f); }
         break;
       }
@@ -763,7 +777,7 @@ export class Sim {
         const S = shotOf(f);
         if (!f.hitDone && t >= S.rel) { f.hitDone = true; if (wpnOf(f).summon) this.summon(f); else this.fire(f, opp); }
         if (canAct && t > S.chain && !wpnOf(f).summon && this.take(i, 'atk') && this.spend(f, STA.atk)) { this.startShot(f); break; }
-        if (canAct && t > S.rel && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && t > S.rel && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (t >= S.dur) this.toIdle(f);
         break;
       }
@@ -783,7 +797,7 @@ export class Sim {
       case 'hit': {
         const k = exp(-dt * 7); f.vx *= k; f.vz *= k;
         // on peut se sortir d'un enchaînement par une roulade
-        if (canAct && grounded && f.stateT > 0.1 && this.take(i, 'roll') && this.spend(f, STA.roll)) { this.startRoll(f, mx, mz); break; }
+        if (canAct && grounded && f.stateT > 0.1 && this.take(i, 'roll') && this.spend(f, rollCost(f))) { this.startRoll(f, mx, mz); break; }
         if (f.stateT >= f.dur && grounded) this.toIdle(f);
         break;
       }
@@ -865,8 +879,9 @@ export class Sim {
     const along = dx * afx + dz * afz, lateral = Math.abs(dx * afz - dz * afx);
     // une grande cible (boss) a un corps plus large : la portée compte depuis sa surface, pas son centre
     // (deux corps restent à 0,45 x (somme des tailles) l'un de l'autre, voir DungeonSim)
-    const big = 0.45 * Math.max(0, (def.size ?? 1) - 1), hitW = HIT_W + big;
-    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45) + big) return;
+    // une petite cible (héros rapetissé) est plus étroite ; un grand attaquant a plus d'allonge (reachMul)
+    const sz = def.size ?? 1, big = 0.45 * Math.max(0, sz - 1), hitW = HIT_W * Math.min(1, sz) + big;
+    if (along < -0.25 || along > (kind === 'brk' ? 1.3 : kind === 'light' ? wpnOf(att).reach : 1.45) * (att.reachMul ?? 1) + big) return;
     if (kind === 'air' ? (dy > 0.6 || dy < -1.7) : Math.abs(dy) > 0.9) return;
     const reach = Math.min(Math.max(along - big, 0.3), 0.75);
     const cx = att.x + afx * reach, cy = Math.max(att.y, def.y) + 0.85, cz = att.z + afz * reach;
@@ -884,7 +899,7 @@ export class Sim {
       this.damage(att, def, 14, 5.5, 0.45, cx, cy, cz);
       return;
     }
-    if (def.state === 'parry' && def.stateT <= PAR.win && facingOk) { this.parried(att, def, cx, cy, cz); return; }
+    if (def.state === 'parry' && def.stateT <= parryWin(def) && facingOk) { this.parried(att, def, cx, cy, cz); return; }
     if (def.state === 'block' && facingOk) { this.blocked(att, def, kind === 'air' ? 34 : 22, cx, cy, cz); return; }
     this.damage(att, def, kind === 'air' && !att.arch ? 11 : wpnOf(att).dmg, 3.2, 0.3, cx, cy, cz);
   }
@@ -988,5 +1003,6 @@ export function hashState(s) {
   mix(s.rng);
   if (s.ai) for (const a of s.ai) if (a) for (const k in a) mix(a[k]);   // état des IA (donjon)
   if (s.pr) for (const a of s.pr) for (const k in a) mix(a[k]);            // flèches en vol
+  if (s.pk) for (const a of s.pk) for (const k in a) mix(a[k]);            // objets à ramasser (donjon)
   return h >>> 0;
 }

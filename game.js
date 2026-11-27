@@ -7,7 +7,8 @@ import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { CoopHost, CoopGuest } from './coop.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, RARITY, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
+import { ITEMS, FAMILIES, COMBOS, MINORS, QUALITY, FX, TF_N, itemOf, itemList, has, hasTf } from './items.js';
+import { DungeonSim, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
 
 // =====================================================================
 //  Utilitaires
@@ -1748,12 +1749,14 @@ class FighterView {
     if (this.sword) this.swing(sf);
 
     this.flash = Math.max(0, this.flash - dt * 4);
-    const emOn = this.flash > 0 || this.glow > 0;
+    const sg = this.stGlow || 0;          // états (brûlure, gel…) : posé par statusPre
+    const emOn = this.flash > 0 || this.glow > 0 || sg > 0;
     if (emOn || this.emissiveOn) {
       this.emissiveOn = emOn;
       for (const m of this.mats) {
         m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
         if (this.glow > 0) { m.emissive.r += this.glowCol.r * this.glow; m.emissive.g += this.glowCol.g * this.glow; m.emissive.b += this.glowCol.b * this.glow; }
+        if (sg > 0) { m.emissive.r += this.stCol.r * sg; m.emissive.g += this.stCol.g * sg; m.emissive.b += this.stCol.b * sg; }
       }
     }
     this.shieldGlow = Math.max(0, this.shieldGlow - dt * 3);
@@ -1911,10 +1914,15 @@ class DogView {
     this.tail.rotation.z = Math.sin(T * (st === 'idle' || st === 'walk' ? 14 : 5)) * 0.5;
     this.root.position.set(this.rx, this.ry, this.rz);
     this.flash = Math.max(0, this.flash - dt * 4);
-    const emOn = this.flash > 0;
+    const sg = this.stGlow || 0;          // états (brûlure, gel…) : posé par statusPre
+    const emOn = this.flash > 0 || sg > 0;
     if (emOn || this.emissiveOn) {
       this.emissiveOn = emOn;
-      for (const m of this.mats) if (m.emissive) m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
+      for (const m of this.mats) {
+        if (!m.emissive) continue;
+        m.emissive.copy(this.flashCol).multiplyScalar(this.flash);
+        if (sg > 0) { m.emissive.r += this.stCol.r * sg; m.emissive.g += this.stCol.g * sg; m.emissive.b += this.stCol.b * sg; }
+      }
     }
     if (this.fireG) {
       const on = spc === 'fire' && sf.spA === 1;
@@ -1967,11 +1975,21 @@ function fireballView() {
   scene.add(g);
   return g;
 }
-const NONE = [], arrowList = [], fireList = [];
+const NONE = [], arrowList = [], fireList = [], bladeList = [], bladeViews = [];
 function syncArrows(alpha) {
   const all = game.phase === 'menu' ? NONE : sim.pr;
-  arrowList.length = fireList.length = 0;
-  for (let i = 0; i < all.length; i++) { const a = all[i]; (a.k === 1 ? fireList : arrowList).push(a); }
+  arrowList.length = fireList.length = bladeList.length = 0;
+  for (let i = 0; i < all.length; i++) { const a = all[i]; (a.k === 1 ? fireList : a.k === 2 ? bladeList : arrowList).push(a); }
+  // lames spectrales (objets) : forme partagée, en additif
+  while (bladeViews.length < bladeList.length) { const m = new THREE.Mesh(bladeGeo, bladeMat); m.scale.setScalar(1.5); scene.add(m); bladeViews.push(m); }
+  for (let i = 0; i < bladeViews.length; i++) {
+    const o = bladeViews[i], a = bladeList[i];
+    o.visible = !!a;
+    if (!a) continue;
+    o.position.set(a.x + a.vx * DT * (alpha - 1), a.y + a.vy * DT * (alpha - 1), a.z + a.vz * DT * (alpha - 1));
+    o.lookAt(vA.set(o.position.x + a.vx, o.position.y + a.vy, o.position.z + a.vz));
+    if ((arrowTrail = (arrowTrail + 1) % 2) === 0) emit(o.position.x, o.position.y, o.position.z, 1, { color: [0xcfeaff, 0xffffff], speed: 0.1, up: 0.1, size: 0.05, life: 0.3, grav: 0 });
+  }
   const list = arrowList, fire = fireList;
   while (fireViews.length < fire.length) fireViews.push(fireballView());
   for (let i = 0; i < fireViews.length; i++) {
@@ -1993,6 +2011,317 @@ function syncArrows(alpha) {
     o.lookAt(vA.set(o.position.x + a.vx, o.position.y + a.vy, o.position.z + a.vz));
     // traînée légère derrière la flèche
     if ((arrowTrail = (arrowTrail + 1) % 2) === 0) emit(o.position.x, o.position.y, o.position.z, 1, { color: [0xfff3d0, 0xffffff], speed: 0.1, up: 0.1, size: 0.035, life: 0.25, grav: 0 });
+  }
+}
+
+// =====================================================================
+//  Objets (items.js) : piédestaux, états des combattants, lames, éclairs. Tout est déduit de l'état
+//  de la simulation (sim.pk, champs des combattants) ou de ses événements ('item', 'tf', 'combo', 'bolt').
+// =====================================================================
+const pedGeo = new THREE.CylinderGeometry(0.27, 0.35, 0.6, 8).translate(0, 0.3, 0);
+const pedTopGeo = new THREE.CylinderGeometry(0.4, 0.33, 0.1, 8).translate(0, 0.65, 0);
+const gemGeo = new THREE.OctahedronGeometry(0.16, 0);
+const shardGeo = new THREE.OctahedronGeometry(0.09, 0).scale(0.7, 1.7, 0.7);
+const haloGeo = new THREE.RingGeometry(0.44, 0.58, 32).rotateX(-Math.PI / 2);
+const auraGeo = new THREE.RingGeometry(0.93, 1, 48).rotateX(-Math.PI / 2);
+const bladeGeo = new THREE.OctahedronGeometry(0.1, 0).scale(0.55, 0.22, 3.4);     // lame spectrale, pointe vers +z
+const pedMat = new THREE.MeshStandardMaterial({ color: 0xa39a8a, roughness: 0.85 });
+const gemMats = QUALITY.map((q) => new THREE.MeshBasicMaterial({ color: q.hex, toneMapped: false }));
+const haloMats = QUALITY.map((q) => new THREE.MeshBasicMaterial({ color: q.hex, transparent: true, opacity: 0.55, depthWrite: false, toneMapped: false }));
+const shardMat = new THREE.MeshBasicMaterial({ color: 0x8fe8ff, toneMapped: false });
+const bladeMat = new THREE.MeshBasicMaterial({ color: 0xcfeaff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+keep(pedGeo, pedTopGeo, gemGeo, shardGeo, haloGeo, auraGeo, bladeGeo, pedMat, gemMats, haloMats, shardMat, bladeMat);
+
+// icônes (émojis) dessinées une fois chacune, partagées entre les salles
+const emojiMats = new Map();
+function emojiMat(ch) {
+  let m = emojiMats.get(ch);
+  if (m) return m;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = '92px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+  x.shadowColor = 'rgba(0,0,0,0.7)'; x.shadowBlur = 8;
+  x.fillText(ch, 64, 70);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  m = new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false });
+  keep(m, t);
+  emojiMats.set(ch, m);
+  return m;
+}
+
+// ---------- objets à ramasser : une vue par objet de sim.pk (clé : son numéro n) ----------
+function pkView(o) {
+  const g = new THREE.Group();
+  g.position.set(o.x, 0, o.z);
+  const v = { g, spin: null, icon: null, base: 0, ph: rand(0, TAU), grow: 0, seen: 0, q: o.q, t: o.t, x: o.x, z: o.z, sparkT: 0 };
+  const icon = (ch, s, y) => { v.icon = new THREE.Sprite(emojiMat(ch)); v.icon.scale.setScalar(s); v.icon.position.y = v.base = y; g.add(v.icon); };
+  if (o.t === 'item') {
+    for (const geo of [pedGeo, pedTopGeo]) { const m = new THREE.Mesh(geo, pedMat); m.castShadow = gfx.shadows; m.receiveShadow = true; g.add(m); }
+    const h = new THREE.Mesh(haloGeo, haloMats[o.q] ?? haloMats[0]);
+    h.position.y = 0.02; h.renderOrder = 2;
+    g.add(h);
+    v.spin = new THREE.Mesh(gemGeo, gemMats[o.q] ?? gemMats[0]);
+    v.spin.position.y = 0.9;
+    g.add(v.spin);
+    icon(itemOf(o.v)?.icon ?? '✨', 0.62, 1.42);
+  } else if (o.t === 'heart') icon('❤️', 0.5, 0.48);
+  else {
+    v.spin = new THREE.Mesh(shardGeo, shardMat);
+    v.spin.position.y = 0.42;
+    g.add(v.spin);
+    icon(MINORS[o.v]?.icon ?? '✨', 0.36, 0.9);
+  }
+  g.scale.setScalar(0.01);
+  world.add(g);
+  return v;
+}
+let pkStamp = 0;
+function pkSync(dt, T) {
+  const st = ++pkStamp;
+  let best = null;
+  for (const o of sim.pk ?? NONE) {
+    let v = dng.pk.get(o.n);
+    if (!v) { v = pkView(o); dng.pk.set(o.n, v); }
+    v.seen = st;
+    if (o.t === 'item' && (!best || o.q > best.q)) best = o;
+  }
+  for (const [n, v] of dng.pk) {
+    if (v.seen !== st) { world.remove(v.g); dng.pk.delete(n); continue; }   // formes et matériaux partagés : rien à libérer
+    if (v.grow < 1) {
+      v.grow = Math.min(1, v.grow + dt * 3.5);
+      v.g.scale.setScalar(Math.max(0.01, Math.sin(v.grow * Math.PI / 2) * (1 + 0.2 * Math.sin(v.grow * Math.PI))));
+    }
+    if (v.spin) v.spin.rotation.y = T * 1.6 + v.ph;
+    if (v.icon) v.icon.position.y = v.base + Math.sin(T * 2.2 + v.ph) * 0.06;
+    // les objets épiques et légendaires scintillent
+    if (v.t === 'item' && v.q >= 2 && gfx.fireEmbers && (v.sparkT -= dt) < 0) {
+      v.sparkT = v.q === 3 ? 0.08 : 0.18;
+      emit(v.x + rand(-0.3, 0.3), 0.9 + rand(0, 0.6), v.z + rand(-0.3, 0.3), 1, { color: [QUALITY[v.q].hex, 0xffffff], speed: 0.3, up: 1, size: 0.05, life: 0.8, grav: -0.5 });
+    }
+  }
+  const l = dng.glow?.light;
+  if (!l) return;
+  if (best) { l.color.setHex(QUALITY[best.q].hex); l.position.set(best.x, 1.4, best.z); l.intensity = 3 + Math.sin(T * 3) * 0.6; }
+  else if (l.intensity) { l.intensity = 0; l.position.y = -50; }
+}
+
+// ---------- fiche de l'objet le plus proche d'un héros local ----------
+let cardKey = '';
+function itemCard() {
+  let best = null, who = null, bd = 2.3;
+  for (const h of localHeroes()) {
+    const p = sim.f[h];
+    if (!p || p.state === 'dead') continue;
+    for (const o of sim.pk ?? NONE) {
+      if (o.t === 'heart') continue;
+      const d = Math.hypot(p.x - o.x, p.z - o.z) / Math.max(1, p.size ?? 1);
+      if (d < bd) { bd = d; best = o; who = p; }
+    }
+  }
+  const key = best ? `${best.n}:${who.idx}:${who.items}:${who.took}` : '';
+  if (key === cardKey) return;
+  cardKey = key;
+  const el = $('itemCard');
+  if (!best) { el.classList.add('hidden'); return; }
+  const duo = localHeroes().length > 1, me = duo ? `J${who.idx + 1} : ` : '';
+  const took = who.took & (best.t === 'item' ? 1 : 2);
+  if (best.t === 'item') {
+    const it = itemOf(best.v), q = QUALITY[it.q];
+    el.style.setProperty('--qc', q.col);
+    $('icIcon').textContent = it.icon;
+    $('icName').textContent = it.name;
+    $('icQual').innerHTML = esc(q.name.toUpperCase()) + (it.curse ? '<span class="curse">☠ MAUDIT</span>' : '');
+    $('icDesc').textContent = it.desc;
+    let fam = '';
+    if (it.fam) {
+      const F = FAMILIES[it.fam], n = itemList(who).filter((k) => ITEMS[k]?.fam === it.fam).length;
+      fam = `${F.icon} Famille ${esc(F.name)} : ${n} / ${TF_N}`;
+      if (!hasTf(who, it.fam) && n + 1 >= TF_N) fam += ` → <b>${esc(F.tf)} !</b>`;
+    }
+    for (const c of Object.values(COMBOS)) {
+      const other = c.a === best.v ? c.b : c.b === best.v ? c.a : '';
+      if (other && has(who, other)) fam += `${fam ? '<br>' : ''}<span class="syn">✦ Réagit avec ${esc(ITEMS[other].name)}…</span>`;
+    }
+    $('icFam').innerHTML = fam;
+  } else {
+    const m = MINORS[best.v];
+    el.style.setProperty('--qc', '#8fe8ff');
+    $('icIcon').textContent = m?.icon ?? '✨';
+    $('icName').textContent = m?.name ?? '';
+    $('icQual').textContent = 'PETIT BONUS';
+    $('icDesc').textContent = m?.desc ?? '';
+    $('icFam').innerHTML = '';
+  }
+  $('icTake').textContent = took ? `${me}tu as déjà pris le tien ici` : best.arm ? `${me}marche dessus pour le prendre` : `${me}éloigne-toi puis reviens pour le prendre`;
+  el.classList.remove('hidden');
+}
+
+// ---------- annonces : objet pris, transformation, combo (à la file) ----------
+const bannerQ = [];
+let bannerT = 0;
+function itemBanner(title, sub, col, prio) {
+  bannerQ.push({ title, sub, col, prio });
+  bannerQ.sort((a, b) => b.prio - a.prio);
+  if (bannerQ.length > 3) bannerQ.length = 3;      // beaucoup d'objets d'un coup : seulement les plus marquants
+}
+function bannerTick() {
+  if (clockT < bannerT || !bannerQ.length) return;
+  const b = bannerQ.shift(), el = $('itemBanner');
+  el.style.setProperty('--qc', b.col);
+  $('ibTitle').textContent = b.title;
+  $('ibSub').textContent = b.sub;
+  el.className = '';
+  void el.offsetWidth;
+  el.className = 'show';
+  bannerT = clockT + 2.3;
+}
+function heroTag(i) { return sim.g.np > 1 ? `J${i + 1} · ` : ''; }
+function onItemEvent(e) {
+  if (e[0] === 'item') {
+    const it = itemOf(e[2]);
+    if (it) itemBanner(heroTag(e[1]) + it.icon + ' ' + it.name, it.desc, QUALITY[it.q].col, it.q);
+  } else if (e[0] === 'tf') {
+    const F = FAMILIES[e[2]];
+    if (F) itemBanner(heroTag(e[1]) + F.icon + ' ' + F.tf.toUpperCase(), F.desc, '#ffe27a', 10);
+  } else if (e[0] === 'combo') {
+    const c = COMBOS[e[2]];
+    if (c) itemBanner(heroTag(e[1]) + '✦ ' + c.name + ' ✦', c.desc, '#ff8ae8', 8);
+  }
+}
+
+// ---------- éclairs (événements 'bolt') : petite réserve de lignes brisées ----------
+const BOLT_PTS = 9;
+const bolts = Array.from({ length: 10 }, () => {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BOLT_PTS * 3), 3));
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1, toneMapped: false, depthWrite: false }));
+  line.frustumCulled = false; line.visible = false; line.renderOrder = 3;
+  scene.add(line);
+  return { line, t: 0, a: [0, 0, 0], b: [0, 0, 0] };
+});
+let boltI = 0;
+function boltShape(b) {
+  const p = b.line.geometry.attributes.position.array, [x1, y1, z1] = b.a, [x2, y2, z2] = b.b;
+  for (let i = 0; i < BOLT_PTS; i++) {
+    const k = i / (BOLT_PTS - 1), j = i === 0 || i === BOLT_PTS - 1 ? 0 : 0.28;
+    p[i * 3] = x1 + (x2 - x1) * k + rand(-j, j);
+    p[i * 3 + 1] = y1 + (y2 - y1) * k + rand(-j, j) * 0.6;
+    p[i * 3 + 2] = z1 + (z2 - z1) * k + rand(-j, j);
+  }
+  b.line.geometry.attributes.position.needsUpdate = true;
+}
+function bolt(x1, y1, z1, x2, y2, z2, col = 0x9fd8ff) {
+  const b = bolts[boltI++ % bolts.length];
+  b.a[0] = x1; b.a[1] = y1; b.a[2] = z1; b.b[0] = x2; b.b[1] = y2; b.b[2] = z2;
+  b.t = 0.24;
+  b.line.material.color.setHex(col);
+  b.line.visible = true;
+  boltShape(b);
+  emit(x2, y2, z2, 6, { color: [col, 0xffffff], speed: 2.5, up: 1.5, size: 0.05, life: 0.3, grav: 3 });
+}
+function updateBolts(dt) {
+  for (const b of bolts) {
+    if (!b.line.visible) continue;
+    b.t -= dt;
+    if (b.t <= 0) { b.line.visible = false; continue; }
+    b.line.material.opacity = Math.min(1, b.t / 0.12);
+    if (Math.random() < 0.5) boltShape(b);      // l'éclair crépite
+  }
+}
+
+// ---------- états des combattants (brûlure, poison, froid, gel, discorde), taille, auras, lames ----------
+const ST_COL = {
+  frz: new THREE.Color(0.5, 0.85, 1), burn: new THREE.Color(1, 0.4, 0.05), psn: new THREE.Color(0.3, 0.9, 0.2),
+  chill: new THREE.Color(0.4, 0.7, 1), conf: new THREE.Color(1, 0.35, 0.9),
+};
+const FAM_FX = {
+  feu: [0xff9a2e, 0xffe27a], peste: [0x7ae85a, 0xb8ff9a], foudre: [0x9fd8ff, 0xffffff], givre: [0xbff0ff, 0xffffff],
+  sang: [0xe0303a, 0xff8080], meute: [0xb98aff, 0xe0d0ff], vent: [0xe8f4ff, 0xffffff], rempart: [0xffe066, 0xfff4c0],
+  fortune: [0x7aff9a, 0xffe27a],
+};
+const AURA_FAM = [['feu', 0xff7a2e], ['peste', 0x7ae85a], ['givre', 0x8fe0ff]];
+// vitesse de l'animation d'un combattant : le froid le ralentit, le gel le fige, la vitesse d'attaque accélère les coups
+function animK(sf) {
+  if (sf.sFrz > 0) return 0;
+  let k = sf.sChill > 0 ? FX.chill.slow : 1;
+  if (sim.aspdOf && sf.idx < sim.g.np && (sf.state === 'attack' || sf.state === 'shoot')) k *= sim.aspdOf(sf);
+  return k;
+}
+// avant le rendu de la vue : lueur et particules des états, taille
+function statusPre(v, sf, dt, T) {
+  const s = sf.size ?? 1;
+  if (Math.abs(s - v.sizeK) > 0.002) v.setSize(v.sizeK + (s - v.sizeK) * Math.min(1, dt * 6));
+  let col = null, gl = 0;
+  if (sf.state !== 'dead') {
+    if (sf.sFrz > 0) { col = ST_COL.frz; gl = 0.55; }
+    else if (sf.sConf > 0) { col = ST_COL.conf; gl = 0.25 + 0.12 * Math.sin(T * 9); }
+    else if (sf.sBurnT > 0) { col = ST_COL.burn; gl = 0.28 + 0.12 * Math.sin(T * 14); }
+    else if (sf.sPsn > 0) { col = ST_COL.psn; gl = 0.22 + 0.06 * Math.sin(T * 5); }
+    else if (sf.sChill > 0) { col = ST_COL.chill; gl = 0.22; }
+  }
+  v.stGlow = gl;
+  if (col) v.stCol = col;
+  if (sf.state === 'dead' || !gfx.fireEmbers) return;
+  v.stT = (v.stT ?? 0) - dt;
+  if (v.stT > 0) return;
+  v.stT = 0.09;
+  const px = v.rx + rand(-0.3, 0.3) * s, pz = v.rz + rand(-0.3, 0.3) * s;
+  if (sf.sBurnT > 0) emit(px, v.ry + rand(0.3, 1.3) * s, pz, 1, { color: [0xff9a2e, 0xffe27a, 0xff4a1c], speed: 0.3, up: 1.8, size: 0.07, life: 0.5, grav: -1.5 });
+  if (sf.sPsn > 0 && Math.random() < 0.6) emit(px, v.ry + rand(0.5, 1.4) * s, pz, 1, { color: [0x7ae85a, 0xb8ff9a], speed: 0.15, up: 0.7, size: 0.06, life: 0.7, grav: -0.6 });
+  if ((sf.sChill > 0 || sf.sFrz > 0) && Math.random() < 0.5) emit(px, v.ry + rand(0.6, 1.6) * s, pz, 1, { color: [0xdff8ff, 0xffffff], speed: 0.2, up: 0.2, size: 0.05, life: 0.8, grav: 1.2 });
+  if (sf.sConf > 0 && Math.random() < 0.5) emit(v.rx + Math.sin(T * 6) * 0.35, v.ry + 2 * s, v.rz + Math.cos(T * 6) * 0.35, 1, { color: [0xff8ae8, 0xffd0f4], speed: 0.1, up: 0.3, size: 0.06, life: 0.5, grav: 0 });
+  // héros transformé : particules aux couleurs de ses familles
+  if (sf.tf && sf.idx < sim.g.np) {
+    const fams = sf.tf.split(','), c = FAM_FX[fams[(Math.random() * fams.length) | 0]];
+    if (c && Math.random() < 0.7) emit(px, v.ry + rand(0.2, 1.5) * s, pz, 1, { color: c, speed: 0.25, up: 0.9, size: 0.055, life: 0.7, grav: -0.8 });
+  }
+}
+// après le rendu : ivresse, aura au sol, lames tournoyantes
+function statusPost(v, sf, T, alpha) {
+  if (sf.idx >= sim.g.np) return;
+  const s = v.sizeK || 1, alive = sf.state !== 'dead';
+  if (sf.drunk && alive && v.model) { v.model.rotation.z += Math.sin(T * 2.1) * 0.13; v.model.rotation.x += Math.sin(T * 1.3) * 0.06; }
+  // aura (transformations feu, peste, givre) : cercle au sol de la portée de l'aura
+  const af = alive && sf.tf ? AURA_FAM.find(([f]) => hasTf(sf, f)) : null;
+  if (af && !v.aura) {
+    v.aura = new THREE.Mesh(auraGeo, new THREE.MeshBasicMaterial({ color: af[1], transparent: true, opacity: 0.4, depthWrite: false, toneMapped: false }));
+    v.aura.renderOrder = 2;
+    v.root.add(v.aura);
+  }
+  if (v.aura) {
+    v.aura.visible = !!af;
+    if (af) {
+      v.aura.material.color.setHex(af[1]);
+      v.aura.material.opacity = 0.3 + 0.12 * Math.sin(T * 3);
+      v.aura.scale.setScalar(FX.aura.R / s);
+      v.aura.position.y = 0.04 / s;
+    }
+  }
+  // lames tournoyantes (Anneau de Gygès…) : même angle que la simulation (orbitTick)
+  const n = alive ? sf.orbit | 0 : 0;
+  if (!v.orbs && !n) return;
+  v.orbs ??= [];
+  while (v.orbs.length < n) { const m = new THREE.Mesh(bladeGeo, bladeMat); v.root.add(m); v.orbs.push(m); }
+  const O = FX.orbit, base = (sim.g.clock + (alpha - 1) * DT) * O.speed + sf.idx * 1.3;
+  for (let k = 0; k < v.orbs.length; k++) {
+    const m = v.orbs[k];
+    m.visible = k < n;
+    if (!m.visible) continue;
+    const a = base + (k * TAU) / n;
+    m.position.set(Math.sin(a) * O.R / s, 1 / s, Math.cos(a) * O.R / s);
+    m.rotation.set(0, a + Math.PI / 2, 0);
+    m.scale.setScalar(1.6 / s);
+  }
+}
+
+// ---------- salle au trésor : décor ----------
+function vaultDecor() {
+  for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) {
+    brazier(x, z, 'a_columnD', 1.1, 7, 6);
+    for (let k = 0; k < 3; k++) PI('d_coin', x + rand(-0.9, 0.9) * Math.sign(-x || 1), 0, z + rand(0.4, 1.1) * Math.sign(-z || 1), rand(0, TAU), 1.3, 1.3, 1.3, false);
   }
 }
 
@@ -2090,12 +2419,7 @@ function controlsHTML(mode, compact) {
 
 addEventListener('keydown', (e) => {
   if (keysEditorKey(e)) return;
-  if (e.target instanceof HTMLInputElement) return;
-  if (!$('reward').classList.contains('hidden')) {
-    const k = rewardKey(e.code);
-    if (k) { e.preventDefault(); pickBoon(k[0], k[1]); }
-    if (e.code !== 'Escape') return;
-  }
+  if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   // chez le marchand : touches 1 à 9 = prendre directement cette arme
   const dg = /^Digit([1-9])$/.exec(e.code), sh = localShopper();
   if (dg && sh >= 0 && !game.paused) { e.preventDefault(); shopReq[sh] = +dg[1] - 1; return; }
@@ -2135,7 +2459,6 @@ function readMoveInput(pl, consume = true) {
   return { mx: quant(mx), mz: quant(mz), blk: !!h.blk, press };
 }
 function localInput(pl, consume = true) {
-  if (isDungeon() && sim.g.phase === 'reward' && pickReq[pl] >= 0) { if (consume) pending[pl] = 0; return pickInput(pickReq[pl]); }
   if (isDungeon() && sim.g.phase === 'hub' && shopReq[pl] >= 0) { const n = shopReq[pl]; if (consume) { shopReq[pl] = -1; pending[pl] = 0; } return shopInput(n); }
   return readMoveInput(pl, consume);
 }
@@ -2206,6 +2529,8 @@ function playEvents(evs) {
       case 'fx': F[e[1]]?.fx(e[2]); break;
       case 'shake': game.shake = Math.max(game.shake, e[1]); break;
       case 'ko': arenaHooks.ko?.(); break;
+      case 'item': case 'tf': case 'combo': onItemEvent(e); break;
+      case 'bolt': bolt(e[1], e[2], e[3], e[4], e[5], e[6], e[7]); break;
       case 'round':
         ai?.reset(); ai0?.reset();
         camAng = 0;
@@ -2223,8 +2548,11 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   coop = null;
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
+  ['menu', 'result', 'pause', 'itemCard'].forEach((id) => $(id).classList.add('hidden'));
   $('hud').classList.remove('hidden', 'dng', 'solo');
+  $('it1').innerHTML = $('it2').innerHTML = '';
+  uiItems[0] = uiItems[1] = null;
+  $('resItems').innerHTML = '';
   $('againBtn').textContent = 'Revanche';
   $('help').classList.remove('hidden');
   $('help').innerHTML = controlsHTML(m.mode, true);
@@ -2284,7 +2612,7 @@ function toMenu(remote = false) {
   coop = null;
   sim.g.phase = 'menu';
   game.paused = false;
-  ['hud', 'help', 'result', 'pause', 'reward', 'lobby', 'talk', 'shop', 'bossBar'].forEach((id) => $(id).classList.add('hidden'));
+  ['hud', 'help', 'result', 'pause', 'itemCard', 'lobby', 'talk', 'shop', 'bossBar'].forEach((id) => $(id).classList.add('hidden'));
   $('fade').classList.remove('on');
   $('menu').classList.remove('hidden');
   menuScene();
@@ -2318,9 +2646,7 @@ function simTick() {
       const inp = readMoveInput(me, true);
       const shop = sim.g.phase === 'hub' && shopReq[me] >= 0 ? shopReq[me] : -1;
       if (shop >= 0) shopReq[me] = -1;
-      let pick = -1;
-      if (sim.g.phase === 'reward' && pickReq[me] >= 0 && !pickSent[me]) { pick = pickReq[me]; pickSent[me] = true; }
-      coop.tick(inp, { shop, pick });
+      coop.tick(inp, { shop });
       playEvents(coop.takeEvents());
     }
     return true;
@@ -2499,7 +2825,16 @@ function step(rdt) {
   if (isDungeon() && game.phase !== 'menu') dungeonSync();
   lobbySync();
   syncArrows(alpha);
-  for (let i = 0; i < F.length; i++) if (sim.f[i]) F[i].render(sim.f[i], animDt, clockT, alpha);
+  const dg = isDungeon();
+  for (let i = 0; i < F.length; i++) {
+    const sf = sim.f[i];
+    if (!sf) continue;
+    if (!dg) { F[i].render(sf, animDt, clockT, alpha); continue; }
+    statusPre(F[i], sf, rdt, clockT);
+    F[i].render(sf, animDt * animK(sf), clockT, alpha);
+    statusPost(F[i], sf, clockT, alpha);
+  }
+  updateBolts(rdt);
   for (let i = 0; i < updaters.length; i++) updaters[i](rdt, clockT);
   updateParticles(rdt);
   updateRings(rdt);
@@ -2531,9 +2866,8 @@ function syncUi() {
 //  Donjon (rogue-like) : affichage. Toute la logique est dans dungeon.js.
 //  L'affichage suit l'ÉTAT de la simulation (salle, porte, coffre, pièges).
 // =====================================================================
-const dng = { room: -1, roomVer: -1, gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [], endShown: false };
-const pickReq = [-1, -1];            // bénédiction choisie à l'écran, envoyée comme entrée
-const pickSent = [false, false];     // en coop invité : évite de renvoyer 60 fois la même sélection
+// pk : vues des objets à ramasser (piédestaux, cœurs, éclats), par numéro n de l'objet dans la simulation
+const dng = { room: -1, rn: -1, roomVer: -1, gateOpen: false, gate: null, traps: [], pk: new Map(), glow: null, endShown: false };
 const DNG_REC = 'spartiate-donjon-record';
 const ISO = Math.PI / 4;             // caméra en diagonale au-dessus de la salle (vue isométrique)
 const HERO_COL = [0xff5a4a, 0x4aa3ff];
@@ -2763,7 +3097,8 @@ function buildDungeonRoom(room, n) {
   crowd = null;
   arenaHooks = {};
   curArena = 'dungeon';
-  Object.assign(dng, { gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] });
+  Object.assign(dng, { gateOpen: false, gate: null, traps: [], glow: null });
+  dng.pk.clear();                      // leurs objets 3D partent avec le monde
   const boss = room.boss;
   dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : biomeOf(n);
   const B = BIOME[dng.biome];
@@ -2940,41 +3275,13 @@ function buildDungeonRoom(room, n) {
     geo.attributes.position.needsUpdate = true;
   });
 
-  // coffre (apparaît quand la salle est nettoyée) ; sa lumière est réservée dès la construction
-  const glowRef = queueLight(0xffd34a, 0, 4, 1.5, 0, -50, 0, 10);
+  // lueur des piédestaux (objets à ramasser) : lumière réservée dès la construction, éteinte sans objet
+  dng.glow = queueLight(0xffd34a, 0, 5, 1.5, 0, -50, 0, 10);
+  if (room.vault) vaultDecor();
   flushInstances();
   flushFires();
   flushLights();                       // toutes les lumières de la salle sont posées (nombre fixe)
   resSkip = 8;
-  dng.spawnChest = (silent = false) => {
-    const cx = sim.g.chestX, cz = sim.g.chestZ;
-    const ch = P('d_chest', cx, 0, cz, ISO, S * 1.2);
-    const cm = new THREE.AnimationMixer(ch);
-    const glow = glowRef.light;
-    if (glow) glow.position.set(cx, 1.1, cz);
-    let opened = false, sparkT = 0, grow = silent ? 1 : 0;
-    ch.scale.setScalar(silent ? S * 1.2 : 0.01);
-    if (!silent) {
-      ring(cx, 0.05, cz, 0xffd34a, 2.2, 0.6, true);
-      emit(cx, 0.4, cz, 20, { color: [0xffd34a, 0xfff0a0], speed: 2, up: 3, size: 0.07, life: 0.8, grav: 6 });
-    }
-    updaters.push((dt, t) => {
-      cm.update(dt);
-      if (grow < 1) { grow = Math.min(1, grow + dt * 4); ch.scale.setScalar(S * 1.2 * (1 + Math.sin(grow * Math.PI) * 0.25) * grow); }
-      if (opened) { if (glow) glow.intensity = Math.max(0.8, glow.intensity - dt * 6); return; }
-      if (glow) glow.intensity = 4 + Math.sin(t * 5) * 1.2;
-      if (gfx.fireEmbers) {
-        sparkT -= dt;
-        if (sparkT < 0) { sparkT = 0.14; emit(cx + rand(-0.4, 0.4), 0.7, cz + rand(-0.4, 0.4), 1, { color: [0xffe27a, 0xffffff], speed: 0.3, up: 1.2, size: 0.05, life: 0.8, grav: -0.5 }); }
-      }
-    });
-    dng.openChest = (sil = false) => {
-      opened = true;
-      playOnce(cm, 'd_chest', 'open');
-      if (sil) { cm.update(10); return; }
-      emit(cx, 0.6, cz, 30, { color: [0xffd34a, 0xffe27a, 0xffffff], speed: 2.5, up: 5, size: 0.08, life: 1.1, grav: 9 });
-    };
-  };
 }
 
 // ---------- Salle d'armes : statues des héros, marchand d'armes, dalles de choix ----------
@@ -3350,7 +3657,7 @@ function dungeonRoom() {
   buildDungeonRoom(sim.room, sim.g.room);
   // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
   const n = sim.g.room;
-  if (n > 1 && dng.room >= 0 && (sim.room.lair || biomeOf(n) !== biomeOf(n - 1))) {
+  if (n > 1 && dng.room >= 0 && !sim.room.vault && (sim.room.lair || biomeOf(n) !== biomeOf(n - 1))) {
     const b = $('biome');
     b.textContent = BIOME[sim.room.lair ? 'lair' : biomeOf(n)].name;
     b.className = '';
@@ -3358,21 +3665,27 @@ function dungeonRoom() {
     b.className = 'show';
   }
   dng.room = sim.g.room;
+  dng.rn = sim.g.rn;
   dng.roomVer = coop?.role === 'guest' ? coop.roomVer : 0;
   dungeonViews();
   snapCamera();
 }
 
-// À chaque image : porte, coffre, pièges et fenêtre de bénédiction suivent la simulation
+// À chaque image : porte, objets à ramasser et pièges suivent la simulation
+// (g.rn change à chaque salle, y compris la salle au trésor qui garde le numéro g.room)
+let syncT = 0;
 function dungeonSync() {
   if (coop?.role === 'guest' && !coop.ready) return;
   const g = sim.g;
-  const needRoom = dng.room !== g.room || (coop?.role === 'guest' && dng.roomVer !== coop.roomVer);
+  const dt = Math.min(0.1, clockT - syncT);
+  syncT = clockT;
+  const needRoom = dng.room !== g.room || dng.rn !== g.rn || (coop?.role === 'guest' && dng.roomVer !== coop.roomVer);
   if (needRoom) dungeonRoom();
   else { heroViews(); extraViews(); }
   if (g.exitOpen && !dng.gateOpen) { dng.gateOpen = true; dng.gate?.open(); }
-  if (g.chest >= 1 && !dng.chest) { dng.chest = 1; dng.spawnChest?.(); }
-  if (g.chest === 2 && dng.chest === 1) { dng.chest = 2; dng.openChest?.(); }
+  pkSync(dt, clockT);
+  itemCard();
+  bannerTick();
   dng.traps.forEach((t, k) => {
     const up = trapUp(g.clock, k);
     if (up !== t.up) {
@@ -3382,12 +3695,11 @@ function dungeonSync() {
     }
     // avertissement : un peu de poussière juste avant la sortie des pics
     const ph = trapPhase(g.clock, k);
-    if (!up && ph > TRAP.up0 - TRAP.warn && ph < TRAP.up0 && g.phase !== 'reward' && --t.warnT < 0) {
+    if (!up && ph > TRAP.up0 - TRAP.warn && ph < TRAP.up0 && --t.warnT < 0) {
       t.warnT = 4;
       emit(t.x + rand(-0.5, 0.5), 0.05, t.z + rand(-0.5, 0.5), 1, { color: 0x8a8090, speed: 0.4, up: 1, size: 0.06, life: 0.4, grav: 3 });
     }
   });
-  rewardSync();
   bossTele();
   if (g.phase === 'end' && !dng.endShown) endDungeon();
 }
@@ -3525,7 +3837,7 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   coop = null;
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause', 'reward'].forEach((id) => $(id).classList.add('hidden'));
+  ['menu', 'result', 'pause', 'itemCard'].forEach((id) => $(id).classList.add('hidden'));
   const np = m.mode === 'solo' ? 1 : 2;
   $('hud').classList.remove('hidden');
   $('hud').classList.add('dng');
@@ -3544,11 +3856,12 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   ai = ai0 = null;
   pending[0] = pending[1] = 0;
   tapped[0].clear(); tapped[1].clear();
-  pickReq.fill(-1);
-  pickSent.fill(false);
   shopReq.fill(-1);
-  rewardUi = '';
   dng.room = -1;
+  dng.rn = -1;
+  bannerQ.length = 0;
+  cardKey = '';
+  uiItems[0] = uiItems[1] = null;
   dng.roomVer = -1;
   dng.endShown = false;
   for (const k in uiTxt) delete uiTxt[k];   // l'arène a pu réécrire ces textes
@@ -3582,75 +3895,19 @@ function endDungeon() {
   $('resTitle').textContent = g.np > 1 ? 'VAINCUS…' : 'VAINCU…';
   $('resSub').textContent = `Tombé${g.np > 1 ? 's' : ''} dans la salle ${g.room} · ${g.kills} ennemi${g.kills > 1 ? 's' : ''} vaincu${g.kills > 1 ? 's' : ''}` +
     (best ? ' · nouveau record !' : ` · record : salle ${rec}`) + (guest ? '  ·  l’hôte peut relancer' : '');
+  // objets de la partie, par héros
+  let items = '';
+  for (let i = 0; i < g.np; i++) {
+    const p = sim.f[i];
+    if (!p) continue;
+    const icons = itemList(p).map((id) => { const it = itemOf(id); return it ? `<i class="q${it.q}" title="${esc(it.name)}">${it.icon}</i>` : ''; }).join('');
+    const tf = (p.tf ? p.tf.split(',') : []).map((f) => FAMILIES[f] ? `<i class="tf">${FAMILIES[f].icon} ${esc(FAMILIES[f].tf)}</i>` : '').join('');
+    items += `<div class="row">${g.np > 1 ? `<b>J${i + 1}</b>` : ''}${tf}${icons || '<span>aucun objet</span>'}</div>`;
+  }
+  $('resItems').innerHTML = items;
   $('againBtn').classList.toggle('hidden', guest);
   $('result').classList.remove('hidden');
   $('help').classList.add('hidden');
-}
-
-// ---------- Bénédictions : chaque héros choisit la sienne ----------
-// touches : seul ou en ligne 1 2 3 ; à deux sur le même clavier J1 1 2 3, J2 8 9 0 (ou pavé 1 2 3)
-function rewardKey(code) {
-  const d = /^Digit(\d)$/.exec(code), np = /^Numpad([1-3])$/.exec(code);
-  const loc = localHeroes();
-  if (loc.length > 1) {
-    if (d && '123'.includes(d[1])) return [0, +d[1] - 1];
-    if (d && '890'.includes(d[1])) return [1, '890'.indexOf(d[1])];
-    if (np) return [1, +np[1] - 1];
-    return null;
-  }
-  if (d && '123'.includes(d[1])) return [loc[0], +d[1] - 1];
-  if (np) return [loc[0], +np[1] - 1];
-  return null;
-}
-function pickBoon(h, n) {
-  if (!isDungeon() || h === undefined || !sim.canChoose(h, n) || !localHeroes().includes(h)) return;
-  pickReq[h] = n;   // transmis à la simulation (et à l'hôte en coop)
-  pickSent[h] = false;
-  rewardUi = '';
-}
-function clickBoon(n) { pickBoon(localHeroes().find((h) => sim.canChoose(h, n) && pickReq[h] < 0), n); }
-
-let rewardUi = '', rewardOpen = false;
-function rewardSync() {
-  const g = sim.g;
-  if (g.phase !== 'reward') {
-    rewardUi = '';
-    if (rewardOpen) { rewardOpen = false; $('reward').classList.add('hidden'); }
-    pickReq[0] = pickReq[1] = -1;
-    pickSent[0] = pickSent[1] = false;
-    return;
-  }
-  const loc = localHeroes();
-  for (const h of [0, 1]) if (!sim.mustPick(h)) { pickReq[h] = -1; pickSent[h] = false; }
-  const offer = sim.offer;
-  const key = [g.room, ...offer, g.pick0, g.pick1, ...pickReq].join('|');
-  if (key === rewardUi) return;
-  if (!rewardUi) down.clear();
-  rewardUi = key;
-  const duo = loc.length > 1;
-  const btns = $('reward').querySelectorAll('button');
-  offer.forEach((id, i) => {
-    if (!BOONS[id]) return;
-    const keys = duo ? `${i + 1}</kbd> <kbd>${'890'[i]}` : `${i + 1}`;
-    const r = BOONS[id].rare;
-    const owned = loc.length > 0 && loc.every((h) => BOONS[id].unique && sim.f[h]?.boons?.split(',').includes(id));
-    btns[i].className = 'r' + r;     // rareté : couleur du cadre (commune, rare, légendaire)
-    btns[i].innerHTML = `${r ? `<small>${RARITY[r].toUpperCase()}</small>` : ''}<b><kbd>${keys}</kbd> ${esc(BOONS[id].name)}</b><span>${esc(BOONS[id].desc)}</span>${owned ? '<div class="owned">Déjà acquise</div>' : ''}`;
-    btns[i].disabled = !loc.some((h) => sim.canChoose(h, i) && pickReq[h] < 0);
-  });
-  const st = [];
-  for (let h = 0; h < g.np; h++) {
-    const p = sim.f[h], pk = g['pick' + h], who = g.np > 1 ? `J${h + 1}` : 'Toi';
-    let s;
-    if (p.state === 'dead') s = 'à terre';
-    else if (pk >= 0) s = '✔ ' + (BOONS[offer[pk]]?.name ?? '');
-    else if (pickReq[h] >= 0) s = '…';
-    else s = loc.includes(h) ? 'choisis !' : 'choisit…';
-    st.push(`${who} (${Math.ceil(p.hp)} / ${p.maxHp} PV) : ${s}`);
-  }
-  $('rewardTxt').textContent = st.join('   ·   ');
-  rewardOpen = true;
-  $('reward').classList.remove('hidden');
 }
 
 const uiTxt = {};
@@ -3660,6 +3917,21 @@ function setTxt(id, v) { if (uiTxt[id] !== v) { uiTxt[id] = v; $(id).textContent
 const uiW = {}, uiC = {};
 function setW(id, pct) { const v = Math.round(pct * 10) / 10; if (uiW[id] !== v) { uiW[id] = v; $(id).style.width = v + '%'; } }
 function setCls(id, cls, on) { const k = id + '.' + cls; if (uiC[k] !== on) { uiC[k] = on; $(id).classList.toggle(cls, on); } }
+// objets d'un héros sous sa barre de sort (réécrits seulement quand ils changent)
+const uiItems = [null, null];
+function itemsHud(p, i) {
+  const key = p ? `${p.items}|${p.tf}|${p.combos}|${p.minors}` : '';
+  if (uiItems[i] === key) return;
+  uiItems[i] = key;
+  if (!p) { $('it' + (i + 1)).innerHTML = ''; return; }
+  const tip = (a, b) => `title="${esc(a)} — ${esc(b)}"`;
+  let h = '';
+  for (const id of (p.tf ? p.tf.split(',') : [])) { const F = FAMILIES[id]; if (F) h += `<i class="tf" ${tip(F.tf, F.desc)}>${F.icon} ${esc(F.tf)}</i>`; }
+  for (const id of (p.combos ? p.combos.split(',') : [])) { const c = COMBOS[id]; if (c) h += `<i class="cb" ${tip(c.name, c.desc)}>✦ ${esc(c.name)}</i>`; }
+  for (const id of itemList(p)) { const it = itemOf(id); if (it) h += `<i class="q${it.q}" ${tip(it.name, it.desc)}>${it.icon}</i>`; }
+  if (p.minors) h += `<i class="mn" title="Petits bonus ramassés">+${p.minors}</i>`;
+  $('it' + (i + 1)).innerHTML = h;
+}
 function dungeonHud() {
   const g = sim.g;
   bossHud();
@@ -3681,8 +3953,10 @@ function dungeonHud() {
     const what = g.room === 0 ? `${HEROES[p.kind].name} · ${WEAPONS[p.wpn].name}` : HEROES[p.kind].name;
     const st = p.state === 'dead' ? 'À TERRE' : (g.room === 0 && p.shop > 0 ? 'EN BOUTIQUE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`);
     setTxt('n' + n, who + what + ' · ' + st);
+    itemsHud(p, i);
   }
-  setTxt('timer', g.room ? `SALLE ${g.room}` : "SALLE D'ARMES");
+  if (g.np < 2) itemsHud(null, 1);
+  setTxt('timer', g.vault ? 'SALLE AU TRÉSOR' : g.room ? `SALLE ${g.room}` : "SALLE D'ARMES");
   if (g.room === 0) {
     const shopping = g.np > 1 && sim.heroes.some((h) => h.shop > 0);
     setTxt('roundLbl', shopping ? 'ÉQUIPIER EN BOUTIQUE — ATTENDS-LE AVANT DE PASSER LA PORTE' : 'CHOISIS TON HÉROS, PRENDS TON ARME CHEZ LE MARCHAND, PUIS PASSE LA PORTE');
@@ -3692,7 +3966,11 @@ function dungeonHud() {
   const me = sim.f[localHeroes()[0] ?? 0];
   let lbl = left ? `${left} ENNEMI${left > 1 ? 'S' : ''}` : '';
   if (me?.down && g.phase === 'fight') lbl = 'À TERRE · ATTENDS QUE TON ÉQUIPIER BLOQUE PRÈS DE TOI';
-  else if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : 'LA PORTE EST OUVERTE';
+  else if (g.phase === 'clear') {
+    const loc = localHeroes().map((h) => sim.f[h]).filter((p) => p && p.state !== 'dead');
+    const left = (sim.pk ?? NONE).some((o) => o.t === 'item' && loc.some((p) => !(p.took & 1)));
+    lbl = left ? 'PRENDS UN OBJET SUR UN PIÉDESTAL' : g.vaultNext ? 'LA PORTE MÈNE À UNE SALLE AU TRÉSOR' : 'LA PORTE EST OUVERTE';
+  }
   setTxt('roundLbl', lbl);
 }
 
@@ -3868,11 +4146,9 @@ function setQuality(id, rebuild = true) {
   if (game.phase === 'menu') { curArena = null; menuScene(); return; }
   if (isDungeon()) {
     if (coop?.role === 'guest' && !coop.ready) return;
-    const hadGate = dng.gateOpen, hadChest = dng.chest;
-    buildDungeonRoom(sim.room, sim.g.room);
+    const hadGate = dng.gateOpen;
+    buildDungeonRoom(sim.room, sim.g.room);        // les piédestaux sont recréés par pkSync
     if (hadGate) { dng.gateOpen = true; dng.gate?.open(true); }
-    if (hadChest >= 1) { dng.chest = 1; dng.spawnChest?.(true); }
-    if (hadChest === 2) { dng.chest = 2; dng.openChest?.(true); }
     F.forEach((v) => v.dispose());
     F = [];
     dungeonViews();
@@ -3912,7 +4188,6 @@ function setupMenu() {
   });
   $('go').onclick = () => (cfg.mode === 'online' ? netStart() : cfg.game === 'dungeon' ? startDungeon() : startMatch());
   $('againBtn').onclick = () => (match?.mode === 'online' ? netStart(match.game) : match?.game === 'dungeon' ? startDungeon() : startMatch());
-  $('reward').querySelectorAll('button').forEach((b, i) => { b.onclick = () => clickBoon(i); });
   $('menuBtn').onclick = () => toMenu();
   $('resumeBtn').onclick = togglePause;
   $('quitBtn').onclick = () => toMenu();
@@ -4485,6 +4760,10 @@ const dbg = { open: false, god: false, tp: false };
 const DBG_ROOMS = [[0, "Salle d'armes"], [1, 'Salle 1'], [5, 'Boss : chef orc'], [10, 'Boss : colosse'], [15, 'Antre de Cerbère'], [6, 'Mines (6)'], [11, 'Ruines (11)'], [16, 'Forge (16)'], [-1, 'Salle suivante']];
 function setupDebug() {
   $('dbgRooms').innerHTML = DBG_ROOMS.map(([n, t]) => `<button data-room="${n}">${esc(t)}</button>`).join('');
+  // objets : liste triée par qualité, puis les petits bonus
+  $('dbgItem').innerHTML = Object.entries(ITEMS).sort((a, b) => a[1].q - b[1].q || a[1].name.localeCompare(b[1].name))
+    .map(([id, it]) => `<option value="${id}">${it.icon} ${esc(it.name)} (${esc(QUALITY[it.q].name)})</option>`).join('') +
+    Object.entries(MINORS).map(([id, m]) => `<option value="${id}">${m.icon} ${esc(m.name)}</option>`).join('');
   $('dbgFoes').innerHTML = Object.keys(FOES).filter((id) => id !== 'dog').map((id) => `<button data-foe="${id}">${esc(FOES[id].name)}</button>`).join('');
   $('dbg').addEventListener('click', (ev) => {
     const b = ev.target.closest('button');
@@ -4498,6 +4777,8 @@ function setupDebug() {
     else if (b.id === 'dbgHeal') dbgSim()?.debugHeal();
     else if (b.id === 'dbgGod') { dbg.god = !dbg.god; dbgSim()?.debugGod(dbg.god); }
     else if (b.id === 'dbgTp') dbg.tp = !dbg.tp;
+    else if (b.id === 'dbgGive') { if (!dbgSim()?.debugItem(localHeroes()[0] ?? 0, $('dbgItem').value)) dbgMsg('Objet impossible à donner ici.'); }
+    else if (b.id === 'dbgVault') { const s = dbgSim(); if (s) { s.debugVault(); dng.room = -1; $('result').classList.add('hidden'); } }
     dbgRefresh();
   });
   $('dbgCodeGo').onclick = dbgUnlock;
@@ -4527,7 +4808,6 @@ function dbgGoto(n) {
   if (dbg.god) s.debugGod(true);
   dng.room = -1;                  // reconstruire la salle, même si c'est la même
   $('result').classList.add('hidden');
-  $('reward').classList.add('hidden');
   $('help').classList.remove('hidden');
   acc = 0;
 }

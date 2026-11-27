@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DT, NEUTRAL, PRESS, Sim } from '../sim.js';
 import {
-  DungeonSim, BOONS, HEROES, WEAPON_IDS, HUB_PADS, MERCHANT, ROOM_R,
-  pickInput, shopInput,
+  DungeonSim, HEROES, WEAPON_IDS, HUB_PADS, MERCHANT, ROOM_R,
+  shopInput,
 } from '../dungeon.js';
 import { CoopHost, CoopGuest, packFighter, unpackFighter } from '../coop.js';
 import { Rollback } from '../rollback.js';
@@ -201,36 +201,26 @@ test('coop : réanimation en ligne + déduplication des événements', () => {
   assert.equal(reviveAnnounces, 1, 'événement de réanimation joué exactement une fois malgré doublons/pertes');
 });
 
-test('coop : coffre, bénédictions uniques déjà possédées (zéro softlock) et ouverture de porte', () => {
+test('coop : salle au trésor, l\'invité voit les piédestaux, chacun prend son objet (sans menu)', () => {
   const { sim, guest, stepBoth } = makePair({ latency: 30, loss: 0.2 });
-  sim.debugGoto(1);
-  // Simule J2 possédant déjà la bénédiction unique 'phenix'
-  sim.f[1].boons = 'phenix';
-  sim.f[1].phoenix = 1;
+  sim.debugGoto(2);
   sim.debugKill();
   for (let i = 0; i < 15; i++) stepBoth();
-  assert.equal(sim.g.chest, 1, 'coffre apparu');
-
-  // Ouvre le coffre
-  sim.f[0].x = sim.g.chestX; sim.f[0].z = sim.g.chestZ;
-  for (let i = 0; i < 10; i++) stepBoth();
-  assert.equal(sim.g.phase, 'reward');
-
-  // Force une offre contenant 'phenix' en slot 1 : J1 peut la prendre, J2 ne peut PAS (canChoose = false)
-  sim.g.o0 = 'potion'; sim.g.o1 = 'phenix'; sim.g.o2 = 'force';
-  for (let i = 0; i < 15; i++) stepBoth();
-  assert.equal(sim.canChoose(0, 1), true);
-  assert.equal(sim.canChoose(1, 1), false, 'hôte refuse phenix déjà possédée pour J2');
-  assert.equal(guest.sim.canChoose(1, 1), false, 'invité désactive aussi le bouton phenix pour J2');
-  assert.equal(guest.sim.canChoose(1, 2), true);
-
-  // J1 choisit slot 1 (phenix), J2 choisit slot 2 (force)
-  stepBoth(pickInput(1), NEUTRAL, { pick: 2 });
-  for (let i = 0; i < 30; i++) stepBoth();
-  assert.equal(sim.g.phase, 'clear', 'écran de bénédiction fermé après les deux choix');
   assert.equal(sim.g.exitOpen, true, 'porte ouverte');
-  assert.equal(guest.sim.g.phase, 'clear');
   assert.equal(guest.sim.g.exitOpen, true);
+  sim.debugVault();
+  for (let i = 0; i < 30; i++) stepBoth();
+  assert.equal(guest.sim.g.vault, true, 'invité dans la salle au trésor');
+  assert.equal(guest.sim.room.vault, true, 'descripteur de salle reçu');
+  const items = sim.pk.filter((o) => o.t === 'item');
+  assert.equal(items.length, 2);
+  assert.deepEqual(guest.sim.pk.map((o) => o.v).sort(), items.map((o) => o.v).sort(), 'mêmes objets chez l’invité');
+  // l'invité marche sur un piédestal (position imposée chez l'hôte, comme un déplacement)
+  sim.f[1].x = items[1].x + 0.85; sim.f[1].z = items[1].z;
+  for (let i = 0; i < 30; i++) stepBoth();
+  assert.equal(sim.f[1].items, items[1].v, 'J2 a pris son objet');
+  assert.equal(guest.sim.f[1].items, items[1].v, 'invité voit son objet');
+  assert.equal(guest.sim.pk.filter((o) => o.t === 'item').length, 1, 'il reste celui de J1');
 });
 
 test('coop : fin de partie et relance avec nouveau sid (paquets périmés ignorés)', () => {
@@ -288,21 +278,26 @@ test('coop : déconnexion en pleine salle (dropHero) convertit proprement en sol
   for (let i = 0; i < 120; i++) sim.step(NEUTRAL, NEUTRAL);
   assert.equal(sim.g.room, 3);
 
-  // Cas 2 : en phase 'reward' où J1 a déjà choisi et on attendait J2 -> dropHero(1) débloque aussitôt la salle
+  // Cas 2 : salle au trésor, J1 a pris son objet, J2 part : le reste des objets disparaît dès que J1 est seul
+  // à décider (il ne peut toujours en prendre qu'un), la porte reste ouverte
   const simR = new DungeonSim(8, ['soldier', 'knight']);
   simR.start();
-  simR.debugGoto(1);
-  simR.debugKill();
-  for (let i = 0; i < 20; i++) simR.step(NEUTRAL, NEUTRAL);
-  simR.f[0].x = simR.g.chestX; simR.f[0].z = simR.g.chestZ;
-  for (let i = 0; i < 10; i++) simR.step(NEUTRAL, NEUTRAL);
-  assert.equal(simR.g.phase, 'reward');
-  simR.step(pickInput(0), NEUTRAL);
-  assert.equal(simR.g.phase, 'reward', 'attend encore J2');
+  simR.debugVault();
+  const it = simR.pk.filter((o) => o.t === 'item');
+  simR.step(NEUTRAL, NEUTRAL);
+  simR.f[0].x
+ = it[0].x - 0.85; simR.f[0].z = it[0].z;
+  for (let i = 0; i < 3; i++) simR.step(NEUTRAL, NEUTRAL);
+  assert.equal(simR.f[0].items, it[0].v);
+  assert.equal(simR.pk.filter((o) => o.t === 'item').length, 1, 'l’objet de J2 attend');
   simR.dropHero(1);
-  assert.equal(simR.g.phase, 'clear', 'débloqué immédiatement au départ de J2');
+  for (let i = 0; i < 3; i++) simR.step(NEUTRAL, NEUTRAL);
   assert.equal(simR.g.exitOpen, true);
+  assert.equal(simR.pk.filter((o) => o.t === 'item').length, 0, 'la part de J2 disparaît');
+  assert.equal(simR.f[0].items, it[0].v, 'J1 ne prend pas un second objet');
+
 });
+
 
 test('coop : paquets malformés ou hostiles ignorés sans crash', () => {
   const { host, guest } = makePair();

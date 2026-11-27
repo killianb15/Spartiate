@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DT, NEUTRAL, PRESS } from '../sim.js';
-import { DungeonSim, HUB_PADS, ROOM_R, WEAPON_IDS, pickInput } from '../dungeon.js';
+import { DungeonSim, HUB_PADS, ROOM_R, WEAPON_IDS } from '../dungeon.js';
 import { CoopHost, CoopGuest } from '../coop.js';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -97,8 +97,14 @@ test('coop E2E réel sur serveur.py : salon → salle d’armes → boutique →
 
     // 2. L'hôte change de héros et met à jour son salon ; l'observateur voit le changement
     hostWs.send({ t: 'hall_state', kind: 'knight', wpn: 'spear' });
-    obsWs.send({ t: 'list' });
-    const list1 = await obsWs.next((m) => m.t === 'rooms');
+    // deux sockets : le serveur peut traiter la liste avant la mise à jour, on la redemande
+    let list1;
+    for (let k = 0; k < 20; k++) {
+      obsWs.send({ t: 'list' });
+      list1 = await obsWs.next((m) => m.t === 'rooms');
+      if (list1.rooms[0]?.kind === 'knight') break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
     assert.equal(list1.rooms.length, 1);
     assert.equal(list1.rooms[0].code, code);
     assert.equal(list1.rooms[0].kind, 'knight');
@@ -171,17 +177,12 @@ test('coop E2E réel sur serveur.py : salon → salle d’armes → boutique →
     assert.equal(guest.sim.g.room, 1, 'invité synchronisé sur salle 1');
     assert.equal(guest.sim.f.length, sim.f.length, 'même nombre d’entités en salle 1');
 
-    // 7. Combat, coffre, bénédictions et passage en salle 2
+    // 7. Combat, butin et passage en salle 2
     sim.debugKill();
     await pump(15);
-    assert.equal(guest.sim.g.chest, 1, 'invité voit le coffre');
-    sim.f[0].x = sim.g.chestX; sim.f[0].z = sim.g.chestZ;
-    await pump(15);
-    assert.equal(guest.sim.g.phase, 'reward', 'écran de bénédiction affiché chez l’invité');
-
-    // Les deux choisissent une bénédiction (hôte slot 0, invité slot 2)
-    await pump(25, (i) => (i === 0 ? pickInput(0) : NEUTRAL), NEUTRAL, { pick: 2 });
     assert.equal(sim.g.phase, 'clear');
+    assert.deepEqual(guest.sim.pk.map((o) => o.n), sim.pk.map((o) => o.n), 'invité voit le butin');
+
     assert.equal(guest.sim.g.phase, 'clear');
     assert.equal(guest.sim.g.exitOpen, true);
 

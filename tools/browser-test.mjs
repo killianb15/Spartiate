@@ -7,7 +7,8 @@
 //  2. Chromium :         "%LOCALAPPDATA%\ms-playwright\chromium-1217\chrome-win64\chrome.exe" --headless=new
 //                        --remote-debugging-port=9333 --user-data-dir=<dossier temporaire> --window-size=1280,720
 //                        --use-angle=swiftshader --enable-unsafe-swiftshader --no-first-run about:blank
-//  3. node tools/browser-test.mjs <tome|staff|shop|biomes|boss|gloves> <dossier des captures>   (shop : le marchand d'armes ;
+//  3. node tools/browser-test.mjs <tome|staff|shop|biomes|boss|gloves|objets> <dossier des captures>   (shop : le marchand d'armes ;
+//     objets : salle au trésor, fiche, ramassage, transformation, états des ennemis, fin de partie ;
 //     biomes : une salle de chaque biome, boss compris ; boss : le colosse et l'outil de débogage F2 ;
 //     gloves : les gants de boxe, gros plans du héros au repos, en garde, en frappe, puis en salle 1)
 //  Sortie : CHARGE true/false, lignes ETAT (combattants : [type, camp, état, PV]), ERREURS n + détail.
@@ -286,18 +287,52 @@ if (scenario === 'rea') {
   ws.close();
   process.exit(0);
 }
-if (scenario === 'benedictions') {
-  // écran du coffre avec une bénédiction de chaque rareté, puis choix de la légendaire (touche 3)
-  await evalJs(`spartiate.debugGoto(1); true`);
+if (scenario === 'objets') {
+  // objets : salle au trésor (piédestaux, fiche de l'objet), ramassage, transformation, combo, états des ennemis,
+  // lames tournoyantes et spectrales, éclairs, taille ; fin de partie avec la liste des objets
+  const st = () => evalJs(`(() => { const s = spartiate.sim, p = s.f[0]; return JSON.stringify({ salle: s.g.room, rn: s.g.rn, phase: s.g.phase, vault: s.g.vault, pk: s.pk.map((o) => o.t + ':' + o.v + ':' + o.q), objets: p.items, tf: p.tf, combos: p.combos, taille: p.size, fiche: document.getElementById('itemCard').classList.contains('hidden') ? '' : document.getElementById('icName').textContent, hud: document.getElementById('it1').children.length, lbl: document.getElementById('roundLbl').textContent }); })()`);
+  await evalJs(`spartiate.debugGoto(2); true`);
   await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
-  await evalJs(`(() => { const s = spartiate.sim; s.debugKill(); s.g.phase = 'reward'; s.g.pick0 = -1; s.g.o0 = 'potion'; s.g.o1 = 'lame'; s.g.o2 = 'phenix'; return true; })()`);
-  await waitFor(`!document.getElementById('reward').classList.contains('hidden')`, 20000);
-  await sleep(800);
-  console.log('BOUTONS', await evalJs(`[...document.querySelectorAll('#reward button')].map((b) => b.className + ':' + b.textContent.slice(0, 40)).join(' | ')`));
-  await shot('coffre-raretes');
-  await evalJs(`document.querySelectorAll('#reward button')[2].click(); true`);
+  await evalJs(`(() => { const s = spartiate.sim; s.debugVault(); return true; })()`);
+  await waitFor(`spartiate.sim.g.vault && document.getElementById('timer').textContent.includes('TRÉSOR')`, 30000);
   await sleep(1500);
-  console.log('CHOIX', await evalJs(`spartiate.sim.f[0].boons + ' phénix=' + spartiate.sim.f[0].phoenix`));
+  console.log('ETAT', await st());
+  await shot('salle-tresor');
+  // devant le premier piédestal : la fiche s'affiche
+  await evalJs(`(() => { const s = spartiate.sim, o = s.pk[0], p = s.f[0]; p.x = o.x + (s.room.exit === 'z' ? 0 : 1.6); p.z = o.z + (s.room.exit === 'z' ? 1.6 : 0); spartiate.views[0].snapPos = true; return true; })()`);
+  await sleep(1200);
+  console.log('ETAT', await st());
+  await shot('fiche-objet');
+  // on marche dessus : pris, annonce, icône dans le HUD
+  await evalJs(`(() => { const s = spartiate.sim, o = s.pk[0], p = s.f[0]; p.x = o.x; p.z = o.z; return true; })()`);
+  await sleep(700);
+  console.log('ETAT', await st());
+  await shot('objet-pris');
+  // une transformation (feu), un combo (silex + givre), des lames tournoyantes, un titan
+  await evalJs(`(() => { const s = spartiate.sim; for (const id of ['silex', 'naphte', 'braise', 'givre', 'anneau', 'titan', 'fantome', 'tonnerre', 'cigue']) s.debugItem(0, id); return true; })()`);
+  await sleep(2600);
+  console.log('ETAT', await st());
+  await shot('transformation');
+  // salle suivante : ennemis brûlés, empoisonnés, gelés, en discorde
+  await evalJs(`spartiate.debugGoto(3); true`);
+  await waitFor(`spartiate.sim.g.phase === 'fight'`, 60000);
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0], foes = s.f.filter((e) => e.team === 1); s.debugGod(true);
+    foes.forEach((e, k) => { [() => s.ignite(p, e, 4, 5), () => s.poison(p, e, 5), () => s.freeze(p, e, 5), () => s.confuse(p, e, 5), () => s.chill(e, 5)][k % 5](); });
+    return foes.length; })()`);
+  await sleep(500);
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0], e = s.f.find((f) => f.team === 1 && f.state !== 'dead'); if (e) s.zap(p, e, 3, 1, false); return true; })()`);
+  await sleep(120);
+  await shot('etats-ennemis');
+  console.log('ENNEMIS', await evalJs(`JSON.stringify(spartiate.sim.f.filter((e) => e.team === 1).map((e) => [e.kind, e.sBurnT > 0, e.sPsn > 0, e.sFrz > 0, e.sConf > 0, e.sChill > 0]))`));
+  // lames spectrales (roulade avec le Fantôme)
+  await tap('Space'); await sleep(200);
+  await shot('roulade');
+  console.log('INFO', await evalJs(`JSON.stringify(spartiate.renderer.info.memory) + ' programmes ' + spartiate.renderer.info.programs.length`));
+  // fin de partie : liste des objets
+  await evalJs(`(() => { const s = spartiate.sim, p = s.f[0]; s.debugGod(false); p.phoenix = 0; p.armor = 0; s.damage(s.f.find((f) => f.team === 1) ?? p, p, 99999, 0, 0.3, p.x, 1, p.z); return p.state; })()`);
+  console.log('FIN', await waitFor(`!document.getElementById('result').classList.contains('hidden')`, 30000), await evalJs(`document.getElementById('resItems').textContent`));
+  await sleep(600);
+  await shot('fin');
   console.log('ERREURS', errors.length);
   for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
   ws.close();

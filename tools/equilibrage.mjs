@@ -1,6 +1,6 @@
 // =====================================================================
 //  Mesure de l'équilibrage seul / à deux : les héros sont joués par l'IA du jeu (niveau difficile),
-//  sur les mêmes salles (mêmes graines), sans bénédiction. Pour chaque salle : temps pour la nettoyer,
+//  sur les mêmes salles (mêmes graines), sans objet. Pour chaque salle : temps pour la nettoyer,
 //  PV perdus par les héros, salle perdue (tous les héros à terre) ou non.
 //
 //    node tools/equilibrage.mjs [nombre de graines] [salles, ex. 1,3,5,8,10,15] [tank] [hp=1.4,count=2…]
@@ -9,12 +9,13 @@
 //  Les réglages hp=… count=… changent COOP (dungeon.js) le temps de la mesure, pour les essayer.
 //
 //    node tools/equilibrage.mjs partie [nombre de graines] [PV x, ex. 4]
-//  partie : parties complètes, salle après salle, avec une bénédiction tirée au sort à chaque coffre et la
-//  relève des héros tombés en fin de salle (à deux) : profondeur atteinte seul et à deux. PV x : PV des héros
+//  partie : parties complètes, salle après salle, avec le butin ramassé (objet pris au hasard sur les
+//  piédestaux des boss et des salles au trésor, cœurs, petits bonus) et la relève des héros tombés en fin de salle (à deux) : profondeur atteinte seul et à deux. PV x : PV des héros
 //  multipliés (seul comme à deux) pour que l'IA, moins forte qu'un joueur, descende plus loin.
 //  Les pièges à pics sont retirés : l'IA ne sait pas les éviter (elle resterait plantée dessus).
 // =====================================================================
-import { DungeonSim, COOP, BOONS } from '../dungeon.js';
+import { DungeonSim, COOP } from '../dungeon.js';
+import { itemOf, heal, FX } from '../items.js';
 import { AI } from '../ai.js';
 import { NEUTRAL } from '../sim.js';
 
@@ -44,7 +45,7 @@ function play(np, room, seed) {
 }
 
 const pct = (x) => `${Math.round(x * 100)} %`;
-console.log(`${N} graines par salle, héros IA niveau difficile au glaive, sans bénédiction ; COOP ${JSON.stringify(COOP)}`);
+console.log(`${N} graines par salle, héros IA niveau difficile au glaive, sans objet ; COOP ${JSON.stringify(COOP)}`);
 console.log(TANK ? 'salle | seul : temps  dégâts reçus/héros | à deux : temps  dégâts reçus/héros | à deux / seul'
   : 'salle | seul : temps  PV perdus  défaites | à deux : temps  PV perdus  défaites');
 const ratios = [];
@@ -79,19 +80,32 @@ function run(np, seed, hpx) {
     let k = 0;
     for (; k < 240 * 60 && s.g.phase === 'fight'; k++) s.step(ais[0].update(s.dt), ais[1] ? ais[1].update(s.dt) : NEUTRAL);
     if (s.g.phase !== 'clear') return { depth: room, ...legend };      // tous à terre (ou salle interminable)
-    // coffre : chacun prend une bénédiction au hasard parmi les trois
-    s.rollOffer();
-    s.g.phase = 'reward'; s.g.pick0 = s.g.pick1 = -1;
-    for (let h = 0; h < np; h++) {
-      const c = (s.rng.next() * 3) | 0;
-      if (s.choose(h, c)) { const r = BOONS[s.offer[c]].rare; if (r === 1) legend.rare++; if (r === 2) legend.legend++; }
-    }
+    // butin de la salle (posé par dropLoot), puis salle au trésor éventuelle : chacun prend un objet au hasard
+    loot(s, legend);
+    if (s.g.vaultNext) { s.pk = []; s.placeItems('vault'); loot(s, legend); }
     s.debugGoto(room + 1);
   }
   return { depth: 61, ...legend };
 }
+function loot(s, legend) {
+  const items = s.pk.filter((o) => o.t === 'item');
+  for (const p of s.heroes) {
+    if (items.length) {
+      const o = items.splice((s.rng.next() * items.length) | 0, 1)[0];
+      s.giveItem(p, o.v);
+      const q = itemOf(o.v).q;
+      if (q === 2) legend.rare++;
+      if (q === 3) legend.legend++;
+    }
+    const m = s.pk.find((o) => o.t === 'minor');
+    if (m) { s.giveMinor(p, m.v); s.pk.splice(s.pk.indexOf(m), 1); }
+  }
+  for (const o of s.pk) if (o.t === 'heart') { const p = s.heroes.reduce((a, b) => (b.hp / b.maxHp < a.hp / a.maxHp ? b : a)); heal(p, FX.heart * p.heartMul); }
+  s.pk = [];
+  s.ev.length = 0;
+}
 function runs(N, hpx) {
-  console.log(`${N} parties seul et à deux (héros IA niveau difficile au glaive, PV x${hpx}, une bénédiction au hasard par coffre)`);
+  console.log(`${N} parties seul et à deux (héros IA niveau difficile au glaive, PV x${hpx}, butin ramassé, objet au hasard sur les piédestaux)`);
   for (const np of [1, 2]) {
     const d = [];
     let rare = 0, legend = 0;
@@ -99,6 +113,6 @@ function runs(N, hpx) {
     d.sort((a, b) => a - b);
     const mean = d.reduce((a, x) => a + x, 0) / N;
     console.log(`${np > 1 ? 'à deux' : 'seul  '} : salle atteinte moyenne ${mean.toFixed(1)}, médiane ${d[N >> 1]}, de ${d[0]} à ${d[N - 1]} ; ` +
-      `${(rare / N).toFixed(1)} rares et ${(legend / N).toFixed(1)} légendaires prises par partie`);
+      `${(rare / N).toFixed(1)} épiques et ${(legend / N).toFixed(1)} légendaires prises par partie`);
   }
 }
