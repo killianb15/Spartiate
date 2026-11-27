@@ -16,7 +16,7 @@
 //    partie précédente est ignoré.
 // =====================================================================
 import { DT, NEUTRAL, PRESS, WEAPONS } from './sim.js';
-import { BOONS, FIRST_HERO, HEROES, WEAPON_IDS, pickInput, shopInput } from './dungeon.js';
+import { BOONS, FIRST_HERO, HEROES, WEAPON_IDS, pickInput, shopInput, mapInput, eventInput } from './dungeon.js';
 import { clamp, lerpAng, hypot } from './dmath.js';
 
 const SNAP_EVERY = 2;       // instantané envoyé toutes les 2 images (30 Hz)
@@ -50,6 +50,7 @@ export function packFighter(f) {
     spellCd: r3(f.spellCd ?? 0), spellMax: f.spellMax ?? 7, spellBuffT: r3(f.spellBuffT ?? 0),
   };
   if (f.brute) o.brute = 1;
+  if (f.eliteChamp) o.eliteChamp = 1;
   if (f.sp !== undefined) {
     o.sp = f.sp; o.spT = r3(f.spT); o.spA = f.spA;
     o.spX = r3(f.spX); o.spZ = r3(f.spZ); o.rage = f.rage ? 1 : 0;
@@ -83,6 +84,7 @@ export function unpackFighter(p, prev = null) {
   f.boons = p.boons; f.phoenix = p.phoenix;
   f.spellCd = p.spellCd ?? 0; f.spellMax = p.spellMax ?? 7; f.spellBuffT = p.spellBuffT ?? 0;
   f.brute = p.brute ? 1 : 0;
+  f.eliteChamp = p.eliteChamp ? 1 : 0;
   if (p.sp !== undefined) {
     f.sp = p.sp; f.spT = p.spT; f.spA = p.spA;
     f.spX = p.spX; f.spZ = p.spZ; f.rage = p.rage;
@@ -129,10 +131,13 @@ export class CoopHost {
     this.guestActSeq = 0;       // dernier seq d'action consommé de l'invité
     this.guestActs = [];        // actions en attente à injecter dans DungeonSim
     this.guestRoomAck = -1;     // dernier roomVer confirmé par l'invité
+    this.guestMapAck = -1;      // dernier mapVer confirmé par l'invité
     this.guestEvAck = 0;        // dernier evId confirmé par l'invité
     this.roomVer = 1;
+    this.mapVer = sim.map ? 1 : 0;
     this.lastRoom = sim.g.room;
     this.lastRoomRef = sim.room;
+    this.lastMapKey = sim.map ? `${sim.map.act}:${sim.map.currentId}:${sim.map.visited.length}` : '';
     this.lastPhase = sim.g.phase;
     this.lastChest = sim.g.chest;
     this.lastEquip = '';
@@ -159,6 +164,7 @@ export class CoopHost {
       this.guestHold.mz = clampI(m.mz);
       this.guestHold.blk = !!m.blk;
       if (Number.isInteger(m.rAck)) this.guestRoomAck = Math.max(this.guestRoomAck, m.rAck);
+      if (Number.isInteger(m.mAck)) this.guestMapAck = Math.max(this.guestMapAck, m.mAck);
       if (Number.isInteger(m.eAck)) {
         this.guestEvAck = Math.max(this.guestEvAck, m.eAck);
         while (this.evBuf.length && this.evBuf[0][0] <= this.guestEvAck) this.evBuf.shift();
@@ -167,7 +173,7 @@ export class CoopHost {
         for (const a of m.acts) {
           if (!Array.isArray(a) || !Number.isInteger(a[0]) || a[0] <= this.guestActSeq) continue;
           this.guestActSeq = a[0];
-          this.guestActs.push({ press: (a[1] | 0) & 63, shop: a[2] ?? -1, pick: a[3] ?? -1 });
+          this.guestActs.push({ press: (a[1] | 0) & 63, shop: a[2] ?? -1, pick: a[3] ?? -1, map: a[4] ?? -1, evt: a[5] ?? -1 });
         }
       }
     }
@@ -179,6 +185,8 @@ export class CoopHost {
     if (this.guestActs.length) {
       const a = this.guestActs.shift();
       if (a.pick >= 0 && g.phase === 'reward') return pickInput(a.pick);
+      if (a.map >= 0 && g.phase === 'map') return mapInput(a.map);
+      if (a.evt >= 0 && g.phase === 'event') return eventInput(a.evt);
       if (a.shop >= 0 && g.phase === 'hub') return shopInput(a.shop);
       return { mx: this.guestHold.mx, mz: this.guestHold.mz, blk: this.guestHold.blk, press: a.press };
     }
@@ -208,14 +216,17 @@ export class CoopHost {
       this.lastRoom = sim.g.room;
       this.lastRoomRef = sim.room;
     }
+    const mapKey = sim.map ? `${sim.map.act}:${sim.map.currentId}:${sim.map.visited.length}` : '';
+    const mapChanged = mapKey !== this.lastMapKey;
+    if (mapChanged) { this.mapVer++; this.lastMapKey = mapKey; }
     const eq = sim.f.slice(0, sim.g.np).map((h) => h.kind + ':' + h.wpn + ':' + h.shop).join('|');
-    const urgent = roomChanged || sim.g.phase !== this.lastPhase || sim.g.chest !== this.lastChest || eq !== this.lastEquip;
+    const urgent = roomChanged || mapChanged || sim.g.phase !== this.lastPhase || sim.g.chest !== this.lastChest || eq !== this.lastEquip;
     this.lastPhase = sim.g.phase;
     this.lastChest = sim.g.chest;
     this.lastEquip = eq;
 
     const needSend = urgent || (this.tickN - this.sentTick >= (sim.g.phase === 'end' ? HEARTBEAT_EVERY : SNAP_EVERY));
-    if (needSend) this.broadcast(roomChanged || sim.g.phase === 'end');
+    if (needSend) this.broadcast(roomChanged || mapChanged || sim.g.phase === 'end');
     return 1;
   }
 
@@ -223,19 +234,22 @@ export class CoopHost {
     const sim = this.sim;
     this.sentTick = this.tickN;
     const needRoom = this.guestRoomAck < this.roomVer;
+    const needMap = !!sim.map && this.guestMapAck < this.mapVer;
     const msg = {
       t: 'cs',
       sid: this.sid,
       tk: this.tickN,
       ack: this.guestActSeq,
       rVer: this.roomVer,
+      mVer: this.mapVer,
       g: { ...sim.g },
       f: sim.f.map(packFighter),
       pr: sim.pr.map(packPr),
     };
     if (this.evBuf.length) msg.ev = this.evBuf;
     if (needRoom) msg.room = sim.room;
-    this.send(msg, reliable || needRoom);
+    if (needMap) msg.map = sim.map;
+    this.send(msg, reliable || needRoom || needMap);
     this.stats.sent++;
   }
 }
@@ -256,6 +270,7 @@ export class CoopGuest {
     this.hostAck = 0;
     this.lastSnapTick = -1;
     this.roomVer = 0;
+    this.mapVer = 0;
     this.lastEvId = 0;
     this.out = [];
     this.lastPing = 0;
@@ -271,15 +286,19 @@ export class CoopGuest {
       f: [],
       pr: [],
       ev: [],
-      g: { phase: 'hub', np: 2, room: 0, kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
-        exitOpen: true, chest: 0, chestX: 0, chestZ: 0, o0: '', o1: '', o2: '', pick0: -1, pick1: -1, flagEnd: false },
-      room: { exit: 'z', obs: [], surf: [], traps: [], boss: false, hub: true, pads: [] },
+      g: { phase: 'hub', np: 2, room: 0, act: 1, roomType: 'hub', kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
+        exitOpen: true, chest: 0, chestX: 0, chestZ: 0, chestKind: 'combat', o0: '', o1: '', o2: '', pick0: -1, pick1: -1,
+        mapVote0: '', mapVote1: '', eventId: '', evPick0: -1, evPick1: -1, eventLog: '', flagEnd: false },
+      room: { exit: 'z', obs: [], surf: [], traps: [], boss: false, hub: true, roomType: 'hub', act: 1, pads: [] },
+      map: null,
       get heroes() { return this.f.slice(0, this.g.np); },
       get foesLeft() { let n = 0; for (let i = 0; i < this.f.length; i++) if (this.f[i].team === 1 && this.f[i].state !== 'dead') n++; return n; },
       get offer() { return [this.g.o0, this.g.o1, this.g.o2]; },
       isHero(f) { return f.idx < this.g.np; },
       canPick(i, kind) { return !this.unlocked || kind === FIRST_HERO || !!this.unlocked[i]?.includes(kind); },
       mustPick(h) { return this.g.phase === 'reward' && h < this.g.np && this.f[h]?.state !== 'dead' && this.g['pick' + h] < 0; },
+      mustVoteMap(h) { return this.g.phase === 'map' && h < this.g.np && !this.g['mapVote' + h]; },
+      mustPickEvent(h) { return this.g.phase === 'event' && h < this.g.np && this.f[h]?.state !== 'dead' && this.g['evPick' + h] < 0; },
       canChoose(h, c) {
         if (!this.mustPick(h)) return false;
         const id = this.offer[c], p = this.f[h];
@@ -322,6 +341,10 @@ export class CoopGuest {
       sim.room = m.room;
       roomChanged = true;
     }
+    if (Number.isInteger(m.mVer) && m.mVer > this.mapVer && m.map) {
+      this.mapVer = m.mVer;
+      sim.map = m.map;
+    }
     if (m.g && typeof m.g === 'object') Object.assign(sim.g, m.g);
     if (Array.isArray(m.f)) {
       const next = [];
@@ -343,12 +366,12 @@ export class CoopGuest {
   }
 
   // Enregistre l'entrée locale (touches maintenues + actions ponctuelles) et l'envoie à l'hôte
-  tick(inp = NEUTRAL, { shop = -1, pick = -1 } = {}) {
+  tick(inp = NEUTRAL, { shop = -1, pick = -1, map = -1, evt = -1 } = {}) {
     this.tickN++;
     const mx = clampI(inp.mx), mz = clampI(inp.mz), blk = !!inp.blk, press = (inp.press | 0) & 63;
-    const hasAct = press !== 0 || shop >= 0 || pick >= 0;
+    const hasAct = press !== 0 || shop >= 0 || pick >= 0 || map >= 0 || evt >= 0;
     if (hasAct) {
-      this.actQueue.push([++this.actSeq, press, shop, pick]);
+      this.actQueue.push([++this.actSeq, press, shop, pick, map, evt]);
       if (this.actQueue.length > MAX_ACTS) this.actQueue.shift();
     }
     const changed = hasAct || mx !== this.lastHold.mx || mz !== this.lastHold.mz || blk !== this.lastHold.blk;
@@ -356,10 +379,10 @@ export class CoopGuest {
     // envoi immédiat dès qu'une touche change ou qu'une action est en attente, sinon maintien à 20 Hz
     if (changed || this.actQueue.length > 0 || this.tickN - this.lastSend >= 3) {
       this.lastSend = this.tickN;
-      const msg = { t: 'ci', sid: this.sid, mx, mz, blk, rAck: this.roomVer, eAck: this.lastEvId };
+      const msg = { t: 'ci', sid: this.sid, mx, mz, blk, rAck: this.roomVer, mAck: this.mapVer, eAck: this.lastEvId };
       if (this.actQueue.length) msg.acts = this.actQueue;
-      // shop/pick sont envoyés en fiable pour ne jamais rater un clic de menu
-      this.send(msg, shop >= 0 || pick >= 0);
+      // shop/pick/map/evt sont envoyés en fiable pour ne jamais rater un clic de menu
+      this.send(msg, shop >= 0 || pick >= 0 || map >= 0 || evt >= 0);
       this.stats.sent++;
     }
     const tNow = this.now();

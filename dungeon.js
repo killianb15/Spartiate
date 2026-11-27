@@ -11,8 +11,10 @@
 //  permet de jouer en ligne avec le rollback de rollback.js (step(entrée0, entrée1)).
 // =====================================================================
 import { Sim, DT, ACTS, PRESS, NEUTRAL, STA, CAST, WEAPONS, SPELLS, spellOf, wpnOf, guardOf, defaultWeapon, newFighter, newInput, hashState } from './sim.js';
-import { hypot, atan2, clamp, sin, cos } from './dmath.js';
+import { hypot, atan2, clamp, sin, cos, Rng } from './dmath.js';
 import { AI } from './ai.js';
+import { generateMap, availableNextIds, advanceMap, isBossNode, cloneMap, nodeById } from './map.js';
+import { EVENTS, EVENT_IDS } from './events.js';
 
 export const TILE = 1.5;
 export const ROOM_T = 6;           // centre des dalles du bord (sol de -6.75 à 6.75)
@@ -28,6 +30,7 @@ const BOSS_EVERY = 5;
 // Purement décoratif pour l'instant (game.js), mais déduit de l'état : identique chez les deux joueurs.
 export const BIOMES = ['crypt', 'mine', 'ruins', 'forge'];
 export const biomeOf = (n) => (n <= 0 ? 'crypt' : BIOMES[Math.floor((n - 1) / BOSS_EVERY) % BIOMES.length]);
+export const biomeOfAct = (act) => BIOMES[(Math.max(1, act) - 1) % BIOMES.length];
 
 // Pièges à pics : cycle de TRAP.period s, pics sortis entre up0 et up1 (décalé par piège)
 export const TRAP = { period: 2.6, up0: 1.7, up1: 2.3, warn: 0.45, dmg: 12 };
@@ -180,10 +183,20 @@ const FURY = { below: 0.4, mul: 1.7 };
 
 // Choix d'une bénédiction transmis comme une entrée (pour qu'il passe par le rollback en ligne) :
 // pendant la phase 'reward', mx = PICK + 1 + n, mz = 127, blk = vrai. Un déplacement au clavier ne
-// produit jamais mx entre 101 et 103 (ses composantes valent 0, ±90 ou ±127).
+// produit jamais mx entre 95 et 126 (ses composantes valent 0, ±90 ou ±127).
 const PICK = 100;
 export const pickInput = (n) => ({ mx: PICK + 1 + n, mz: 127, blk: true, press: 0 });
 const readPick = (s) => (s.blk && s.mz === 127 && s.mx > PICK && s.mx <= PICK + 3 ? s.mx - PICK - 1 : -1);
+
+// Choix d'une destination sur la carte (phase 'map') : mx = 120 + n (0..6)
+const MAP_IN = 120;
+export const mapInput = (n) => ({ mx: MAP_IN + n, mz: 127, blk: true, press: 0 });
+const readMapIn = (s) => (s.blk && s.mz === 127 && s.mx >= MAP_IN && s.mx <= MAP_IN + 6 ? s.mx - MAP_IN : -1);
+
+// Choix d'une option d'événement '?' (phase 'event') : mx = 95 + n (0..4)
+const EVT_IN = 95;
+export const eventInput = (n) => ({ mx: EVT_IN + n, mz: 127, blk: true, press: 0 });
+const readEventIn = (s) => (s.blk && s.mz === 127 && s.mx >= EVT_IN && s.mx <= EVT_IN + 4 ? s.mx - EVT_IN : -1);
 
 const OBS_R = { column: 0.4, barrel: 0.45, rocks: 0.65, stand: 0.45 };
 const OBS_H = { column: 1.8, barrel: 0.8, rocks: 0.75, stand: 1.8 };   // hauteur (les flèches passent au-dessus)
@@ -222,17 +235,21 @@ const span = (a, b, sg) => { const p = sg * a * TILE, q = sg * b * TILE; return 
 export class DungeonSim extends Sim {
   // kinds : personnage de chaque héros (1 ou 2) ; wpns : leurs armes (par défaut : celle du personnage)
   // unlocked : héros débloqués de chaque joueur (listes d'identifiants), ou null = tous (tests, outils).
-  // Ce n'est pas de l'état : identique chez les deux joueurs en ligne (transmis au lancement).
-  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null) {
+  // opts.useMap : active la carte par actes (style Slay the Spire) ; false par défaut pour garder les tests historiques intacts.
+  constructor(seed = 1, kinds = ['soldier'], wpns = [], unlocked = null, { useMap = false } = {}) {
     super(seed);
     if (!Array.isArray(kinds)) kinds = [kinds];
+    this.runSeed = (seed >>> 0) || 1;
+    this.useMap = !!useMap;
+    this.map = null;
     this.unlocked = unlocked ? kinds.map((_, i) => (Array.isArray(unlocked[i]) ? unlocked[i].filter((k) => HEROES[k]) : [])) : null;
     this.f = kinds.map((k, i) => newHero(i, this.canPick(i, k) ? k : FIRST_HERO, wpns[i]));
     this.inp = this.f.map(() => newInput());
-    this.g = { phase: 'menu', np: kinds.length, room: 0, kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
-      exitOpen: false, chest: 0, chestX: 0, chestZ: 0, o0: '', o1: '', o2: '', pick0: -1, pick1: -1, flagEnd: false };
+    this.g = { phase: 'menu', np: kinds.length, room: 0, act: 1, roomType: 'hub', kills: 0, t: 0, clock: 0, slow: 1, slowT: 0, hitstop: 0, frame: 0,
+      exitOpen: false, chest: 0, chestX: 0, chestZ: 0, chestKind: 'combat', o0: '', o1: '', o2: '', pick0: -1, pick1: -1,
+      mapVote0: '', mapVote1: '', eventId: '', evPick0: -1, evPick1: -1, eventLog: '', flagEnd: false };
     // exit : mur de la porte de sortie ('z' : mur z = -R, 'x' : mur x = -R) ; on entre par le mur opposé
-    this.room = { exit: 'z', obs: [], surf: [], traps: [], boss: false };
+    this.room = { exit: 'z', obs: [], surf: [], traps: [], boss: false, roomType: 'hub', act: 1 };
     this.ais = [];
   }
 
@@ -250,13 +267,15 @@ export class DungeonSim extends Sim {
   // ---------------- salle d'armes ----------------
   startHub() {
     const g = this.g;
-    g.room = 0; g.kills = 0;
+    g.room = 0; g.act = 1; g.roomType = 'hub'; g.kills = 0;
+    g.mapVote0 = g.mapVote1 = ''; g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
+    this.map = this.useMap ? generateMap(this.runSeed, 1) : null;
     for (const p of this.heroes) p.kills = 0;
     const obs = HUB_PADS.filter((pd) => pd.t === 'hero').map((pd) => ({ ...padStand(pd), r: OBS_R.stand, kind: 'stand' }));
     // comptoir du marchand (trois cercles côte à côte)
     for (const dx of [-0.8, 0, 0.8]) obs.push({ x: MERCHANT.x + dx, z: MERCHANT.counterZ, r: OBS_R.stand, kind: 'counter' });
     for (const [x, z] of [[5.3, -2.4], [5.3, -1.2], [5.3, 5.3]]) obs.push({ x, z, r: OBS_R.barrel, kind: 'barrel' });
-    this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, pads: HUB_PADS };
+    this.room = { exit: 'z', obs, surf: [], traps: [], boss: false, hub: true, roomType: 'hub', act: 1, pads: HUB_PADS };
     this.heroes.forEach((p, i) => {
       const x = this.g.np > 1 ? (i ? 1.6 : 0.4) : 1, yaw = Math.PI * 0.75;
       Object.assign(p, { x, y: 0, z: 2.5, vx: 0, vy: 0, vz: 0, yaw, visTarget: yaw, pad: -1, shop: 0, shopIn: 0, down: 0, revT: 0, spellCd: 0, spellBuffT: 0, spellMax: spellOf(p).cd });
@@ -342,9 +361,10 @@ export class DungeonSim extends Sim {
     this.equipped(p, WEAPONS[id].name);
   }
 
-  // ---------------- sauvegarde (rollback en ligne) ----------------
+  // ---------------- sauvegarde (rollback en ligne & reprise de run) ----------------
   save() {
     return { f: this.f.map((o) => ({ ...o })), g: { ...this.g }, inp: this.inp.map((o) => ({ ...o })), rng: this.rng.s,
+      runSeed: this.runSeed, useMap: this.useMap, map: cloneMap(this.map),
       room: this.room, ai: this.ais.map((a) => (a ? a.save() : null)), pr: this.pr.map((a) => ({ ...a })) };
   }
   load(s) {
@@ -352,26 +372,78 @@ export class DungeonSim extends Sim {
     this.g = { ...s.g };
     this.inp = s.inp.map((o) => ({ ...o }));
     this.rng.s = s.rng;
+    if (s.runSeed !== undefined) this.runSeed = s.runSeed;
+    if (s.useMap !== undefined) this.useMap = !!s.useMap;
+    this.map = cloneMap(s.map ?? null);
     this.room = s.room;            // jamais modifiée après sa création : partage sans risque
     this.ais = s.ai.map((a, i) => (a ? AI.restore(this, i, a) : null));
     this.pr = (s.pr ?? []).map((a) => ({ ...a }));
   }
   hash() { return hashState(this.save()); }
 
+  // ---------------- carte des chemins (style Slay the Spire) ----------------
+  openMap() {
+    const g = this.g;
+    if (!this.map) { g.act = 1; this.map = generateMap(this.runSeed, 1); }
+    else if (isBossNode(this.map)) { g.act++; this.map = generateMap(this.runSeed, g.act); }
+    g.phase = 'map'; g.t = 0;
+    g.mapVote0 = ''; g.mapVote1 = '';
+    this.emit('map', g.act);
+  }
+  mustVoteMap(h) { return this.g.phase === 'map' && h < this.g.np && !this.g['mapVote' + h]; }
+  voteMap(h, choiceIdx) {
+    const g = this.g;
+    if (g.phase !== 'map' || h < 0 || h >= g.np || !this.map) return false;
+    const avail = availableNextIds(this.map);
+    const id = avail[choiceIdx];
+    if (!id) return false;
+    if (g.np === 1) {
+      const node = advanceMap(this.map, id);
+      if (!node) return false;
+      this.newRoom(node);
+      return true;
+    }
+    g['mapVote' + h] = id;
+    this.emit('sfx', 'tick');
+    if (g.mapVote0 && g.mapVote1) {
+      let winId = g.mapVote0;
+      if (g.mapVote0 !== g.mapVote1) {
+        winId = this.rng.next() < 0.5 ? g.mapVote0 : g.mapVote1;
+        this.emit('announce', 'VOTE PARTAGÉ !', '', 1.0);
+      }
+      const node = advanceMap(this.map, winId);
+      if (node) this.newRoom(node);
+    }
+    return true;
+  }
+
   // ---------------- génération d'une salle ----------------
-  newRoom() {
-    const g = this.g, r = this.rng, np = g.np;
+  newRoom(node = null) {
+    const g = this.g, np = g.np;
+    const r = node ? new Rng(node.roomSeed) : this.rng;
     g.room++;
-    const n = g.room, boss = n % BOSS_EVERY === 0, bossId = boss ? bossOf(n) : '';
+    const n = g.room;
+    const roomType = node ? node.type : (n % BOSS_EVERY === 0 ? 'boss' : 'combat');
+    const boss = roomType === 'boss';
+    const elite = roomType === 'elite';
+    const treasure = roomType === 'treasure';
+    const isEvent = roomType === 'event';
+    const bossId = boss ? (node ? BOSS_ORDER[(Math.max(1, g.act) - 1) % BOSS_ORDER.length] : bossOf(n)) : '';
+    const act = this.useMap ? g.act : Math.floor((Math.max(1, n) - 1) / BOSS_EVERY) + 1;
+    g.roomType = roomType;
+    g.chestKind = elite ? 'elite' : treasure ? 'treasure' : 'combat';
+    g.eventId = ''; g.evPick0 = g.evPick1 = -1; g.eventLog = '';
+
     const exit = r.next() < 0.5 ? 'z' : 'x';
     const used = new Set();                       // dalles occupées « i,j »
     const key = (i, j) => i + ',' + j;
 
-    // estrades avec un escalier tourné vers le centre (à partir de la 3e salle)
+    // estrades avec un escalier tourné vers le centre (à partir de la 3e salle, hors salles calmes / antre)
     const surf = [];
     const q = r.next();
     const lair = bossId === 'cerbere';            // antre de Cerbère : salle dédiée, arène dégagée
-    const nPlat = n < 3 || lair ? 0 : boss ? 2 : q < 0.4 ? 1 : q < 0.6 ? 2 : 0;
+    const calm = treasure || isEvent;
+    const nPlat = n < 3 || lair || calm ? 0 : boss ? 2 : q < 0.4 ? 1 : q < 0.6 ? 2 : 0;
     const quads = [[1, 1], [-1, 1], [1, -1], [-1, -1]];
     for (let p = 0; p < nPlat; p++) {
       const [sx, sz] = quads.splice((r.next() * quads.length) | 0, 1)[0];
@@ -405,9 +477,9 @@ export class DungeonSim extends Sim {
       return null;
     };
     const obs = [];
-    const nObs = lair ? 0 : boss ? 2 : (r.next() * 4) | 0;
+    const nObs = lair || calm ? 0 : boss ? 2 : (r.next() * 4) | 0;
     const kinds = ['column', 'column', 'barrel', 'rocks'];
-    if (lair) for (const [i, j] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) obs.push({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' });
+    if (lair || calm) for (const [i, j] of [[-2, -2], [2, -2], [-2, 2], [2, 2]]) obs.push({ x: i * TILE, z: j * TILE, r: OBS_R.column, kind: 'column' });
     for (let k = 0; k < nObs; k++) {
       const t = freeTile();
       if (!t) break;
@@ -415,11 +487,11 @@ export class DungeonSim extends Sim {
       obs.push({ x: t[0], z: t[1], r: OBS_R[kind], kind });
     }
     const traps = [];
-    if (n >= 2 && !lair && r.next() < 0.45) {
+    if (n >= 2 && !lair && !calm && r.next() < 0.45) {
       const nt = 2 + ((r.next() * 3) | 0);
       for (let k = 0; k < nt; k++) { const t = freeTile(); if (t) traps.push({ x: t[0], z: t[1] }); }
     }
-    this.room = { exit, obs, surf, traps, boss, bossId, lair: lair ? 'cerbere' : '' };
+    this.room = { exit, obs, surf, traps, boss, bossId, lair: lair ? 'cerbere' : '', roomType, act };
 
     // les héros entrent par le mur opposé à la sortie (les héros tombés se relèvent)
     const ent = ROOM_R - 0.7;
@@ -434,13 +506,50 @@ export class DungeonSim extends Sim {
       this.toIdle(p);
     });
 
+    // Salles sans combat initial : Trésor & Événement '?'
+    if (treasure || isEvent) {
+      this.f = [...this.heroes];
+      this.inp = this.f.map(() => newInput());
+      this.pr = [];
+      this.ais = this.f.map(() => null);
+      g.slow = 1; g.slowT = 0; g.hitstop = 0; g.pick0 = g.pick1 = -1;
+      if (treasure) {
+        g.phase = 'clear'; g.t = 0;
+        g.exitOpen = true; g.chest = 1; g.chestX = 0; g.chestZ = 0;
+        if (node) this.rng.s = r.s;
+        this.emit('room', n);
+        this.emit('announce', 'SALLE AU TRÉSOR', '', 1.4);
+        this.emit('sfx', 'coin');
+        return;
+      }
+      // Événement mystérieux
+      const evId = EVENT_IDS[(r.next() * EVENT_IDS.length) | 0];
+      g.eventId = evId;
+      g.phase = 'event'; g.t = 0;
+      g.exitOpen = false; g.chest = 0;
+      if (node) this.rng.s = r.s;
+      this.emit('room', n);
+      this.emit('announce', EVENTS[evId].title.toUpperCase(), '', 1.4);
+      this.emit('sfx', 'spell');
+      return;
+    }
+
     // ennemis (plus nombreux à deux)
     const list = [];
     // le chef orc vient avec des orcs ; le colosse arrive seul (ses renforts viennent quand il enrage)
     // (à deux, son escorte grandit : x COOP.escort, au plus COOP.escortCap)
-    const escort = Math.min(4, n / BOSS_EVERY), escortN = np > 1 ? Math.min(COOP.escortCap, Math.ceil(escort * COOP.escort)) : escort;
+    const escort = Math.min(4, Math.max(1, Math.floor(n / BOSS_EVERY))), escortN = np > 1 ? Math.min(COOP.escortCap, Math.ceil(escort * COOP.escort)) : escort;
     if (boss) { list.push(bossId); if (bossId === 'boss') for (let k = 0; k < escortN; k++) list.push('grunt'); }
-    else {
+    else if (elite) {
+      // Salle Élite : 1 champion renforcé + escorte
+      list.push('elite');
+      let extra = Math.min(4, 1 + Math.floor(n / 3));
+      if (np > 1) extra = Math.min(COOP.cap - 1, Math.ceil(extra * COOP.count));
+      for (let k = 0; k < extra; k++) {
+        const u = r.next();
+        list.push(u < 0.28 ? 'archer' : u < 0.65 ? 'guard' : 'zombie');
+      }
+    } else {
       let count = Math.min(5, 1 + Math.floor(n / 2));
       if (np > 1) count = Math.min(COOP.cap, Math.ceil(count * COOP.count));
       for (let k = 0; k < count; k++) {
@@ -454,32 +563,86 @@ export class DungeonSim extends Sim {
     }
     const foes = [];
     const [px, pz] = exit === 'z' ? [0, ent] : [ent, 0];
-    for (const id of list) {
+    for (let li = 0; li < list.length; li++) {
+      const id = list[li];
       const T = FOES[id];
       let x = 0, z = 0;
       for (let tries = 0; tries < 40; tries++) {
         // dans la moitié de la salle côté sortie, loin des héros
         const a = r.range(-ROOM_T + 0.5, ROOM_T - 0.5), b = r.range(-ROOM_T + 0.5, 0.5);
         [x, z] = exit === 'z' ? [a, b] : [b, a];
-        if (T.boss) [x, z] = exit === 'z' ? [0, -3] : [-3, 0];
+        if (T.boss || (elite && li === 0)) [x, z] = exit === 'z' ? [0, -3] : [-3, 0];
         const free = obs.every((o) => hypot(o.x - x, o.z - z) > o.r + 0.8) && foes.every((e) => hypot(e.x - x, e.z - z) > 1.4) &&
           surf.every((s) => !s.ramp || !inRect(s, x, z, 0.3));
         if (free && hypot(px - x, pz - z) > 4) break;
       }
-      foes.push(this.newFoe(id, np + foes.length, x, z, atan2(px - x, pz - z)));
+      const foe = this.newFoe(id, np + foes.length, x, z, atan2(px - x, pz - z));
+      if (elite && li === 0) {
+        foe.size = 1.32;
+        foe.hp = foe.maxHp = Math.round(foe.hp * 1.65);
+        foe.pow *= 1.2;
+        foe.eliteChamp = 1;
+      }
+      foes.push(foe);
     }
     this.f = [...this.heroes, ...foes];
     this.inp = this.f.map(() => newInput());
     this.pr = [];
     const aseed = (r.next() * 4294967296) >>> 0;
     this.ais = this.f.map((e, i) => (i < np ? null : new AI(this, i, FOES[e.foe].lv, (aseed + i * 104729) >>> 0)));
+    if (node) this.rng.s = r.s;
 
     g.phase = 'intro'; g.t = 0;
     g.exitOpen = false; g.chest = 0; g.pick0 = g.pick1 = -1;
     g.slow = 1; g.slowT = 0; g.hitstop = 0;
     this.emit('room', n);
-    this.emit('announce', boss ? FOES[bossId].name.toUpperCase() + ' !' : `SALLE ${n}`, boss ? 'ko' : '', 1.3);
+    this.emit('announce', boss ? FOES[bossId].name.toUpperCase() + ' !' : elite ? 'SALLE ÉLITE !' : `SALLE ${n}`, boss || elite ? 'ko' : '', 1.3);
     this.emit('sfx', 'gong');
+  }
+
+  // ---------------- événements '?' ----------------
+  mustPickEvent(h) { return this.g.phase === 'event' && h < this.g.np && this.f[h]?.state !== 'dead' && this.g['evPick' + h] < 0; }
+  chooseEvent(h, optIdx) {
+    const g = this.g, ev = EVENTS[g.eventId];
+    if (g.phase !== 'event' || !ev || !this.mustPickEvent(h)) return false;
+    const ch = ev.choices[optIdx];
+    if (!ch) return false;
+    const p = this.f[h];
+    g['evPick' + h] = optIdx;
+    const res = ch.apply(this, p);
+    const txt = typeof res === 'string' ? res : (res?.text ?? '');
+    if (txt) {
+      const prefix = g.np > 1 ? `J${h + 1} : ` : '';
+      g.eventLog = g.eventLog ? `${g.eventLog}  ·  ${prefix}${txt}` : `${prefix}${txt}`;
+    }
+    if (res && typeof res === 'object' && res.ambush) {
+      this.spawnAmbush(res.ambush);
+      return true;
+    }
+    if (res && typeof res === 'object' && res.spawnChest) {
+      g.chestKind = res.spawnChest;
+      g.chest = 1; g.chestX = 0; g.chestZ = 0;
+    }
+    if (!this.heroes.some((_, i) => this.mustPickEvent(i))) {
+      g.phase = 'clear'; g.t = 0;
+      g.exitOpen = true;
+    }
+    return true;
+  }
+  spawnAmbush(kind) {
+    const g = this.g, list = kind === 'elite' ? ['elite', 'guard', 'archer'] : ['elite', 'guard'];
+    if (g.np > 1) list.push('guard');
+    const spots = [[-2.4, -2.2], [2.4, -2.2], [0, -3.4], [-2.8, 1.2]];
+    list.forEach((id, k) => {
+      const [sx, sz] = spots[k % spots.length];
+      const e = this.addFoe(id, sx, sz);
+      if (k === 0) { e.size = 1.28; e.hp = e.maxHp = Math.round(e.hp * 1.45); e.pow *= 1.15; e.eliteChamp = 1; }
+    });
+    g.chestKind = 'elite';
+    g.eventId = '';
+    g.phase = 'fight'; g.t = 0;
+    g.exitOpen = false; g.chest = 0;
+    this.emit('announce', 'EMBUSCADE !', 'ko', 1.3);
   }
   // ennemi n° idx de type id (PV et dégâts selon la profondeur et le nombre de héros)
   newFoe(id, idx, x, z, yaw) {
@@ -993,17 +1156,32 @@ export class DungeonSim extends Sim {
 
   // ---------------- coffre et bénédictions ----------------
   rollOffer() {
-    const g = this.g, r = this.rng, odds = boonOdds(Math.max(1, g.room));
+    const g = this.g, r = this.rng, base = boonOdds(Math.max(1, g.room));
+    const kind = g.chestKind || 'combat';
     // une bénédiction unique que tous les héros ont déjà n'est plus proposée
     const owned = (id) => BOONS[id].unique && this.heroes.every((p) => p.boons.split(',').includes(id));
-    const out = ['potion'];
-    for (let k = 1; k < 3; k++) {
-      const u = r.next(), tier = u < odds.legend ? 2 : u < odds.legend + odds.rare ? 1 : 0;
-      // rareté tirée ; s'il n'en reste aucune de ce niveau, on descend d'un cran
+    const draw = (out, rare, legend, minTier = 0) => {
+      const u = r.next();
+      const tier = Math.max(minTier, u < legend ? 2 : u < legend + rare ? 1 : 0);
       for (let t = tier; t >= 0; t--) {
         const pool = Object.keys(BOONS).filter((id) => id !== 'potion' && BOONS[id].rare === t && !out.includes(id) && !owned(id));
-        if (pool.length) { out.push(pool[(r.next() * pool.length) | 0]); break; }
+        if (pool.length) { out.push(pool[(r.next() * pool.length) | 0]); return; }
       }
+    };
+    const out = [];
+    if (kind === 'treasure') {
+      // Coffre au trésor : 3 bénédictions (sans Potion), au moins 1 Rare/Légendaire garantie
+      draw(out, Math.min(0.85, base.rare * 2), Math.min(0.35, base.legend * 2.5), 1);
+      draw(out, Math.min(0.75, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
+      draw(out, Math.min(0.75, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
+    } else if (kind === 'elite') {
+      // Coffre d'élite : Potion + 1 Rare/Légendaire garantie + 1 tirage boosté
+      out.push('potion');
+      draw(out, Math.min(0.85, base.rare * 2), Math.min(0.4, base.legend * 3), 1);
+      draw(out, Math.min(0.7, base.rare * 1.6), Math.min(0.28, base.legend * 2), 0);
+    } else {
+      out.push('potion');
+      for (let k = 1; k < 3; k++) draw(out, base.rare, base.legend, 0);
     }
     [g.o0, g.o1, g.o2] = out;
   }
@@ -1060,13 +1238,18 @@ export class DungeonSim extends Sim {
     });
     this.pr = this.pr.filter((a) => map.has(a.o)).map((a) => ({ ...a, o: map.get(a.o) }));
     if (this.unlocked) this.unlocked = [this.unlocked[1 - idx] ?? []];
-    if (idx === 0) g.pick0 = g.pick1;
-    g.pick1 = -1;
+    if (idx === 0) { g.pick0 = g.pick1; g.mapVote0 = g.mapVote1; g.evPick0 = g.evPick1; }
+    g.pick1 = -1; g.mapVote1 = ''; g.evPick1 = -1;
     g.np = 1;
     // si le héros restant était à terre en attendant son équipier, il se relève pour continuer seul
     const p = this.f[0];
     if (p && p.down) this.getUp(p, 'EN SOLO !');
     if (g.phase === 'reward' && !this.mustPick(0)) { g.phase = 'clear'; g.t = 0; }
+    if (g.phase === 'event' && !this.mustPickEvent(0)) { g.phase = 'clear'; g.t = 0; g.exitOpen = true; }
+    if (g.phase === 'map' && g.mapVote0 && this.map) {
+      const node = advanceMap(this.map, g.mapVote0);
+      if (node) this.newRoom(node);
+    }
     return true;
   }
 
@@ -1134,6 +1317,16 @@ export class DungeonSim extends Sim {
       if (!this.heroes.some((p, h) => this.mustPick(h))) { g.phase = 'clear'; g.t = 0; }
       return;
     }
+    if (g.phase === 'map') {
+      // choix du chemin sur la carte (en solo : immédiat ; à deux : vote option B)
+      [in0, in1].forEach((src, h) => { if (h < np && g.phase === 'map') { const c = readMapIn(src); if (c >= 0) this.voteMap(h, c); } });
+      return;
+    }
+    if (g.phase === 'event') {
+      // choix dans un événement mystérieux '?'
+      [in0, in1].forEach((src, h) => { if (g.phase === 'event' && this.mustPickEvent(h)) { const c = readEventIn(src); if (c >= 0) this.chooseEvent(h, c); } });
+      return;
+    }
     const adt = this.effectiveDt();
     let dt = DT * g.slow;
     if (g.hitstop > 0) { g.hitstop -= DT; dt = 0; }
@@ -1142,11 +1335,10 @@ export class DungeonSim extends Sim {
     if (g.slowT > 0) { g.slowT -= DT; if (g.slowT <= 0) g.slow = 1; }
     const ph = g.phase;
 
-    // (un choix de bénédiction qui arrive encore après la phase 'reward' est ignoré)
-    // (de même pour un choix d'arme hors de la boutique) ; un héros dans la boutique ne bouge pas
+    // (un choix de bénédiction/carte/événement/boutique qui arrive hors phase est ignoré) ; un héros dans la boutique ne bouge pas
     const hin = (src, p) => {
       if (ph === 'hub' && p.shop) { this.shopStep(p, src); return NEUTRAL; }
-      return readPick(src) >= 0 || readShop(src) >= 0 ? NEUTRAL : src;
+      return readPick(src) >= 0 || readShop(src) >= 0 || readMapIn(src) >= 0 || readEventIn(src) >= 0 ? NEUTRAL : src;
     };
     // attaques spéciales des boss ; pendant l'une d'elles, le boss n'écoute plus son IA
     if (ph === 'fight') for (let i = np; i < f.length; i++) if (f[i].sp !== undefined) this.bossThink(f[i], adt);
@@ -1212,7 +1404,7 @@ export class DungeonSim extends Sim {
         }
         break;
       case 'exit':
-        if (g.t > 0.45) this.newRoom();
+        if (g.t > 0.45) { if (this.useMap) this.openMap(); else this.newRoom(); }
         break;
       case 'dead':
         if (g.t > 2.6 && !g.flagEnd) { g.flagEnd = true; g.phase = 'end'; this.emit('end'); }

@@ -7,7 +7,10 @@ import { AI } from './ai.js';
 import { Rollback } from './rollback.js';
 import { CoopHost, CoopGuest } from './coop.js';
 import { Link } from './net.js';
-import { DungeonSim, BOONS, RARITY, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf } from './dungeon.js';
+import { DungeonSim, BOONS, RARITY, REVIVE, HEROES, FOES, BOSS, ROOM_R, ROOM_T, TILE, PLAT_H, TRAP, trapUp, trapPhase, pickInput, mapInput, eventInput, padStand, PAD_R, MERCHANT, WEAPON_IDS, HERO_IDS, FIRST_HERO, shopInput, biomeOf, biomeOfAct } from './dungeon.js';
+import { generateMap, advanceMap, availableNextIds, isBossNode } from './map.js';
+import { renderMap } from './map-ui.js';
+import { EVENTS } from './events.js';
 
 // =====================================================================
 //  Utilitaires
@@ -2091,12 +2094,33 @@ function controlsHTML(mode, compact) {
 addEventListener('keydown', (e) => {
   if (keysEditorKey(e)) return;
   if (e.code === 'Escape' && !$('guideOv').classList.contains('hidden')) { $('guideOv').classList.add('hidden'); return; }
+  if (mapPreviewKey(e)) return;
   if (e.code === 'Escape' && !$('gfxSec').classList.contains('hidden')) { $('gfxSec').classList.add('hidden'); $('gfxToggleBtn')?.classList.remove('active'); return; }
   if (e.target instanceof HTMLInputElement) return;
   if (!$('reward').classList.contains('hidden')) {
     const k = rewardKey(e.code);
     if (k) { e.preventDefault(); pickBoon(k[0], k[1]); }
     if (e.code !== 'Escape') return;
+  }
+  if (isDungeon() && sim.g.phase === 'event' && !$('eventOv').classList.contains('hidden')) {
+    const k = rewardKey(e.code);
+    if (k) { e.preventDefault(); pickEventChoice(k[0], k[1]); }
+    if (e.code !== 'Escape') return;
+  }
+  if (isDungeon() && sim.g.phase === 'map' && !$('mapOv').classList.contains('hidden')) {
+    const k = mapChoiceKey(e.code);
+    if (k) { e.preventDefault(); pickMapChoice(k[0], k[1]); }
+    if (e.code !== 'Escape') return;
+  }
+  if (mapPeek && (e.code === 'Escape' || e.code === 'KeyM')) {
+    e.preventDefault();
+    toggleMapPeek(false);
+    return;
+  }
+  if (e.code === 'KeyM' && !e.repeat && canPeekMap()) {
+    e.preventDefault();
+    toggleMapPeek(true);
+    return;
   }
   // chez le marchand : touches 1 à 9 = prendre directement cette arme
   const dg = /^Digit([1-9])$/.exec(e.code), sh = localShopper();
@@ -2138,6 +2162,8 @@ function readMoveInput(pl, consume = true) {
 }
 function localInput(pl, consume = true) {
   if (isDungeon() && sim.g.phase === 'reward' && pickReq[pl] >= 0) { if (consume) pending[pl] = 0; return pickInput(pickReq[pl]); }
+  if (isDungeon() && sim.g.phase === 'map' && mapReq[pl] >= 0) { const n = mapReq[pl]; if (consume) { mapReq[pl] = -1; pending[pl] = 0; } return mapInput(n); }
+  if (isDungeon() && sim.g.phase === 'event' && evtReq[pl] >= 0) { if (consume) pending[pl] = 0; return eventInput(evtReq[pl]); }
   if (isDungeon() && sim.g.phase === 'hub' && shopReq[pl] >= 0) { const n = shopReq[pl]; if (consume) { shopReq[pl] = -1; pending[pl] = 0; } return shopInput(n); }
   return readMoveInput(pl, consume);
 }
@@ -2278,6 +2304,7 @@ function endMatch() {
 
 // remote : c'est l'adversaire qui a quitté le combat, inutile de le prévenir
 function toMenu(remote = false) {
+  if (isDungeon() && match?.mode === 'solo' && !net.live) saveRun();
   if (match?.game === 'dungeon' && !remote && net.ws) {
     if (net.live) netInfo('Partie en ligne quittée.');
     netSend({ t: 'leave' });
@@ -2288,7 +2315,8 @@ function toMenu(remote = false) {
   coop = null;
   sim.g.phase = 'menu';
   game.paused = false;
-  ['hud', 'help', 'result', 'pause', 'reward', 'lobby', 'talk', 'shop', 'bossBar'].forEach((id) => $(id).classList.add('hidden'));
+  mapPeek = false;
+  ['hud', 'help', 'result', 'pause', 'reward', 'lobby', 'talk', 'shop', 'bossBar', 'mapOv', 'eventOv', 'mapToggleBtn'].forEach((id) => $(id)?.classList.add('hidden'));
   $('fade').classList.remove('on');
   $('menu').classList.remove('hidden');
   menuScene();
@@ -2322,9 +2350,11 @@ function simTick() {
       const inp = readMoveInput(me, true);
       const shop = sim.g.phase === 'hub' && shopReq[me] >= 0 ? shopReq[me] : -1;
       if (shop >= 0) shopReq[me] = -1;
-      let pick = -1;
+      let pick = -1, map = -1, evt = -1;
       if (sim.g.phase === 'reward' && pickReq[me] >= 0 && !pickSent[me]) { pick = pickReq[me]; pickSent[me] = true; }
-      coop.tick(inp, { shop, pick });
+      if (sim.g.phase === 'map' && mapReq[me] >= 0 && !mapSent[me]) { map = mapReq[me]; mapSent[me] = true; }
+      if (sim.g.phase === 'event' && evtReq[me] >= 0 && !evtSent[me]) { evt = evtReq[me]; evtSent[me] = true; }
+      coop.tick(inp, { shop, pick, map, evt });
       playEvents(coop.takeEvents());
     }
     return true;
@@ -2540,7 +2570,12 @@ function syncUi() {
 const dng = { room: -1, roomVer: -1, gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [], endShown: false };
 const pickReq = [-1, -1];            // bénédiction choisie à l'écran, envoyée comme entrée
 const pickSent = [false, false];     // en coop invité : évite de renvoyer 60 fois la même sélection
+const mapReq = [-1, -1];             // destination choisie sur la carte (phase 'map')
+const mapSent = [false, false];
+const evtReq = [-1, -1];             // option d'événement choisie (phase 'event')
+const evtSent = [false, false];
 const DNG_REC = 'spartiate-donjon-record';
+const RUN_SAVE_KEY = 'spartiate-run';
 const ISO = Math.PI / 4;             // caméra en diagonale au-dessus de la salle (vue isométrique)
 const HERO_COL = [0xff5a4a, 0x4aa3ff];
 function dungeonRecord() { try { return +localStorage.getItem(DNG_REC) || 0; } catch (e) { return 0; } }
@@ -2771,7 +2806,7 @@ function buildDungeonRoom(room, n) {
   curArena = 'dungeon';
   Object.assign(dng, { gateOpen: false, chest: 0, gate: null, spawnChest: null, openChest: null, traps: [] });
   const boss = room.boss;
-  dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : biomeOf(n);
+  dng.biome = room.hub ? 'hub' : room.lair ? 'lair' : (room.act ? biomeOfAct(room.act) : biomeOf(n));
   const B = BIOME[dng.biome];
   const k = clamp(((Math.max(n, 1) - 1) % 5) / 4, 0, 1) * (boss ? 1 : 0.85);   // 0 : début de la tranche … 1 : salle du boss
   const red = boss ? 0.45 : 0;                                                   // teinte rouge de la salle du boss
@@ -2896,6 +2931,17 @@ function buildDungeonRoom(room, n) {
     if (glow) queueLight(glow, 2.5, 4, 1.6, o.x, 0.9, o.z, 3);
   }
   if (boss) for (const [x, z] of [[-5.6, -5.6], [5.6, -5.6], [-5.6, 5.6]]) brazier(x, z, B.brazier, B.brazier === 'd_barrel' ? 1.3 : 1.1, 6, 5);
+  if (room.roomType === 'treasure') {
+    for (const [x, z] of [[-1.9, -1.9], [1.9, -1.9], [-1.9, 1.9], [1.9, 1.9]]) {
+      PI('a_trophy', x, 0, z, rot4(), S * 0.9, S * 0.9, S * 0.9, true);
+      PI('d_coin', x * 0.72, 0.06, z * 0.72, rand(0, TAU), S * 0.8, S * 0.8, S * 0.8, false);
+    }
+    queueLight(0xffd34a, 6, 9, 1.4, 0, 2.2, 0, 8);
+  } else if (room.roomType === 'event') {
+    PI('a_statue', 0, 0, -1.2, 0, S * 1.15, S * 1.15, S * 1.15, true);
+    for (const [x, z] of [[-1.5, -1.2], [1.5, -1.2]]) PI('b_crystals', x, 0, z, rand(0, TAU), S * 0.9, S * 0.9, S * 0.9, false);
+    queueLight(0xa584ff, 6.5, 10, 1.4, 0, 2.1, -1.2, 8);
+  }
   if (room.lair) lairDecor();
   if (room.hub) buildHub(room);
 
@@ -3310,10 +3356,11 @@ function makeView(i) {
     v.ring.material.color.set(np > 1 ? HERO_COL[i] : 0xffd34a);
   } else {
     v.setSize(e.size);
-    v.ring.material.color.set(e.boss ? 0xff3020 : 0xb03a2a);
-    if (!e.boss) v.addHpBar(0xe0452f);          // les boss ont leur grande barre en haut de l'écran
-    // le colosse : un automate géant coulé dans le bronze
+    v.ring.material.color.set(e.boss || e.eliteChamp ? 0xff3020 : 0xb03a2a);
+    if (!e.boss) v.addHpBar(e.eliteChamp ? 0xff7040 : 0xe0452f);          // les boss ont leur grande barre en haut de l'écran
+    // le colosse : un automate géant coulé dans le bronze ; champion d'élite : teinte pourpre/bronze
     if (e.foe === 'colosse') for (const m of v.mats) m.color.setRGB(1.3, 0.82, 0.42);
+    else if (e.eliteChamp) for (const m of v.mats) m.color.setRGB(1.28, 0.68, 0.56);
   }
   return v;
 }
@@ -3368,20 +3415,23 @@ function dungeonRoom() {
   buildDungeonRoom(sim.room, sim.g.room);
   // entrée dans un nouveau biome : son nom s'affiche au-dessus de « SALLE n »
   const n = sim.g.room;
-  if (n > 1 && dng.room >= 0 && (sim.room.lair || biomeOf(n) !== biomeOf(n - 1))) {
+  const curBiome = sim.room.lair ? 'lair' : (sim.room.act ? biomeOfAct(sim.room.act) : biomeOf(n));
+  if (n >= 1 && dng.room >= 0 && curBiome !== dng.lastBiome && !sim.room.hub) {
     const b = $('biome');
-    b.textContent = BIOME[sim.room.lair ? 'lair' : biomeOf(n)].name;
+    b.textContent = BIOME[curBiome].name;
     b.className = '';
     void b.offsetWidth;
     b.className = 'show';
   }
+  dng.lastBiome = curBiome;
   dng.room = sim.g.room;
   dng.roomVer = coop?.role === 'guest' ? coop.roomVer : 0;
   dungeonViews();
   snapCamera();
+  if (n >= 1) saveRun();
 }
 
-// À chaque image : porte, coffre, pièges et fenêtre de bénédiction suivent la simulation
+// À chaque image : porte, coffre, pièges, carte, événements et bénédictions suivent la simulation
 function dungeonSync() {
   if (coop?.role === 'guest' && !coop.ready) return;
   const g = sim.g;
@@ -3406,6 +3456,8 @@ function dungeonSync() {
     }
   });
   rewardSync();
+  eventSync();
+  mapSync();
   bossTele();
   if (g.phase === 'end' && !dng.endShown) endDungeon();
 }
@@ -3535,7 +3587,31 @@ function dungeonPreview() {
   dungeonViews();
 }
 
-// m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed, sid }
+// ---------- Sauvegarde / Reprise d'une run Donjon solo ----------
+function saveRun() {
+  if (!isDungeon() || match?.mode !== 'solo' || net.live || !sim?.useMap || sim.g.phase === 'dead' || sim.g.phase === 'end') return;
+  if (sim.g.room < 1 && sim.g.phase !== 'map') return;
+  try {
+    localStorage.setItem(RUN_SAVE_KEY, JSON.stringify({
+      v: 1,
+      hero: sim.f[0]?.kind ?? 'soldier',
+      wpn: sim.f[0]?.wpn ?? 'sword',
+      act: sim.g.act || 1,
+      room: sim.g.room || 0,
+      snap: sim.save(),
+    }));
+  } catch (e) { /* stockage plein ou indisponible */ }
+}
+function loadSavedRun() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(RUN_SAVE_KEY) || 'null');
+    if (raw && raw.v === 1 && raw.snap && raw.snap.map && raw.snap.g && raw.snap.f?.length) return raw;
+  } catch (e) { /* ignoré */ }
+  return null;
+}
+function clearSavedRun() { try { localStorage.removeItem(RUN_SAVE_KEY); } catch (e) { /* ignoré */ } }
+
+// m : { mode: 'solo' | 'duo' | 'online', p1, p2, seed, sid, resumeSnap }
 function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p1, p2: cfg.p2, w1: cfg.w1, w2: cfg.w2 }) {
   match = { ...m, game: 'dungeon' };
   net.live = m.mode === 'online';
@@ -3543,7 +3619,8 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   coop = null;
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause', 'reward', 'guideOv', 'gfxSec'].forEach((id) => $(id)?.classList.add('hidden'));
+  mapPeek = false;
+  ['menu', 'result', 'pause', 'reward', 'guideOv', 'gfxSec', 'mapOv', 'eventOv'].forEach((id) => $(id)?.classList.add('hidden'));
   $('gfxToggleBtn')?.classList.remove('active');
   const np = m.mode === 'solo' ? 1 : 2;
   $('hud').classList.remove('hidden');
@@ -3563,12 +3640,14 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   ai = ai0 = null;
   pending[0] = pending[1] = 0;
   tapped[0].clear(); tapped[1].clear();
-  pickReq.fill(-1);
-  pickSent.fill(false);
+  pickReq.fill(-1); pickSent.fill(false);
+  mapReq.fill(-1); mapSent.fill(false);
+  evtReq.fill(-1); evtSent.fill(false);
   shopReq.fill(-1);
-  rewardUi = '';
+  rewardUi = ''; mapUi = ''; evtUi = '';
   dng.room = -1;
   dng.roomVer = -1;
+  dng.lastBiome = '';
   dng.endShown = false;
   for (const k in uiTxt) delete uiTxt[k];   // l'arène a pu réécrire ces textes
   if (m.mode === 'online' && net.role === 'guest') {
@@ -3578,21 +3657,38 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
     acc = 0;
     return;
   }
-  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np));
-  sim.startHub();   // on commence dans la salle d'armes
-  playEvents(sim.ev);
-  sim.ev.length = 0;
+  sim = new DungeonSim(seed, np > 1 ? [m.p1, m.p2] : [m.p1], [m.w1, m.w2], unlocks.slice(0, np), { useMap: true });
+  if (m.resumeSnap) {
+    sim.load(m.resumeSnap);
+    sim.ev.length = 0;
+  } else {
+    if (m.mode === 'solo') clearSavedRun();
+    sim.startHub();   // on commence dans la salle d'armes
+    playEvents(sim.ev);
+    sim.ev.length = 0;
+  }
   if (m.mode === 'online') {
     // Hôte COOP : simulation autoritaire à 60 Hz, diffusion compacte à 30 Hz
     coop = new CoopHost(sim, { sid: m.sid || nextSid(), send: sendCoop });
   }
   dungeonRoom();
+  if (sim.g.exitOpen) { dng.gateOpen = true; dng.gate?.open(true); }
+  if (sim.g.chest >= 1) { dng.chest = 1; dng.spawnChest?.(true); }
+  if (sim.g.chest === 2) { dng.chest = 2; dng.openChest?.(true); }
   acc = 0;
+}
+function resumeDungeon() {
+  const saved = loadSavedRun();
+  if (!saved) return;
+  startDungeon({ mode: 'solo', p1: saved.hero, p2: cfg.p2, w1: saved.wpn, w2: cfg.w2, seed: saved.snap.runSeed || 1, resumeSnap: saved.snap });
 }
 
 function endDungeon() {
   if (dng.endShown) return;
   dng.endShown = true;
+  if (match?.mode === 'solo') clearSavedRun();
+  mapPeek = false;
+  ['mapOv', 'eventOv', 'mapToggleBtn'].forEach((id) => $(id)?.classList.add('hidden'));
   $('resDefis').innerHTML = '';
   $('result').classList.add('lose');
   const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
@@ -3674,6 +3770,145 @@ function rewardSync() {
   $('reward').classList.remove('hidden');
 }
 
+// ---------- Carte des chemins (phase 'map' + consultation 'M') ----------
+let mapUi = '', mapOpen = false, mapPeek = false;
+function canPeekMap() {
+  return isDungeon() && !!sim?.map && sim.g.room >= 1 && !game.paused
+    && ['intro', 'fight', 'clear'].includes(sim.g.phase);
+}
+function toggleMapPeek(force) {
+  if (!canPeekMap() && force !== false) return;
+  mapPeek = force !== undefined ? !!force : !mapPeek;
+  mapUi = '';
+  if (mapPeek) down.clear();
+  else if (!mapPreviewState && sim.g.phase !== 'map') { mapOpen = false; $('mapOv').classList.add('hidden'); }
+}
+function mapChoiceKey(code) {
+  const d = /^Digit(\d)$/.exec(code), np = /^Numpad([1-4])$/.exec(code);
+  const loc = localHeroes();
+  if (loc.length > 1) {
+    if (d && '1234'.includes(d[1])) return [0, +d[1] - 1];
+    if (d && '8907'.includes(d[1])) return [1, '8907'.indexOf(d[1])];
+    if (np) return [1, +np[1] - 1];
+    return null;
+  }
+  if (d && '1234'.includes(d[1])) return [loc[0], +d[1] - 1];
+  if (np) return [loc[0], +np[1] - 1];
+  return null;
+}
+function pickMapChoice(h, idx) {
+  if (!isDungeon() || sim.g.phase !== 'map' || !sim.map || h === undefined || !localHeroes().includes(h)) return;
+  const avail = availableNextIds(sim.map);
+  if (idx < 0 || idx >= avail.length) return;
+  mapReq[h] = idx;
+  mapSent[h] = false;
+  mapUi = '';
+}
+function clickMapNode(id) {
+  if (!sim?.map) return;
+  const idx = availableNextIds(sim.map).indexOf(id);
+  if (idx < 0) return;
+  const loc = localHeroes();
+  const who = loc.find((h) => !sim.g['mapVote' + h]) ?? loc[0];
+  pickMapChoice(who, idx);
+}
+function mapSync() {
+  if (mapPreviewState) return;
+  const g = sim.g;
+  const showPick = g.phase === 'map' && !!sim.map;
+  if (showPick && mapPeek) mapPeek = false;
+  if (!showPick && mapPeek && !canPeekMap()) mapPeek = false;
+  const show = showPick || (mapPeek && !!sim.map);
+  if (!show) {
+    mapUi = '';
+    if (mapOpen) { mapOpen = false; $('mapOv').classList.add('hidden'); }
+    mapReq[0] = mapReq[1] = -1;
+    mapSent[0] = mapSent[1] = false;
+    return;
+  }
+  const loc = localHeroes();
+  const key = [showPick ? 'pick' : 'peek', sim.map.act, sim.map.currentId, sim.map.visited.length, g.mapVote0, g.mapVote1, ...mapReq].join('|');
+  if (key === mapUi) return;
+  const justOpened = !mapOpen && showPick;
+  if (!mapUi) down.clear();
+  mapUi = key;
+  if (justOpened) saveRun();
+  let statusText = '';
+  if (showPick && g.np > 1) {
+    const v0 = g.mapVote0 ? '✔ voté' : 'choisit…';
+    const v1 = g.mapVote1 ? '✔ voté' : 'choisit…';
+    statusText = `Vote coop : J1 ${v0} · J2 ${v1} (accord = départ, désaccord = tirage au sort)`;
+  }
+  renderMap($('mapOv'), sim.map, {
+    interactive: showPick,
+    duoKeys: loc.length > 1,
+    votes: showPick && g.np > 1 ? [g.mapVote0, g.mapVote1] : [],
+    statusText,
+    canClose: !showPick,
+    onClose: () => toggleMapPeek(false),
+    onPick: clickMapNode,
+  });
+  mapOpen = true;
+  $('mapOv').classList.remove('hidden');
+}
+
+// ---------- Événements mystérieux '?' (phase 'event') ----------
+let evtUi = '', evtOpen = false, lastEventLog = '';
+function pickEventChoice(h, idx) {
+  if (!isDungeon() || sim.g.phase !== 'event' || h === undefined || !sim.mustPickEvent(h) || !localHeroes().includes(h)) return;
+  evtReq[h] = idx;
+  evtSent[h] = false;
+  evtUi = '';
+}
+function clickEventChoice(idx) {
+  const who = localHeroes().find((h) => sim.mustPickEvent(h) && evtReq[h] < 0);
+  pickEventChoice(who, idx);
+}
+function eventSync() {
+  const g = sim.g;
+  if (g.phase !== 'event' || !EVENTS[g.eventId]) {
+    if (evtOpen && g.eventLog && g.eventLog !== lastEventLog) {
+      lastEventLog = g.eventLog;
+      announce(g.eventLog.slice(0, 68), '', 2.2);
+    }
+    evtUi = '';
+    if (evtOpen) { evtOpen = false; $('eventOv').classList.add('hidden'); }
+    evtReq[0] = evtReq[1] = -1;
+    evtSent[0] = evtSent[1] = false;
+    return;
+  }
+  lastEventLog = '';
+  const loc = localHeroes();
+  for (const h of [0, 1]) if (!sim.mustPickEvent(h)) { evtReq[h] = -1; evtSent[h] = false; }
+  const ev = EVENTS[g.eventId];
+  const key = [g.room, g.eventId, g.evPick0, g.evPick1, ...evtReq].join('|');
+  if (key === evtUi) return;
+  if (!evtUi) down.clear();
+  evtUi = key;
+  const duo = loc.length > 1;
+  $('evTitle').textContent = ev.title;
+  $('evText').textContent = ev.text;
+  const canAny = loc.some((h) => sim.mustPickEvent(h) && evtReq[h] < 0);
+  $('evChoices').innerHTML = ev.choices.map((ch, i) => {
+    const keys = duo ? `${i + 1}</kbd> <kbd>${'890'[i]}` : `${i + 1}`;
+    return `<button type="button" class="ev-choice tone-${ch.tone || 'neutral'}" data-i="${i}"${canAny ? '' : ' disabled'}>`
+      + `<b><kbd>${keys}</kbd> ${esc(ch.label)}</b><span>${esc(ch.hint)}</span></button>`;
+  }).join('');
+  $('evChoices').querySelectorAll('button').forEach((b) => { b.onclick = () => clickEventChoice(+b.dataset.i); });
+  if (g.np > 1) {
+    const st = [0, 1].map((h) => {
+      const p = sim.f[h], pk = g['evPick' + h];
+      return `J${h + 1} (${Math.ceil(p.hp)}/${p.maxHp} PV) : ${pk >= 0 ? '✔ choisi' : 'choisit…'}`;
+    });
+    $('evStatus').textContent = st.join('   ·   ');
+  } else {
+    const p = sim.f[0];
+    $('evStatus').textContent = `PV actuels : ${Math.ceil(p.hp)} / ${p.maxHp}`;
+  }
+  evtOpen = true;
+  $('eventOv').classList.remove('hidden');
+}
+
 const uiTxt = {};
 function setTxt(id, v) { if (uiTxt[id] !== v) { uiTxt[id] = v; $(id).textContent = v; } }
 // largeur (en %) et classe d'un élément du HUD, écrites seulement quand elles changent (à chaque image sinon,
@@ -3703,7 +3938,9 @@ function dungeonHud() {
     const st = p.state === 'dead' ? 'À TERRE' : (g.room === 0 && p.shop > 0 ? 'EN BOUTIQUE' : `${Math.ceil(p.hp)} / ${p.maxHp} PV`);
     setTxt('n' + n, who + what + ' · ' + st);
   }
-  setTxt('timer', g.room ? `SALLE ${g.room}` : "SALLE D'ARMES");
+  const rtLbl = { elite: 'ÉLITE', treasure: 'TRÉSOR', event: 'ÉVÉNEMENT', boss: 'BOSS' }[g.roomType] || '';
+  setTxt('timer', g.room ? (sim.map ? `ACTE ${g.act} · ${rtLbl || 'SALLE ' + g.room}` : `SALLE ${g.room}`) : "SALLE D'ARMES");
+  setCls('mapToggleBtn', 'hidden', !canPeekMap());
   if (g.room === 0) {
     const shopping = g.np > 1 && sim.heroes.some((h) => h.shop > 0);
     setTxt('roundLbl', shopping ? 'ÉQUIPIER EN BOUTIQUE — ATTENDS-LE AVANT DE PASSER LA PORTE' : 'CHOISIS TON HÉROS, PRENDS TON ARME CHEZ LE MARCHAND, PUIS PASSE LA PORTE');
@@ -3713,7 +3950,9 @@ function dungeonHud() {
   const me = sim.f[localHeroes()[0] ?? 0];
   let lbl = left ? `${left} ENNEMI${left > 1 ? 'S' : ''}` : '';
   if (me?.down && g.phase === 'fight') lbl = 'À TERRE · ATTENDS QUE TON ÉQUIPIER BLOQUE PRÈS DE TOI';
-  else if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : 'LA PORTE EST OUVERTE';
+  else if (g.phase === 'map') lbl = 'CHOISIS LA PROCHAINE SALLE SUR LA CARTE';
+  else if (g.phase === 'event') lbl = 'CHOISIS TON OPTION';
+  else if (g.phase === 'clear' || g.phase === 'reward') lbl = g.chest === 1 ? 'OUVRE LE COFFRE' : (g.eventLog ? g.eventLog : 'LA PORTE EST OUVERTE');
   setTxt('roundLbl', lbl);
 }
 
@@ -3835,9 +4074,15 @@ function refreshMenu() {
     $('heroSpotlight').innerHTML = `<span class="hs-badge">SORT · ${sp1.cd} s</span><span><b>${esc(h1.name)}</b> — ${esc(sp1.name)} : ${esc(sp1.desc)}</span>`;
   }
 
-  // Record affiché sur la carte Donjon
+  // Record affiché sur la carte Donjon + reprise éventuelle d'une run solo sauvegardée
   const rec = Math.max(dungeonRecord(), compte.profil?.record || 0);
   $('dngRecBadge').textContent = rec ? `🏆 Record : Salle ${rec}` : 'Nouvelle expédition';
+  const saved = dg && cfg.mode === 'solo' ? loadSavedRun() : null;
+  $('resumeRunRow').classList.toggle('hidden', !saved);
+  if (saved) {
+    const hName = HEROES[saved.hero]?.name ?? 'Héros';
+    $('resumeRunBtn').textContent = `Reprendre · Acte ${saved.act}, Salle ${saved.room} (${hName})`;
+  }
 
   // Qualité graphique dans la barre d'outils
   if ($('gfxToggleLbl')) $('gfxToggleLbl').textContent = GFX_SHORT[gfxId] || gfx.label;
@@ -4053,6 +4298,9 @@ function setupMenu() {
   // Copie rapide des codes de partie en un clic
   $('netInfo').addEventListener('click', copyCodeClick);
   $('lbMine').addEventListener('click', copyCodeClick);
+  $('resumeRunBtn').onclick = resumeDungeon;
+  $('clearRunBtn').onclick = () => { clearSavedRun(); refreshMenu(); };
+  $('mapToggleBtn').onclick = () => { $('mapToggleBtn').blur(); toggleMapPeek(); };
 
   refreshMenu();
 }
@@ -4588,12 +4836,57 @@ async function boot() {
   game.loading = false;
   $('loading').classList.add('hidden');
   toMenu();
-  if (new URLSearchParams(location.search).has('dungeon')) startDungeon();
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('dungeon')) startDungeon();
+  if (qs.has('map')) openMapPreview(+(qs.get('map') || 42) || 42, +(qs.get('act') || 1) || 1);
   // ?debug : accès à la simulation depuis la console (tests dans le navigateur)
-  if (new URLSearchParams(location.search).has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; }, get gfx() { return gfxId; }, setQuality, renderer, scene, camera, debugGoto: dbgGoto };
-  else if (new URLSearchParams(location.search).has('fight') || DEMO) startMatch();
-  const warm = +new URLSearchParams(location.search).get('sim');
+  if (qs.has('debug')) window.spartiate = { get sim() { return sim; }, get views() { return F; }, get gfx() { return gfxId; }, setQuality, renderer, scene, camera, debugGoto: dbgGoto, previewMap: openMapPreview };
+  else if (qs.has('fight') || DEMO) startMatch();
+  const warm = +qs.get('sim');
   for (let i = 0; i < warm * 60; i++) step(DT);
+}
+
+// =====================================================================
+//  Aperçu interactif de l'écran de carte (?map ou spartiate.previewMap)
+// =====================================================================
+let mapPreviewState = null;
+function openMapPreview(seed = 42, act = 1) {
+  mapPreviewState = generateMap(seed, act);
+  renderMapPreview();
+  $('mapOv').classList.remove('hidden');
+}
+function closeMapPreview() {
+  mapPreviewState = null;
+  $('mapOv').classList.add('hidden');
+}
+function renderMapPreview() {
+  if (!mapPreviewState) return;
+  const done = isBossNode(mapPreviewState);
+  renderMap($('mapOv'), mapPreviewState, {
+    interactive: !done,
+    canClose: true,
+    onClose: closeMapPreview,
+    statusText: done ? 'Boss vaincu ! Clique sur « Acte suivant » pour générer la carte suivante.' : '',
+    onPick: (id) => {
+      advanceMap(mapPreviewState, id);
+      renderMapPreview();
+    },
+    previewControls: {
+      onReroll: () => { mapPreviewState = generateMap(((Math.random() * 99999) | 0) + 1, 1); renderMapPreview(); },
+      onNextAct: () => { mapPreviewState = generateMap(mapPreviewState.runSeed, mapPreviewState.act + 1); renderMapPreview(); },
+    },
+  });
+}
+function mapPreviewKey(e) {
+  if (!mapPreviewState || $('mapOv').classList.contains('hidden')) return false;
+  if (e.code === 'Escape') { e.preventDefault(); closeMapPreview(); return true; }
+  const d = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+  if (d) {
+    const ids = availableNextIds(mapPreviewState);
+    const id = ids[+d[1] - 1];
+    if (id) { e.preventDefault(); advanceMap(mapPreviewState, id); renderMapPreview(); return true; }
+  }
+  return false;
 }
 requestAnimationFrame(frame);
 boot();
