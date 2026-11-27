@@ -225,7 +225,7 @@ function stdMat(o) {
   return new THREE.MeshLambertMaterial(p);
 }
 
-const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc', archer: 'Archer', knight: 'Chevalier', zombie: 'Zombie', robot: 'Automate' };
+const CHARS = { soldier: 'Gladiateur', human: 'Mirmillon', orc: 'Orc', archer: 'Archère', knight: 'Chevalier', zombie: 'Zombie', robot: 'Automate' };
 
 // =====================================================================
 //  Rendu
@@ -2430,6 +2430,8 @@ function controlsHTML(mode, compact) {
 
 addEventListener('keydown', (e) => {
   if (keysEditorKey(e)) return;
+  if (e.code === 'Escape' && !$('guideOv').classList.contains('hidden')) { $('guideOv').classList.add('hidden'); return; }
+  if (e.code === 'Escape' && !$('gfxSec').classList.contains('hidden')) { $('gfxSec').classList.add('hidden'); $('gfxToggleBtn')?.classList.remove('active'); return; }
   if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
   // chez le marchand : touches 1 à 9 = prendre directement cette arme
   const dg = /^Digit([1-9])$/.exec(e.code), sh = localShopper();
@@ -2559,7 +2561,8 @@ function startMatch(m = { mode: cfg.mode, p1: cfg.p1, p2: cfg.p2, arena: cfg.are
   coop = null;
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause', 'itemCard'].forEach((id) => $(id).classList.add('hidden'));
+  ['menu', 'result', 'pause', 'itemCard', 'guideOv', 'gfxSec'].forEach((id) => $(id)?.classList.add('hidden'));
+  $('gfxToggleBtn')?.classList.remove('active');
   $('hud').classList.remove('hidden', 'dng', 'solo');
   $('it1').innerHTML = $('it2').innerHTML = '';
   uiItems[0] = uiItems[1] = null;
@@ -2605,6 +2608,7 @@ function endMatch() {
   else if (match.mode !== 'duo') title = game.wins[me] > game.wins[1 - me] ? 'VICTOIRE !' : 'DÉFAITE…';
   else title = a > b ? 'JOUEUR 1 GAGNE !' : 'JOUEUR 2 GAGNE !';
   $('resTitle').textContent = title;
+  $('result').classList.toggle('lose', match.mode !== 'duo' && game.wins[me] < game.wins[1 - me]);
   $('resSub').textContent = `${n1}  ${a} – ${b}  ${n2}  ·  ${ARENAS[match.arena].name}` + (guest ? '  ·  l’hôte peut lancer la revanche' : '');
   $('againBtn').classList.toggle('hidden', guest);
   $('result').classList.remove('hidden');
@@ -2738,8 +2742,10 @@ function camGoal(dt) {
   if (isDungeon() && game.phase !== 'loading') { dungeonCam(dt); return; }
   if (game.phase === 'menu' || game.phase === 'loading') {
     camAng += dt * 0.12;
-    camPos.set(Math.sin(camAng) * 8.6, 3.4, Math.cos(camAng) * 8.6);
-    camTgt.set(0, 1.0, 0);
+    const rx = Math.cos(camAng), rz = -Math.sin(camAng);
+    const off = game.phase === 'menu' && innerWidth > 880 ? 1.45 : 0;
+    camPos.set(Math.sin(camAng) * 8.6 - rx * off * 0.35, 3.4, Math.cos(camAng) * 8.6 - rz * off * 0.35);
+    camTgt.set(-rx * off, 1.0, -rz * off);
     return;
   }
   const mx = (F[0].rx + F[1].rx) / 2, mz = (F[0].rz + F[1].rz) / 2;
@@ -3684,17 +3690,31 @@ function shopSync() {
   shopUi.key = key;
   const list = spells ? SPELL_IDS : WEAPON_IDS, id = list[sel];
   setCls('shop', 'spells', spells);
+  $('shopMine').classList.toggle('hidden', id !== mine);
+  const stats = [];
   if (spells) {
     const S = SPELLS[id];
     $('shopName').textContent = `${SPELL_ICON[id] ?? ''} ${S.name}`;
-    $('shopMine').textContent = '✔ TON SORT';
-    $('shopDesc').textContent = `${S.desc} · recharge ${S.cd} s · ${spellOwner(id)}`;
+    $('shopMine').textContent = '✓ TON SORT';
+    $('shopDesc').textContent = S.desc;
+    stats.push(`<span>Recharge <b>${S.cd} s</b></span>`, `<span><b>${spellOwner(id)}</b></span>`);
   } else {
-    $('shopName').textContent = WEAPONS[id].name;
-    $('shopMine').textContent = '✔ TON ARME';
-    $('shopDesc').textContent = WEAPONS[id].desc;
+    const w = WEAPONS[id];
+    $('shopName').textContent = w.name;
+    $('shopMine').textContent = '✓ TON ARME';
+    $('shopDesc').textContent = w.desc;
+    if (w.summon) stats.push(`<span>Invocation <b>×${CAST.max} chiens</b></span>`);
+    else if (w.fire) stats.push(`<span>Dégâts <b>${FIRE.dmg} (zone)</b></span>`);
+    else if (w.bow) stats.push(`<span>Tir <b>${SHOT.dmg} dégâts</b></span>`);
+    else stats.push(`<span>Dégâts <b>${w.dmg}</b> · <b>${w.combo}</b> coup${w.combo > 1 ? 's' : ''}</span>`);
+    stats.push(`<span>Portée <b>${w.bow ? 'Distance' : w.reach >= 1.9 ? 'Longue' : w.reach <= 1.2 ? 'Courte' : 'Moyenne'}</b></span>`);
+    stats.push(`<span>Garde <b>${w.guard <= 0.65 ? 'Excellente' : w.guard <= 1.05 ? 'Bonne' : 'Fragile'}</b></span>`);
+    if (w.tank) stats.push(`<span>Armure <b>−${Math.round(w.tank * 100)} %</b></span>`);
+    if (w.crush) stats.push(`<span>Brise-garde <b>×${w.crush}</b></span>`);
+    if (w.run > 1.05) stats.push('<span>Course <b>Rapide</b></span>');
+    else if (w.run < 0.92) stats.push('<span>Course <b>Lourde</b></span>');
   }
-  $('shopMine').classList.toggle('hidden', id !== mine);
+  $('shopStats').innerHTML = stats.map((s) => `<span class="wstat">${s}</span>`).join('');
   $('shopList').innerHTML = list.map((wid, n) =>
     `<button class="${n === sel ? 'on' : ''}${wid === mine ? ' mine' : ''}" data-k="${n}"><kbd>${n + 1}</kbd>${spells ? `${SPELL_ICON[wid] ?? ''} ${esc(SPELLS[wid].name)}` : esc(SHOP_SHORT[wid] ?? WEAPONS[wid].name)}</button>`).join('');
   $('shopList').querySelectorAll('button').forEach((bt) => { bt.onclick = () => { shopReq[h] = +bt.dataset.k; }; });
@@ -4020,7 +4040,8 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
   coop = null;
   ac();
   game.paused = false;
-  ['menu', 'result', 'pause', 'itemCard'].forEach((id) => $(id).classList.add('hidden'));
+  ['menu', 'result', 'pause', 'itemCard', 'guideOv', 'gfxSec'].forEach((id) => $(id)?.classList.add('hidden'));
+  $('gfxToggleBtn')?.classList.remove('active');
   const np = m.mode === 'solo' ? 1 : 2;
   $('hud').classList.remove('hidden');
   $('hud').classList.add('dng');
@@ -4070,6 +4091,8 @@ function startDungeon(m = { mode: cfg.mode === 'duo' ? 'duo' : 'solo', p1: cfg.p
 function endDungeon() {
   if (dng.endShown) return;
   dng.endShown = true;
+  $('resDefis').innerHTML = '';
+  $('result').classList.add('lose');
   const g = sim.g, rec = dungeonRecord(), best = g.room > rec;
   const me = sim.f[localHeroes()[0] ?? 0];     // à deux sur un clavier : le compte suit le joueur 1
   if (me) accountRun(g.room, me.kills, me.kind, me.wpn);
@@ -4160,8 +4183,10 @@ function dungeonHud() {
 function dungeonCam(dt) {
   if (game.phase === 'menu') {
     camAng += dt * 0.1;
-    camPos.set(Math.sin(camAng) * 12, 10, Math.cos(camAng) * 12);
-    camTgt.set(0, 0.6, 0);
+    const rx = Math.cos(camAng), rz = -Math.sin(camAng);
+    const off = innerWidth > 880 ? 2.1 : 0;
+    camPos.set(Math.sin(camAng) * 12 - rx * off * 0.35, 10, Math.cos(camAng) * 12 - rz * off * 0.35);
+    camTgt.set(-rx * off, 0.6, -rz * off);
     return;
   }
   // chez le marchand : la caméra passe derrière le héros (hors duo même clavier pour ne pas décaler les touches de l'autre joueur)
@@ -4205,6 +4230,36 @@ function dungeonCam(dt) {
 //  Menu
 // =====================================================================
 function saveCfg() { try { localStorage.setItem('spartiate-cfg', JSON.stringify(cfg)); } catch (e) { /* ignoré */ } }
+const GFX_SHORT = { low: 'Bas', med: 'Moyen', high: 'Élevé' };
+const GFX_DESC = {
+  low: 'Petit PC : sans ombres, éclairage allégé et effets réduits.',
+  med: 'Bon équilibre entre qualité visuelle et fluidité.',
+  high: 'Gros PC : ombres fines, effets et détails complets.',
+};
+function syncSoundUi() {
+  const lbl = $('soundLbl');
+  if (lbl) lbl.textContent = soundOn ? 'Son' : 'Muet';
+  $('soundBtn')?.classList.toggle('muted', !soundOn);
+  const pb = $('pauseSoundBtn');
+  if (pb) pb.textContent = 'Son : ' + (soundOn ? 'Activé' : 'Coupé');
+}
+function openGuide(tab = 'rules') {
+  $('guideOv').classList.remove('hidden');
+  $('guideTabs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  $('guideTabRules').classList.toggle('hidden', tab !== 'rules');
+  $('guideTabHeroes').classList.toggle('hidden', tab !== 'heroes');
+}
+function copyCodeClick(ev) {
+  const el = ev.target.closest('.code');
+  if (!el || !navigator.clipboard) return;
+  const code = el.dataset.code || el.textContent.trim();
+  if (!/^[A-Z0-9]{4}$/i.test(code)) return;
+  el.dataset.code = code;
+  navigator.clipboard.writeText(code).then(() => {
+    el.textContent = 'COPIÉ !';
+    setTimeout(() => { if (el.isConnected) el.textContent = code; }, 1100);
+  }).catch(() => {});
+}
 function refreshMenu() {
   document.querySelectorAll('.seg').forEach((seg) => {
     seg.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.val === String(cfg[seg.dataset.key])));
@@ -4216,33 +4271,66 @@ function refreshMenu() {
     const lock = human && !un.includes(b.dataset.val);
     b.disabled = lock;
     const sp = SPELLS[b.dataset.val];
+    const h = HEROES[b.dataset.val];
     b.title = lock
       ? `Verrouillé : réussis un défi du ${HEROES[HERO_IDS[HERO_IDS.indexOf(b.dataset.val) - 1]]?.name ?? ''}`
-      : (sp ? `Sort : ${sp.name} (${sp.cd} s) — ${sp.desc}` : '');
+      : `${h ? h.desc + ' · ' : ''}${sp ? `Sort : ${sp.name} (${sp.cd} s) — ${sp.desc}` : ''}`;
   });
   document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.val === cfg.arena));
   const online = cfg.mode === 'online', dg = cfg.game === 'dungeon';
   $('diffSec').classList.toggle('hidden', dg || cfg.mode !== 'solo');
   $('netSec').classList.toggle('hidden', !online);
+  $('fightersBox').classList.toggle('hidden', dg);
   $('p2Sec').classList.toggle('hidden', online || dg);
   $('p1Sec').classList.toggle('hidden', dg);   // en donjon, on choisit dans la salle d'armes
-  const modeTxt = dg ? { solo: 'Seul', duo: '2 joueurs (même clavier)', online: 'En ligne (coop)' }
-    : { solo: '1 joueur contre l\'IA', duo: '2 joueurs', online: 'En ligne (réseau local)' };
-  document.querySelectorAll('[data-key="mode"] button').forEach((b) => { b.textContent = modeTxt[b.dataset.val]; });
+  $('dngPreview').classList.toggle('hidden', !dg);
+  const modeTxt = dg ? { solo: 'Seul', duo: '2 joueurs', online: 'En ligne' }
+    : { solo: 'Solo vs IA', duo: '2 joueurs', online: 'En ligne' };
+  document.querySelectorAll('[data-key="mode"] button').forEach((b) => {
+    const lbl = b.querySelector('.m-lbl');
+    if (lbl) lbl.textContent = modeTxt[b.dataset.val];
+    else b.textContent = modeTxt[b.dataset.val];
+  });
   $('arenaSec').classList.toggle('hidden', dg || (online && net.role === 'guest'));
   $('p1Lbl').textContent = dg && cfg.mode === 'solo' ? 'Ton héros' : online ? 'Ton personnage' : 'Joueur 1';
-  $('menuSub').textContent = dg ? 'Les profondeurs du donjon' : 'Les arènes des petits gladiateurs';
+  $('menuSub').textContent = dg ? 'Expédition rogue-like · Salles & boss' : 'Duels d’arène des petits gladiateurs';
   refreshGo();
   $('p2Lbl').textContent = dg ? 'Joueur 2 (héros)' : cfg.mode === 'solo' ? 'Adversaire (IA)' : 'Joueur 2';
+
+  // Aperçu du héros choisi (mode Arène)
+  const sp1 = SPELLS[cfg.p1], h1 = HEROES[cfg.p1];
+  if (!dg && sp1 && h1) {
+    $('heroSpotlight').innerHTML = `<span class="hs-badge">SORT · ${sp1.cd} s</span><span><b>${esc(h1.name)}</b> — ${esc(sp1.name)} : ${esc(sp1.desc)}</span>`;
+  }
+
+  // Record affiché sur la carte Donjon
+  const rec = Math.max(dungeonRecord(), compte.profil?.record || 0);
+  $('dngRecBadge').textContent = rec ? `🏆 Record : Salle ${rec}` : 'Nouvelle expédition';
+
+  // Qualité graphique dans la barre d'outils
+  if ($('gfxToggleLbl')) $('gfxToggleLbl').textContent = GFX_SHORT[gfxId] || gfx.label;
+  if ($('gfxDesc')) $('gfxDesc').textContent = GFX_DESC[gfxId] || '';
+
+  // Résumé rapide 1 ligne sous le bouton Jouer
+  const a = KEYSETS[0], b = KEYSETS[1];
+  const k = (act) => kb(key1(a, act) ?? key1(b, act));
+  $('qhKeys').innerHTML = `${kb(key1(a, 'u'))}${kb(key1(a, 'l'))}${kb(key1(a, 'd'))}${kb(key1(a, 'r'))} Bouger · ${k('atk')} Att. · ${k('blk')} Bloc · ${k('roll')} Roulade · ${k('spell')} Sort`;
+
+  // Fiches des héros dans le Guide modal
+  $('guideHeroGrid').innerHTML = HERO_IDS.map((id) => {
+    const h = HEROES[id], s = SPELLS[id], locked = !un.includes(id);
+    return `<div class="gh-card${locked ? ' locked' : ''}"><div class="gh-head"><b>${locked ? '🔒 ' : ''}${esc(h.name)}</b><span>${esc(h.desc)}</span></div>`
+      + `<div class="gh-spell"><strong>${esc(s.name)}</strong> (${s.cd} s) — ${esc(s.desc)}</div></div>`;
+  }).join('');
+
   if (dg) {
-    const rec = dungeonRecord();
     $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
-      `<div class="row" style="margin-top:8px"><b>Donjon :</b> tout commence dans la <b>salle d'armes</b> : marche sur la dalle devant une statue pour prendre ce héros (chacun a un petit talent), va voir le <b>vieux marchand</b> pour choisir ton arme (glaive, lance, pavois, hache, marteau, sceptre de feu, grimoire ou arc), puis passe la porte. Traverse ensuite les salles une à une. Élimine tous les ennemis pour ouvrir la porte du fond, ouvre le <b>coffre</b> pour choisir une bénédiction (soin, force, vitalité…), puis franchis la porte. Plus bas, des <b>estrades</b> (monte par l'escalier ou en sautant : d'en haut, on frappe sans être touché au sol) et des <b>pièges à pics</b> (la poussière annonce leur sortie). Un <b>boss</b> garde chaque 5<sup>e</sup> salle : le <b>chef orc</b>, puis le <b>colosse d'airain</b> (son sol rougit avant qu'il retombe : saute ou roule ; s'il charge contre un mur, il reste sonné). Tu te tournes tout seul vers l'ennemi le plus proche · <b>À deux</b> : un héros tombé se relève à la salle suivante, la partie s'arrête quand les deux tombent · Échap = pause` +
+      `<div class="row" style="margin-top:8px"><b>Donjon :</b> tout commence dans la <b>salle d'armes</b> : marche sur la dalle devant une statue pour prendre ce héros (chacun a un talent), va voir le <b>vieux marchand</b> pour choisir ton arme (glaive, lance, pavois, hache, marteau, sceptre de feu, grimoire, gants ou arc) et le <b>sorcier</b> pour ton sort (<kbd>Q</kbd>), puis passe la porte. Traverse ensuite les salles une à une : élimine tous les ennemis, ramasse les <b>objets</b> (salles au trésor, piédestaux des boss) en marchant dessus, puis franchis la porte. Plus bas, des <b>estrades</b> (monte par l'escalier ou en sautant) et des <b>pièges à pics</b> (la poussière annonce leur sortie). Un <b>boss</b> garde chaque 5<sup>e</sup> salle (chef orc, colosse d'airain, Cerbère). Tu te tournes tout seul vers l'ennemi le plus proche · <b>À deux</b> : un héros tombé peut être réanimé en bloquant près de lui, ou se relève à la salle suivante · <kbd>Échap</kbd> pause` +
       (rec ? `<br><b>Record :</b> salle ${rec}` : '') + '</div>';
     return;
   }
   $('keysMenu').innerHTML = controlsHTML(cfg.mode, false) +
-    `<div class="row" style="margin-top:8px"><b>Astuces :</b> l'arène est en 3D : bouge dans toutes les directions, la caméra tourne autour du combat · un <b>pas de côté</b> (${esc(lab(key1(KEYSETS[0], 'u')))} / ${esc(lab(key1(KEYSETS[0], 'd')))}) fait rater les coups lents · le blocage use ta garde · la <b>parade</b> au bon moment étourdit l'attaquant · <b>briser la garde</b> traverse blocage et parade, mais on l'esquive en <b>sautant</b>, en se décalant ou en frappant en premier · pris dans un enchaînement ? fais une <b>roulade</b> (invincible pendant la rotation) · la <b>barre verte</b> est ton endurance : attaques, roulades, sauts et parades en consomment, laisse-la remonter · Échap = pause</div>`;
+    `<div class="row" style="margin-top:8px"><b>Astuces :</b> l'arène est en 3D : bouge dans toutes les directions, la caméra tourne autour du combat · un <b>pas de côté</b> (${esc(lab(key1(KEYSETS[0], 'u')))} / ${esc(lab(key1(KEYSETS[0], 'd')))}) fait rater les coups lents · le blocage use ta garde · la <b>parade</b> au bon moment étourdit l'attaquant · <b>briser la garde</b> traverse blocage et parade, mais on l'esquive en <b>sautant</b>, en se décalant ou en frappant en premier · pris dans un enchaînement ? fais une <b>roulade</b> (invincible pendant la rotation) · la <b>barre verte</b> est ton endurance : laisse-la remonter · <kbd>Échap</kbd> pause</div>`;
 }
 // ---------- Configuration des touches ----------
 const KEYS_HINT = 'Clique sur une case puis appuie sur la touche voulue. <kbd>Suppr</kbd> vide la case, <kbd>Échap</kbd> annule.';
@@ -4396,7 +4484,41 @@ function setupMenu() {
   }
   $('kDone').onclick = closeKeysEditor;
   $('kReset').onclick = () => { KEYSETS = cloneKeys(DEFAULT_KEYSETS); keysChanged('Touches par défaut rétablies.'); };
-  $('soundBtn').onclick = () => { soundOn = !soundOn; $('soundBtn').textContent = 'Son : ' + (soundOn ? 'activé' : 'coupé'); };
+  const toggleSound = () => { soundOn = !soundOn; syncSoundUi(); };
+  $('soundBtn').onclick = toggleSound;
+  if ($('pauseSoundBtn')) $('pauseSoundBtn').onclick = toggleSound;
+  syncSoundUi();
+
+  // Popover Graphismes dans la barre d'outils du menu
+  $('gfxToggleBtn').onclick = (ev) => {
+    ev.stopPropagation();
+    const open = $('gfxSec').classList.toggle('hidden');
+    $('gfxToggleBtn').classList.toggle('active', !open);
+  };
+  $('gfxSec').onclick = (ev) => ev.stopPropagation();
+  document.addEventListener('click', () => {
+    if (!$('gfxSec').classList.contains('hidden')) {
+      $('gfxSec').classList.add('hidden');
+      $('gfxToggleBtn').classList.remove('active');
+    }
+  });
+
+  // Modal Guide & Héros
+  $('guideBtn').onclick = () => openGuide('rules');
+  $('qhGuideBtn').onclick = () => openGuide('rules');
+  $('guideClose').onclick = () => $('guideOv').classList.add('hidden');
+  $('guideCloseTop').onclick = () => $('guideOv').classList.add('hidden');
+  $('guideKeysBtn').onclick = () => { $('guideOv').classList.add('hidden'); openKeysEditor(); };
+  $('guideOv').onclick = (ev) => { if (ev.target === $('guideOv')) $('guideOv').classList.add('hidden'); };
+  $('keysOv').onclick = (ev) => { if (ev.target === $('keysOv') && !keyCapture) closeKeysEditor(); };
+  $('guideTabs').querySelectorAll('button').forEach((b) => {
+    b.onclick = () => openGuide(b.dataset.tab);
+  });
+
+  // Copie rapide des codes de partie en un clic
+  $('netInfo').addEventListener('click', copyCodeClick);
+  $('lbMine').addEventListener('click', copyCodeClick);
+
   refreshMenu();
 }
 
@@ -4722,8 +4844,10 @@ function accountRender() {
     $('acProfil').innerHTML = `<b>${esc(p.pseudo)}</b> · record : salle <b>${p.record}</b> · ${p.parties} partie${p.parties > 1 ? 's' : ''} · `
       + `${p.ennemis} ennemi${p.ennemis > 1 ? 's' : ''} · ${p.boss} boss`;
   }
-  $('acTop').textContent = compte.top ? 'Fermer le classement' : 'Classement';
-  $('acDefis').textContent = compte.defis ? 'Fermer les défis' : 'Défis';
+  $('acTop').textContent = compte.top ? 'Fermer' : 'Classement';
+  $('acTop').classList.toggle('accent', !!compte.top);
+  $('acDefis').textContent = compte.defis ? 'Fermer' : 'Défis';
+  $('acDefis').classList.toggle('accent', !!compte.defis);
   $('acDefisList').classList.toggle('hidden', !compte.defis);
   if (compte.defis) $('acDefisList').innerHTML = challengesHTML(compte.defis);
   $('acTopList').classList.toggle('hidden', !compte.top);

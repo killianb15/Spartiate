@@ -122,11 +122,10 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   (événement), lames spectrales `k: 2` dans `syncArrows`, `vaultDecor`. Icônes : `emojiMat` (cache gardé par `keep`).
   En ligne : `packFighter` envoie `st` (bits des états), `items/tf/combos/orbit/minors/took/drunk`, et `pk`.
   Tests : `tests/items.test.js` ; scénario navigateur `objets` ; `tools/lobby-test.mjs` vérifie l'invité en salle au trésor.
-- **Équilibrage à deux** (`COOP` dans dungeon.js, `coop(np, clé)`) : objectif « aussi dur qu'en solo » par joueur
-  (dégâts reçus par héros et durée des salles). Salles normales : ×2 ennemis (max 10), PV ×1,3, dégâts ×1,25 ;
-  boss : PV ×2,2, dégâts ×2, attaques spéciales ×0,6 d'attente ; escorte du chef orc ×1,5 + 1 (max 6). Réglé et
-  vérifié avec `node tools/equilibrage.mjs 16 2,3,5,8,10,15,20 tank [clé=valeur…]` (héros joués par l'IA, héros
-  increvables avec `tank`, affiche les rapports à deux / seul ; objectif 1 et 1). Tests : `tests/coop.test.js`.
+- **Équilibrage à deux** (`COOP` dans dungeon.js, `coop(np, clé)`) : adapté pour rester jouable au corps à corps
+  (notamment avec un allié à distance). Salles normales : ×1,4 ennemis (max 7), PV ×1,15, dégâts ×1 ;
+  boss : PV ×1,65, dégâts ×1,1, attaques spéciales ×0,85 d'attente ; escorte du chef orc ×1,5 (max 5). Mesurable avec
+  `node tools/equilibrage.mjs 16 2,3,5,8,10,15,20 tank [clé=valeur…]`. Tests : `tests/coop.test.js`.
 - **Héros** (`HEROES` dans dungeon.js, avec un talent) : soldier (Gladiateur), human (Mirmillon), orc,
   archer (Archère), knight (Chevalier), zombie, robot (Automate). `equip(p, kind, wpn)` applique stats + talent.
 - **Armes** (`WEAPONS` dans sim.js, `wpnOf(f)`) : sword, spear, tower, axe, hammer, staff (sceptre de feu),

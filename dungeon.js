@@ -78,11 +78,11 @@ export const BOSS = {
   fire: { wind: 0.75, windRage: 0.5, dur: 1.6, R: 4.8, half: 0.62, turn: 1.0, turnRage: 1.5, tick: 0.2, dmg: 6, guard: 9, knock: 1.2 },
 };
 
-// Adaptation au nombre de joueurs (à deux) : chacun doit subir autant qu'en solo (dégâts reçus par héros,
-// durée des salles). Réglée avec tools/equilibrage.mjs (héros joués par l'IA, mêmes salles seul et à deux).
+// Adaptation au nombre de joueurs (à deux) : un peu plus d'ennemis et de PV sans multiplier les dégâts
+// par deux, pour que le joueur au corps à corps reste jouable face à l'aggro (notamment avec un allié à distance).
 // count/cap : nombre d'ennemis des salles normales ; hp, pow : PV et dégâts des ennemis ; boss* : boss ;
 // escort/escortCap : escorte du chef orc
-export const COOP = { count: 2, cap: 10, hp: 1.3, pow: 1.25, bossHp: 2.2, bossPow: 2, bossCd: 0.6, escort: 1.5, escortCap: 6 };
+export const COOP = { count: 1.4, cap: 7, hp: 1.15, pow: 1, bossHp: 1.65, bossPow: 1.1, bossCd: 0.85, escort: 1.5, escortCap: 5 };
 // multiplicateur de COOP pour np joueurs (1 en solo)
 const coop = (np, k) => (np > 1 ? COOP[k] : 1);
 
@@ -418,8 +418,8 @@ export class DungeonSim extends Sim {
     // ennemis (plus nombreux à deux)
     const list = [];
     // le chef orc vient avec des orcs ; le colosse arrive seul (ses renforts viennent quand il enrage)
-    // (à deux, son escorte grandit : x COOP.escort + 1, au plus COOP.escortCap)
-    const escort = Math.min(4, n / BOSS_EVERY), escortN = np > 1 ? Math.min(COOP.escortCap, Math.ceil(escort * COOP.escort) + 1) : escort;
+    // (à deux, son escorte grandit : x COOP.escort, au plus COOP.escortCap)
+    const escort = Math.min(4, n / BOSS_EVERY), escortN = np > 1 ? Math.min(COOP.escortCap, Math.ceil(escort * COOP.escort)) : escort;
     if (boss) { list.push(bossId); if (bossId === 'boss') for (let k = 0; k < escortN; k++) list.push('grunt'); }
     else {
       let count = Math.min(5, 1 + Math.floor(n / 2));
