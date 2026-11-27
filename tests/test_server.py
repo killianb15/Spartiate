@@ -8,6 +8,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import unittest
 import urllib.request
@@ -347,6 +348,132 @@ class ServerTest(unittest.TestCase):
         x.send_json(t='join', code=code)
         self.assertEqual(x.recv_json()['t'], 'error')
 
+
+
+class FakeApi:
+    """Fausse API des comptes : jeton « jeton-<pseudo>-xxxxxxxxxxxxxxxx » ; AMIS = amitiés acceptées."""
+    AMIS = {'Achille': ['Patrocle', 'Ulysse'], 'Patrocle': ['Achille'], 'Ulysse': ['Achille'], 'Hector': []}
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        amis = self.AMIS
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                auth = self.headers.get('Authorization', '')
+                nom = auth.split('-')[1] if auth.startswith('Bearer jeton-') else ''
+                if self.path == '/api/sante':
+                    st, r = 200, {'ok': True}
+                elif nom not in amis:
+                    st, r = 401, {'erreur': 'Session expirée.'}
+                elif self.path == '/api/profil':
+                    st, r = 200, {'profil': {'pseudo': nom}}
+                elif self.path == '/api/amis':
+                    st, r = 200, {'amis': [{'pseudo': a, 'record': 1, 'parties': 1} for a in amis[nom]], 'recues': [], 'envoyees': []}
+                else:
+                    st, r = 404, {}
+                data = json.dumps(r).encode()
+                self.send_response(st)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def jeton(nom):
+    return f'jeton-{nom}-' + 'x' * 16
+
+
+class AmisTest(ServerTest):
+    """Amis en ligne (présence, salons, invitations) avec une fausse API des comptes."""
+
+    def setUp(self):
+        self.fake = FakeApi()
+        os.environ['SPARTIATE_API'] = f'http://127.0.0.1:{self.fake.port}'
+        try:
+            super().setUp()
+        finally:
+            del os.environ['SPARTIATE_API']
+
+    def tearDown(self):
+        super().tearDown()
+        self.fake.close()
+
+    def login(self, nom):
+        c = self.client()
+        c.send_json(t='ident', token=jeton(nom))
+        self.assertEqual(c.recv_json(), {'t': 'ident', 'name': nom})
+        return c
+
+    def friends(self, c):
+        c.send_json(t='friends')
+        m = c.recv_json()
+        self.assertEqual(m['t'], 'friends')
+        return {a['name']: a for a in m['friends']}
+
+    def test_presence_et_salon_des_amis(self):
+        a = self.login('Achille')
+        f = self.friends(a)
+        self.assertEqual(set(f), {'Patrocle', 'Ulysse'})
+        self.assertFalse(f['Patrocle']['online'])
+        p = self.login('Patrocle')
+        self.login('Hector')                  # pas son ami : jamais montré
+        time.sleep(0.1)
+        f = self.friends(a)
+        self.assertEqual(set(f), {'Patrocle', 'Ulysse'})
+        self.assertEqual((f['Patrocle']['online'], f['Patrocle']['code'], f['Ulysse']['online']), (True, '', False))
+        p.send_json(t='open', kind='orc', wpn='axe', token=jeton('Patrocle'))
+        code = p.recv_json()['code']
+        f = self.friends(a)
+        self.assertEqual(f['Patrocle']['code'], code)
+        self.assertEqual(list(f)[0], 'Patrocle', 'salon ouvert en tête')
+        a.send_json(t='join', code=code)       # rejoindre son salon
+        self.assertEqual(a.recv_json()['t'], 'joined')
+        self.assertEqual(p.recv_json()['t'], 'peer')
+        u = self.login('Ulysse')
+        f = self.friends(u)
+        self.assertTrue(f['Achille']['busy'])
+        self.assertEqual(f['Achille']['code'], '')
+
+    def test_sans_compte_ni_faux_jeton(self):
+        c = self.client()
+        c.send_json(t='ident', token='faux' * 10)
+        self.assertEqual(c.recv_json(), {'t': 'ident', 'name': ''})
+        self.assertEqual(self.friends(c), {})
+        c.send_json(t='invite', name='Achille')
+        c.expect_silence()
+
+    def test_invitation_entre_amis_seulement(self):
+        a, p, h = self.login('Achille'), self.login('Patrocle'), self.login('Hector')
+        a.send_json(t='invite', name='Patrocle')            # sans salon ouvert
+        self.assertEqual(a.recv_json()['t'], 'error')
+        time.sleep(2.1)                                     # une invitation toutes les 2 s
+        a.send_json(t='open', kind='soldier', wpn='sword', token=jeton('Achille'))
+        code = a.recv_json()['code']
+        a.send_json(t='invite', name='patrocle')
+        self.assertEqual(p.recv_json(), {'t': 'invite', 'name': 'Achille', 'code': code})
+        self.assertEqual(a.recv_json(), {'t': 'invited', 'name': 'Patrocle', 'ok': True})
+        a.send_json(t='invite', name='Patrocle')            # trop tôt : ignorée
+        p.expect_silence()
+        time.sleep(2.1)
+        a.send_json(t='invite', name='Hector')              # pas son ami
+        self.assertEqual(a.recv_json()['t'], 'error')
+        h.expect_silence()
+        h.send_json(t='open', kind='orc', wpn='axe', token=jeton('Hector'))
+        h.recv_json()
+        h.send_json(t='invite', name='Achille')             # Hector n'est l'ami de personne
+        self.assertEqual(h.recv_json()['t'], 'error')
+        a.expect_silence()
 
 
 class ProxyTest(unittest.TestCase):

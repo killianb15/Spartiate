@@ -46,7 +46,13 @@ MAX_BODY = 4096     # corps d'une requête /api (JSON)
 # API des comptes (Rust, 127.0.0.1 seulement) : on ne lui relaie que ces routes
 API = urlsplit(os.environ.get('SPARTIATE_API', 'http://127.0.0.1:8124'))
 API_ROUTES = {('GET', '/api/profil'), ('GET', '/api/classement'), ('GET', '/api/defis'), ('POST', '/api/inscription'),
-              ('POST', '/api/connexion'), ('POST', '/api/deconnexion'), ('POST', '/api/partie')}
+              ('POST', '/api/connexion'), ('POST', '/api/deconnexion'), ('POST', '/api/partie'),
+              ('GET', '/api/classement/amis'), ('GET', '/api/amis'), ('POST', '/api/amis/ajouter'), ('POST', '/api/amis/retirer')}
+# amis en ligne : la liste des amis (API) d'une connexion est gardée FRIENDS_TTL s ; une invitation au plus
+# toutes les INVITE_GAP s par connexion ; 'ident' (vérification du jeton par l'API) au plus toutes les IDENT_GAP s
+FRIENDS_TTL = 5
+INVITE_GAP = 2
+IDENT_GAP = 2
 API_DOWN = 'Comptes indisponibles : le service des comptes ne répond pas (docker compose up -d).'
 TOKEN_RE = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
 # derrière un proxy de confiance (nginx du VPS) : l'adresse du joueur est dans X-Real-IP, mais seulement
@@ -107,6 +113,10 @@ class Conn:
         self.last = time.monotonic()
         self.drop_start = self.last
         self.drops = 0
+        self.name = ''          # pseudo du compte (vérifié par l'API), '' sans compte
+        self.token = ''         # jeton de session (pour demander à l'API la liste de ses amis)
+        self.friends = None     # (heure, {pseudo en minuscules: pseudo}) : cache de la liste des amis
+        self.last_ident = self.last_invite = 0.0
 
     def allow(self):
         """Token bucket. Renvoie True si le message est accepté, False s'il doit être ignoré,
@@ -248,12 +258,89 @@ def pseudo_of(token):
     return str(p.get('pseudo', ''))[:16] if isinstance(p, dict) else ''
 
 
+def ident(c, m):
+    """La connexion annonce son compte : pseudo vérifié par l'API (présence visible de ses amis)."""
+    now = time.monotonic()
+    if now - c.last_ident < IDENT_GAP:
+        return
+    c.last_ident = now
+    token = m.get('token')
+    name = pseudo_of(token)
+    with lock:
+        c.name, c.token, c.friends = name, (token if name else ''), None
+    c.send_json(t='ident', name=name)
+
+
+def friends_of(c):
+    """Amis (acceptés) du compte de cette connexion, d'après l'API : {pseudo en minuscules: pseudo}."""
+    if not c.token:
+        return {}
+    now = time.monotonic()
+    if c.friends and now - c.friends[0] < FRIENDS_TTL:
+        return c.friends[1]
+    st, r = api_call('GET', '/api/amis', token=c.token)
+    lst = r.get('amis') if st == 200 else None
+    out = {}
+    for a in lst if isinstance(lst, list) else []:
+        n = a.get('pseudo') if isinstance(a, dict) else None
+        if isinstance(n, str) and n:
+            out[n.lower()] = n[:16]
+    c.friends = (now, out)
+    return out
+
+
+def friends_state(c):
+    """État des amis de cette connexion : en ligne ou non, salon ouvert à rejoindre, en partie.
+    Seuls ses amis (amitié acceptée des deux côtés) sont renseignés."""
+    fr = friends_of(c)
+    with lock:
+        online = {x.name.lower() for x in CONNS if x.name}
+        halls, busy = {}, set()
+        for code, r in rooms.items():
+            n = r['host'].name.lower()
+            if r['guest'] is None and r['hall'] is not None:
+                halls[n] = code
+            elif r['guest'] is not None:
+                busy.add(n)
+                if r['guest'].name:
+                    busy.add(r['guest'].name.lower())
+    out = [{'name': n, 'online': k in online, 'code': halls.get(k, ''), 'busy': k in busy} for k, n in fr.items()]
+    out.sort(key=lambda a: (not a['code'], not a['online'], a['name'].lower()))
+    c.send_json(t='friends', friends=out)
+
+
+def invite(c, m):
+    """L'hôte d'un salon ouvert invite un ami (seulement un ami, seulement depuis son salon)."""
+    now = time.monotonic()
+    if now - c.last_invite < INVITE_GAP or not c.name:
+        return
+    c.last_invite = now
+    target = str(m.get('name', ''))[:16].lower()
+    fr = friends_of(c)
+    if target not in fr:
+        c.send_json(t='error', msg='Tu ne peux inviter que tes amis.')
+        return
+    with lock:
+        r = rooms.get(c.room)
+        code = c.room if r and c.is_host and r['hall'] is not None and r['guest'] is None else ''
+        dest = [x for x in CONNS if x.name.lower() == target and x is not c]
+    if not code:
+        c.send_json(t='error', msg='Ouvre d’abord ton salon pour inviter un ami.')
+        return
+    for x in dest:
+        x.send_json(t='invite', name=c.name, code=code)
+    c.send_json(t='invited', name=fr[target], ok=bool(dest))
+
+
 def hall_of(m):
     """Description publique d'un salon (seulement des chaînes courtes) ; le pseudo vient du compte
     (jeton de session vérifié par l'API), jamais de ce que le joueur écrit."""
     h = {k: str(m.get(k, ''))[:n] for k, n in HALL_KEYS.items()}
     h['name'] = pseudo_of(m.get('token'))
     return h
+
+
+CONNS = set()       # connexions WebSocket ouvertes (présence des amis)
 
 
 def update_hall(c, m):
@@ -461,6 +548,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             conns += 1
         c = Conn(self)
+        with lock:
+            CONNS.add(c)
         try:
             while True:
                 msg = c.recv()
@@ -486,7 +575,17 @@ class Handler(SimpleHTTPRequestHandler):
                 if t == 'create':
                     create(c)
                 elif t == 'open':
-                    create(c, hall_of(m))
+                    h = hall_of(m)
+                    with lock:
+                        if h['name']:
+                            c.name, c.token, c.friends = h['name'], m.get('token'), None
+                    create(c, h)
+                elif t == 'ident':
+                    ident(c, m)
+                elif t == 'friends':
+                    friends_state(c)
+                elif t == 'invite':
+                    invite(c, m)
                 elif t == 'list':
                     list_halls(c)
                 elif t in ('close', 'leave'):
@@ -502,6 +601,7 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             with lock:
                 conns -= 1
+                CONNS.discard(c)
             leave(c)
             self.close_connection = True
 

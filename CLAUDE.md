@@ -19,8 +19,9 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
 
 ## Comptes joueurs (api/, Rust)
 - `api/` : axum + sqlx (PostgreSQL), migrations dans `api/migrations/` (jamais modifier une migration
-  passée : en ajouter une, ex. amis/guildes). Routes : sante (interne), inscription, connexion,
-  deconnexion, profil, partie (fin de donjon), classement. Argon2id, jetons (empreinte SHA-256 en base),
+  passée : en ajouter une, ex. guildes). Routes : sante (interne), inscription, connexion,
+  deconnexion, profil, partie (fin de donjon), classement (+ `moi` : sa place), classement/amis, amis, amis/ajouter,
+  amis/retirer (`api/src/amis.rs`). Argon2id, jetons (empreinte SHA-256 en base),
   freins par adresse (`FREIN_CONNEXION/INSCRIPTION`, adresse = `X-Real-IP` posé par serveur.py).
 - `docker-compose.yml` : **tout en conteneurs** : `jeu` (Dockerfile à la racine, python:alpine, utilisateur `jeu`,
   `.dockerignore` en liste blanche : serveur.py, index.html, *.js, assets), publié sur `SPARTIATE_PORT` (8123, ouvert
@@ -48,6 +49,16 @@ les textes du jeu et les échanges avec l'utilisateur sont **en français**.
   `endDungeon` envoie `{salle, ennemis: kills, heros, arme}` à /api/partie qui renvoie `nouveaux` (annoncés
   dans `#resDefis`). Panneau « Défis » du menu (`accountChallenges`, `challengesHTML`). Garder `HEROS`/`ARMES`
   de defis.rs alignés sur HEROES/WEAPONS. Scénario navigateur : `browser-test.mjs compte` (sur l'API de test).
+- **Amis** (`0003_amis.sql` : table `amis(de, vers, accepte)`, une ligne par paire ; `AMIS_MAX` 100, `ENVOYEES_MAX` 20
+  demandes en attente). « Ajouter » envoie une demande ou accepte celle reçue ; « retirer » sert aussi à refuser/annuler.
+  Classements (`classes()` : rang mondial par `row_number`, héros/arme de la meilleure partie) : mondial (10 + `moi`),
+  entre amis (rang mondial en info-bulle). Menu : boutons Classement (onglets Monde / Amis) et Amis (`accountFriends`,
+  `friendAct`, `friendsHTML`, `topHTML`). En ligne (serveur.py) : `{t:'ident', token}` à l'ouverture du WebSocket
+  (pseudo vérifié par l'API → `Conn.name/token`, présence), `{t:'friends'}` (amis d'après GET /api/amis, cache
+  `FRIENDS_TTL`, avec en ligne / salon ouvert `code` / en partie `busy`), `{t:'invite', name}` (hôte d'un salon ouvert,
+  vers un ami seulement, une toutes les `INVITE_GAP` s) → `{t:'invite', name, code}` chez l'ami. Salle d'armes :
+  `#lbFriends` (`lobbyFriendsHTML` : Rejoindre / Inviter), bandeau `#lbInvite`. Tests : `AmisTest` (fausse API) dans
+  tests/test_server.py, `test_amis`/`test_classement_*` dans tests/test_comptes.py, scénario navigateur `amis`.
 - **Héros verrouillés** : seul `FIRST_HERO` (Gladiateur) au départ ; chaîne = ordre de `HERO_IDS` / `HEROS`
   (defis.rs `debloques` : un défi réussi du héros précédent débloque le suivant, renvoyé dans le profil). Sans
   compte (invité, expliqué par `#acGuest` dans le bloc Compte) : Gladiateur seulement. La sim reçoit les listes (`new DungeonSim(seed, kinds, wpns, unlocked)`,

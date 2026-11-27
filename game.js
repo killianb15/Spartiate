@@ -107,7 +107,8 @@ let gfx = GFX[gfxId];
 // En ligne : les deux navigateurs font tourner la même simulation (sim.js) et s'échangent
 // leurs touches ; rollback.js corrige les prédictions. Voir net.js pour le transport.
 // hall : salon ouvert depuis la salle d'armes (listé sur le serveur) ; halls : salons des autres, à rejoindre
-const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [] };
+// friends : amis du compte et leur état ({name, online, code, busy}, envoyé par le serveur) ; invite : invitation reçue
+const net = { ws: null, link: null, role: null, me: 0, live: false, code: '', urls: [], peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [], friends: [], invite: null };
 
 // =====================================================================
 //  Modèles
@@ -4803,7 +4804,7 @@ function netSend(m) { if (net.ws?.readyState === 1) net.ws.send(JSON.stringify(m
 function netClose() {
   const ws = net.ws;
   net.link?.close();
-  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [] });
+  Object.assign(net, { ws: null, link: null, role: null, me: 0, peer: false, peerKind: null, peerWpn: null, peerSpell: '', peerName: '', peerUnlocked: [], hall: false, halls: [], friends: [], invite: null });
   rb = null;
   coop = null;
   if (ws) ws.close();
@@ -4823,7 +4824,11 @@ function netConnect(first) {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   net.ws = ws;
   let opened = false;
-  ws.onopen = () => { opened = true; lobby.down = false; ws.send(JSON.stringify(first)); };
+  ws.onopen = () => {
+    opened = true; lobby.down = false;
+    if (compte.profil && compte.jeton) ws.send(JSON.stringify({ t: 'ident', token: compte.jeton }));   // présence pour les amis
+    ws.send(JSON.stringify(first));
+  };
   ws.onmessage = (e) => {
     if (net.ws !== ws) return;
     let m;
@@ -4885,7 +4890,18 @@ function netMsg(m) {
       net.halls = (Array.isArray(m.rooms) ? m.rooms : []).filter((r) => r && /^[A-Z]{4}$/.test(r.code) && HEROES[r.kind])
         .map((r) => ({ code: r.code, kind: r.kind, wpn: WEAPON_IDS.includes(r.wpn) ? r.wpn : '', name: cleanName(r.name) }));
       break;
+    case 'friends':
+      net.friends = (Array.isArray(m.friends) ? m.friends : []).map((a) => ({ name: cleanName(a?.name), online: !!a?.online,
+        code: /^[A-Z]{4}$/.test(a?.code) ? a.code : '', busy: !!a?.busy })).filter((a) => a.name);
+      break;
+    case 'invite':
+      if (cleanName(m.name) && /^[A-Z]{4}$/.test(m.code) && !net.peer) { net.invite = { name: cleanName(m.name), code: m.code }; sfx.cheer?.(0.4); }
+      break;
+    case 'invited':
+      lobby.msg = m.ok ? `Invitation envoyée à ${cleanName(m.name)}.` : `${cleanName(m.name)} n’est pas dans sa salle d’armes.`;
+      break;
     case 'joined':
+      net.invite = null;
       Object.assign(net, { role: 'guest', me: 1, code: String(m.code ?? ''), peer: true, hall: false });
       lobby.msg = `Connecté au salon ${net.code} : la partie va commencer…`;
       netSend({ t: 'hello', ...myHero() });
@@ -4996,7 +5012,8 @@ function netMsg(m) {
 // =====================================================================
 const ACCOUNT_KEY = 'spartiate-jeton';
 // ready : profil chargé (ou absent pour de bon) : on peut appliquer les verrous du menu
-const compte = { dispo: false, ready: false, jeton: '', profil: null, top: null, defis: null, msg: '' };
+// top : classement ouvert ({ tab: 'monde' | 'amis', monde: { classement, moi }, amis: [...] }) ; amis : panneau des amis
+const compte = { dispo: false, ready: false, jeton: '', profil: null, top: null, defis: null, amis: null, msg: '' };
 try { compte.jeton = localStorage.getItem(ACCOUNT_KEY) || ''; } catch (e) { /* ignoré */ }
 const myName = () => compte.profil?.pseudo ?? '';
 // héros débloqués : ceux du compte ; sans compte, le premier seulement
@@ -5037,6 +5054,20 @@ async function setupAccount() {
   $('acOut').onclick = accountLogout;
   $('acTop').onclick = accountTop;
   $('acDefis').onclick = accountChallenges;
+  $('acAmis').onclick = accountFriends;
+  $('acAmiAdd').onclick = () => friendAct('ajouter', $('acAmiPseudo').value.trim());
+  $('acAmiPseudo').onkeydown = (e) => { if (e.key === 'Enter') friendAct('ajouter', $('acAmiPseudo').value.trim()); };
+  $('acAmisBody').onclick = (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    // retirer un ami : deux clics (le premier demande confirmation)
+    if (b.dataset.act === 'retirer' && !b.classList.contains('sure')) { b.classList.add('sure'); b.textContent = 'Retirer ?'; return; }
+    friendAct(b.dataset.act, b.dataset.name);
+  };
+  $('acTopList').onclick = (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (b && compte.top) { compte.top.tab = b.dataset.tab; accountTopLoad(); }
+  };
   compte.dispo = !!(await api('/api/etat')).data.comptes;
   if (compte.dispo && compte.jeton) {
     const r = await api('/api/profil');
@@ -5059,21 +5090,94 @@ async function accountLogin(create) {
 async function accountLogout() {
   await api('/api/deconnexion', {});
   setJeton('');
-  compte.profil = compte.top = compte.defis = null;
+  compte.profil = compte.top = compte.defis = compte.amis = null;
   compte.msg = '';
   accountRender();
 }
+// Classements : mondial (10 premiers + sa place) ou entre amis (rang mondial affiché)
 async function accountTop() {
-  compte.defis = null;
+  compte.defis = compte.amis = null;
   if (compte.top) { compte.top = null; accountRender(); return; }
-  const r = await api('/api/classement');
-  compte.top = r.ok ? r.data.classement : null;
+  compte.top = { tab: 'monde', monde: null, amis: null };
+  await accountTopLoad();
+}
+async function accountTopLoad() {
+  const t = compte.top, tab = t.tab;
+  const r = await api(tab === 'amis' ? '/api/classement/amis' : '/api/classement');
+  if (compte.top !== t) return;
+  if (r.ok) t[tab] = tab === 'amis' ? r.data.classement : r.data;
+  else if (r.status === 401) sessionLost();
   compte.msg = r.ok ? '' : r.data.erreur || 'Erreur.';
   accountRender();
 }
+// rang : place affichée (entre amis : place dans la liste ; le rang mondial va dans l'info-bulle)
+const topRow = (x, rang = x.rang) => {
+  const hero = HEROES[x.heros]?.name ?? '', wpn = WEAPONS[x.arme]?.name ?? '';
+  const tip = [rang !== x.rang ? `${+x.rang}ᵉ au classement mondial` : '', wpn ? `meilleure partie : ${hero} · ${wpn}` : ''].filter(Boolean).join(' · ');
+  return `<li data-r="${+rang}" class="r${+rang}${x.pseudo === myName() ? ' me' : ''}"${tip ? ` title="${esc(tip)}"` : ''}>`
+    + `<span class="tn"><b>${esc(x.pseudo)}</b>${hero ? ` <span class="th">${esc(hero)}</span>` : ''}</span>`
+    + `<span class="ts">salle <b>${+x.record}</b> · ${+x.ennemis} ennemis</span></li>`;
+};
+function topHTML(t) {
+  const tabs = `<div class="netrow tabs"><button data-tab="monde"${t.tab === 'monde' ? ' class="accent"' : ''}>Monde</button>`
+    + `<button data-tab="amis"${t.tab === 'amis' ? ' class="accent"' : ''}>Amis</button></div>`;
+  const d = t[t.tab];
+  if (!d) return tabs + '<i>Chargement…</i>';
+  if (t.tab === 'amis') {
+    // rangs entre amis (le rang mondial reste en info-bulle)
+    // seuls les joueurs ayant fini un donjon sont classés : le joueur lui-même peut manquer
+    const ol = '<ol>' + d.map((x, i) => topRow(x, i + 1)).join('') + '</ol>';
+    const others = d.some((x) => x.pseudo !== myName()), mine = d.some((x) => x.pseudo === myName());
+    return tabs + (others ? ol : '<i>Ajoute des amis (bouton « Amis ») pour vous comparer ici.</i>' + (d.length ? ol : ''))
+      + (others && !mine ? '<i>Termine un donjon pour entrer au classement.</i>' : '');
+  }
+  const list = Array.isArray(d.classement) ? d.classement : [];
+  if (!list.length) return tabs + '<i>Personne au classement pour l’instant.</i>';
+  const me = d.moi, inTop = me && list.some((x) => x.pseudo === me.pseudo);
+  return tabs + '<ol>' + list.map(topRow).join('') + (me && !inTop ? '<li class="gap">⋮</li>' + topRow(me) : '') + '</ol>'
+    + (compte.profil && !me ? '<i>Termine un donjon pour entrer au classement.</i>' : '');
+}
+// Amis : ajouter (ou accepter), refuser / annuler / retirer ; le serveur renvoie la liste à jour
+async function accountFriends() {
+  compte.top = compte.defis = null;
+  if (compte.amis) { compte.amis = null; accountRender(); return; }
+  compte.amis = { amis: [], recues: [], envoyees: [], msg: '', load: true };
+  accountRender();
+  const r = await api('/api/amis');
+  if (!compte.amis) return;
+  if (r.ok) Object.assign(compte.amis, r.data, { load: false });
+  else if (r.status === 401) sessionLost();
+  compte.msg = r.ok ? '' : r.data.erreur || 'Erreur.';
+  accountRender();
+}
+async function friendAct(act, pseudo) {
+  if (!compte.amis || !pseudo) return;
+  const r = await api(`/api/amis/${act === 'ajouter' ? 'ajouter' : 'retirer'}`, { pseudo });
+  if (!compte.amis) return;
+  if (r.ok) {
+    Object.assign(compte.amis, r.data, { msg: act === 'ajouter' ? String(r.data.msg ?? '') : '', load: false });
+    if (act === 'ajouter') $('acAmiPseudo').value = '';
+    compte.msg = '';
+  } else if (r.status === 401) sessionLost();
+  else compte.msg = r.data.erreur || 'Erreur.';
+  accountRender();
+}
+function friendsHTML(a) {
+  if (a.load) return '<i>Chargement…</i>';
+  const names = (l) => (Array.isArray(l) ? l : []).map((x) => cleanName(typeof x === 'string' ? x : x?.pseudo)).filter(Boolean);
+  const btn = (act, n, txt, cls = '') => `<button data-act="${act}" data-name="${esc(n)}"${cls ? ` class="${cls}"` : ''}>${txt}</button>`;
+  const rec = names(a.recues), env = names(a.envoyees);
+  const amis = (Array.isArray(a.amis) ? a.amis : []).filter((x) => cleanName(x?.pseudo));
+  return (a.msg ? `<div class="ok-msg">${esc(a.msg)}</div>` : '')
+    + (rec.length ? '<h4>Demandes reçues</h4>' + rec.map((n) => `<div class="am"><span><b>${esc(n)}</b></span>${btn('ajouter', n, 'Accepter', 'accent')}${btn('refuser', n, 'Refuser', 'no')}</div>`).join('') : '')
+    + `<h4>Mes amis (${amis.length})</h4>`
+    + (amis.length ? amis.map((x) => `<div class="am"><span><b>${esc(x.pseudo)}</b> · record : salle ${+x.record}</span>${btn('retirer', x.pseudo, '✕', 'no')}</div>`).join('')
+      : '<i>Pas encore d’amis : ajoute le pseudo d’un joueur. Dans la salle d’armes, tu verras ensuite s’il est là et tu pourras rejoindre son salon ou l’inviter.</i>')
+    + (env.length ? '<h4>En attente de réponse</h4>' + env.map((n) => `<div class="am"><span>${esc(n)}</span>${btn('annuler', n, 'Annuler')}</div>`).join('') : '');
+}
 // Défis des héros (définis et comptés par le serveur : api/src/defis.rs), regroupés par héros
 async function accountChallenges() {
-  compte.top = null;
+  compte.top = compte.amis = null;
   if (compte.defis) { compte.defis = null; accountRender(); return; }
   const r = await api('/api/defis');
   compte.defis = r.ok ? r.data.defis : null;
@@ -5121,12 +5225,12 @@ function accountRender() {
   $('acDefis').classList.toggle('accent', !!compte.defis);
   $('acDefisList').classList.toggle('hidden', !compte.defis);
   if (compte.defis) $('acDefisList').innerHTML = challengesHTML(compte.defis);
+  $('acAmis').textContent = compte.amis ? 'Fermer' : 'Amis';
+  $('acAmis').classList.toggle('accent', !!compte.amis);
+  $('acAmisList').classList.toggle('hidden', !compte.amis);
+  if (compte.amis) $('acAmisBody').innerHTML = friendsHTML(compte.amis);
   $('acTopList').classList.toggle('hidden', !compte.top);
-  if (compte.top) {
-    $('acTopList').innerHTML = compte.top.length
-      ? '<ol>' + compte.top.map((x) => `<li${x.pseudo === myName() ? ' class="me"' : ''}><b>${esc(x.pseudo)}</b> · salle ${x.record} · ${x.ennemis} ennemis</li>`).join('') + '</ol>'
-      : '<i>Personne au classement pour l’instant.</i>';
-  }
+  if (compte.top) $('acTopList').innerHTML = topHTML(compte.top);
   $('acMsg').textContent = compte.msg;
   lobby.key = '';     // le pseudo apparaît dans le panneau des salons
   if (compte.ready && clampHeroes() && game.phase === 'menu') menuScene();
@@ -5180,6 +5284,24 @@ function setupLobby() {
     lobbyRender();
   };
   $('lbJoin').onclick = joinCode;
+  // amis : rejoindre leur salon, ou les inviter dans le sien ; invitation reçue : rejoindre ou ignorer
+  $('lbFriends').onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    b.blur();
+    if (b.dataset.code) { lobby.msg = 'Connexion…'; lobbyWs({ t: 'join', code: b.dataset.code }); }
+    else if (b.dataset.invite) netSend({ t: 'invite', name: b.dataset.invite });
+    lobbyRender();
+  };
+  $('lbInvite').onclick = (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    b.blur();
+    const inv = net.invite;
+    net.invite = null;
+    if (inv && b.dataset.act === 'join') { lobby.msg = 'Connexion…'; lobbyWs({ t: 'join', code: inv.code }); }
+    lobbyRender();
+  };
   $('lbCode').onkeydown = (e) => { if (e.key === 'Enter') joinCode(); };
 }
 // à chaque image : panneau visible dans la salle d'armes (seul) ; liste des salons redemandée toutes
@@ -5197,18 +5319,42 @@ function lobbySync() {
   if (now >= lobby.next) {
     lobby.next = now + (lobby.down ? 10000 : 2000);    // serveur injoignable : on réessaie moins souvent
     if (!net.ws) netConnect({ t: 'list' });
-    else if (net.ws.readyState === 1 && !net.peer) netSend({ t: 'list' });
+    else if (net.ws.readyState === 1 && !net.peer) {
+      netSend({ t: 'list' });
+      if (compte.profil) netSend({ t: 'friends' });
+    }
   }
   lobbyRender();
 }
-let lobbyHallsRef = null;
+let lobbyHallsRef = null, lobbyFriendsRef = null, lobbyInviteRef = null;
+// amis dans le panneau des salons : salon ouvert (rejoindre), dans la salle d'armes (inviter si mon salon est
+// ouvert), en partie, hors ligne ; les hors-ligne sont seulement comptés
+const FRIENDS_SHOWN = 6;
+function lobbyFriendsHTML() {
+  if (!compte.profil) return '';
+  const fr = net.friends;
+  if (!fr.length) return '<h4>Amis</h4><div class="more">Ajoute des amis depuis le menu (Compte → Amis) pour les retrouver ici.</div>';
+  const myHall = net.role === 'host' && net.hall;
+  const on = fr.filter((a) => a.online), off = fr.length - on.length;
+  const row = (a) => a.code
+    ? `<div class="fr hall"><i></i><span><b>${esc(a.name)}</b> · salon ouvert</span><button data-code="${esc(a.code)}">Rejoindre</button></div>`
+    : a.busy ? `<div class="fr busy"><i></i><span><b>${esc(a.name)}</b> · en partie</span></div>`
+      : `<div class="fr on"><i></i><span><b>${esc(a.name)}</b> · salle d'armes</span>${myHall ? `<button data-invite="${esc(a.name)}">Inviter</button>` : ''}</div>`;
+  return `<h4>Amis · ${on.length} en ligne</h4>` + on.slice(0, FRIENDS_SHOWN).map(row).join('')
+    + (on.length > FRIENDS_SHOWN ? `<div class="more">et ${on.length - FRIENDS_SHOWN} autre${on.length - FRIENDS_SHOWN > 1 ? 's' : ''} en ligne</div>` : '')
+    + (!on.length ? '<div class="fr off"><i></i><span>Aucun ami en ligne</span></div>' : '')
+    + (off ? `<div class="more">${off} hors ligne</div>` : '')
+    + (on.some((a) => !a.code && !a.busy) && !myHall ? '<div class="more">Ouvre ton salon pour inviter un ami.</div>' : '');
+}
 function lobbyRender() {
   const nm = myName();
   // comparaison directe sans JSON.stringify à chaque image
   if (lobby.key && lobby.r === net.role && lobby.c === net.code && lobby.h === net.hall
-      && lobby.m === lobby.msg && lobby.d === lobby.down && lobby.n === nm && lobbyHallsRef === net.halls) return;
+      && lobby.m === lobby.msg && lobby.d === lobby.down && lobby.n === nm && lobbyHallsRef === net.halls
+      && lobbyFriendsRef === net.friends && lobbyInviteRef === net.invite) return;
   lobby.r = net.role; lobby.c = net.code; lobby.h = net.hall;
   lobby.m = lobby.msg; lobby.d = lobby.down; lobby.n = nm; lobbyHallsRef = net.halls;
+  lobbyFriendsRef = net.friends; lobbyInviteRef = net.invite;
   lobby.key = 'ok';
   const who = (r) => `${r.name ? `<b>${esc(r.name)}</b> · ` : ''}${esc(HEROES[r.kind].name)}${r.wpn ? ' · ' + esc(WEAPONS[r.wpn].name) : ''}`;
   $('lbMine').innerHTML = net.role === 'host' && net.hall
@@ -5217,6 +5363,10 @@ function lobbyRender() {
   $('lbList').innerHTML = lobby.down ? '<i>Serveur de jeu injoignable : lance le jeu avec jouer.bat (Windows) ou jouer.sh (Linux).</i>'
     : net.halls.length ? net.halls.map((r) => `<button data-code="${esc(r.code)}"><span>${who(r)}</span><b>${esc(r.code)}</b></button>`).join('')
       : '<i>Aucun autre salon ouvert pour l’instant.</i>';
+  $('lbFriends').innerHTML = lobby.down ? '' : lobbyFriendsHTML();
+  const inv = net.invite;
+  $('lbInvite').innerHTML = inv && !net.peer ? `<b>${esc(inv.name)}</b> t’invite dans son salon <b>${esc(inv.code)}</b> !`
+    + '<div class="lb-row"><button class="main" data-act="join">Rejoindre</button><button data-act="no">Plus tard</button></div>' : '';
   setTxt('lbMsg', lobby.msg);
 }
 

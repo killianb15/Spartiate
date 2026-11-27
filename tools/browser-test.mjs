@@ -13,6 +13,8 @@
 //     carte : la carte des chemins (choix au clavier, consultation M), un événement, une élite, un trésor ;
 //     biomes : une salle de chaque biome, boss compris ; boss : le colosse et l'outil de débogage F2 ;
 //     gloves : les gants de boxe, gros plans du héros au repos, en garde, en frappe, puis en salle 1)
+//  compte / amis : avec un serveur relié à l'API de TEST (SPARTIATE_API=http://127.0.0.1:8125) ; amis : demande d'ami,
+//     acceptation, classements Monde / Amis, salon d'un ami dans la salle d'armes, invitation reçue puis acceptée
 //  Sortie : CHARGE true/false, lignes ETAT (combattants : [type, camp, état, PV]), ERREURS n + détail.
 //  Le cache HTTP est désactivé (sinon un ancien game.js peut être servi).
 // =====================================================================
@@ -94,6 +96,57 @@ if (scenario === 'compte') {
   console.log('PROFIL', await txt('acProfil'), '| défis réussis :', await evalJs(`[...document.querySelectorAll('#acDefisList .df.ok .dn')].map((e) => e.textContent).join(', ')`));
   await evalJs(`document.getElementById('acDefisList').scrollTop = 0; true`);
   await sleep(500); await shot('defis-apres');
+  console.log('ERREURS', errors.length);
+  for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
+  ws.close();
+  process.exit(0);
+}
+if (scenario === 'amis') {
+  // amis et classements : comme « compte », avec un serveur relié à l'API de TEST. Un second joueur (B) est
+  // simulé depuis la page : comptes et requêtes par fetch, présence et salon par un WebSocket à lui.
+  const n = Math.floor(Math.random() * 1e5), A = 'Achille' + n, B = 'Patrocle' + n;
+  const txt = (id) => evalJs(`document.getElementById('${id}').textContent`);
+  await send('Page.navigate', { url: GAME + '/?debug' });
+  await waitFor(`!document.getElementById('menu').classList.contains('hidden') && !document.getElementById('acctSec').classList.contains('hidden')`, 60000);
+  await evalJs(`document.getElementById('acPseudo').value = '${A}'; document.getElementById('acMdp').value = 'thermopyles'; document.getElementById('acNew').click(); true`);
+  console.log('CONNECTE', await waitFor(`!document.getElementById('acctIn').classList.contains('hidden')`, 15000));
+  // B : compte, une partie (salle 9), demande d'ami à A
+  await evalJs(`(async () => {
+    const post = (u, b, j) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(j ? { Authorization: 'Bearer ' + j } : {}) }, body: JSON.stringify(b) }).then((r) => r.json());
+    const r = await post('/api/inscription', { pseudo: '${B}', mdp: 'patrocle-1' });
+    window.jB = r.jeton;
+    await post('/api/partie', { salle: 9, ennemis: 40, heros: 'soldier', arme: 'spear' }, jB);
+    await post('/api/amis/ajouter', { pseudo: '${A}' }, jB);
+    return true; })()`);
+  await evalJs(`document.getElementById('acAmis').click(); true`);
+  console.log('DEMANDE', await waitFor(`document.querySelector('#acAmisBody button[data-act="ajouter"]') !== null`, 15000));
+  await sleep(400); await shot('amis-demande');
+  await evalJs(`document.querySelector('#acAmisBody button[data-act="ajouter"]').click(); true`);
+  console.log('AMI', await waitFor(`document.querySelector('#acAmisBody button[data-act="retirer"]') !== null`, 15000), await txt('acAmisBody'));
+  await sleep(400); await shot('amis-liste');
+  await evalJs(`document.getElementById('acTop').click(); true`);
+  await waitFor(`document.querySelectorAll('#acTopList li').length > 0`, 15000);
+  console.log('MONDE', await txt('acTopList'));
+  await evalJs(`document.querySelector('#acTopList button[data-tab="amis"]').click(); true`);
+  console.log('CLASSEMENT AMIS', await waitFor(`document.querySelector('#acTopList button[data-tab="amis"].accent') && document.querySelectorAll('#acTopList li').length > 0`, 15000), await txt('acTopList'));
+  await sleep(400); await shot('classement-amis');
+  // B ouvre son salon ; A entre dans sa salle d'armes et le voit dans « Amis »
+  await evalJs(`(() => { const ws = new WebSocket('ws://' + location.host + '/ws'); window.wsB = ws; window.msgB = [];
+    ws.onmessage = (e) => msgB.push(JSON.parse(e.data));
+    ws.onopen = () => { ws.send(JSON.stringify({ t: 'ident', token: jB })); ws.send(JSON.stringify({ t: 'open', kind: 'orc', wpn: 'axe', token: jB })); };
+    return true; })()`);
+  await waitFor(`msgB.some((m) => m.t === 'created')`, 10000);
+  await evalJs(`(() => { __game.startDungeon({ mode: 'solo', p1: 'soldier', w1: 'sword' }); return true; })()`);
+  await waitFor(`__game.game.phase === 'hub'`, 30000);
+  console.log('SALON AMI', await waitFor(`document.querySelector('#lbFriends button[data-code]') !== null`, 20000), await txt('lbFriends'));
+  await sleep(1000); await shot('salle-armes-amis');
+  // B invite A : bandeau d'invitation, A rejoint
+  await sleep(2200);
+  await evalJs(`wsB.send(JSON.stringify({ t: 'invite', name: '${A}' })); true`);
+  console.log('INVITATION', await waitFor(`document.getElementById('lbInvite').textContent.length > 0`, 10000), await txt('lbInvite'));
+  await sleep(600); await shot('invitation');
+  await evalJs(`document.querySelector('#lbInvite button[data-act="join"]').click(); true`);
+  console.log('REJOINT', await waitFor(`msgB.some((m) => m.t === 'peer')`, 10000), await evalJs(`msgB.map((m) => m.t).join(',')`));
   console.log('ERREURS', errors.length);
   for (const e of [...new Set(errors)].slice(0, 30)) console.log('  ', e);
   ws.close();

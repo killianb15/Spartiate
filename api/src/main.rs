@@ -1,10 +1,11 @@
-//! API des comptes de Spartiate (profil, statistiques, classement).
+//! API des comptes de Spartiate (profil, statistiques, classements, amis).
 //!
 //! Elle n'est jamais exposée directement : serveur.py relaie /api/* vers elle (en ajoutant
 //! X-Real-IP), et elle seule parle à PostgreSQL, sur un réseau Docker interne sans port publié
 //! (voir docker-compose.yml). Variables : DATABASE_URL, ECOUTE (127.0.0.1:8124 par défaut),
 //! FREIN_CONNEXION / FREIN_INSCRIPTION (essais par adresse : 10 / 5 min, 5 / heure).
 
+mod amis;
 mod defis;
 mod securite;
 
@@ -303,16 +304,6 @@ async fn partie(State(e): State<Etat>, h: HeaderMap, corps: Bytes) -> Rep<serde_
     Ok(Json(json!({ "profil": profil_de(&e.db, j).await?, "nouveaux": nouveaux })))
 }
 
-async fn classement(State(e): State<Etat>) -> Rep<serde_json::Value> {
-    let c = sqlx::query_as::<_, Profil>(&format!(
-        "{PROFIL} WHERE parties > 0 ORDER BY record DESC, ennemis DESC, id LIMIT $1"
-    ))
-    .bind(CLASSEMENT)
-    .fetch_all(&e.db)
-    .await?;
-    Ok(Json(json!({ "classement": c })))
-}
-
 async fn inconnu() -> Erreur {
     Erreur(StatusCode::NOT_FOUND, "Inconnu.")
 }
@@ -355,7 +346,11 @@ async fn main() {
         .route("/api/deconnexion", post(deconnexion))
         .route("/api/profil", get(profil))
         .route("/api/partie", post(partie))
-        .route("/api/classement", get(classement))
+        .route("/api/classement", get(amis::classement))
+        .route("/api/classement/amis", get(amis::classement_amis))
+        .route("/api/amis", get(amis::amis))
+        .route("/api/amis/ajouter", post(amis::ajouter))
+        .route("/api/amis/retirer", post(amis::retirer))
         .route("/api/defis", get(liste_defis))
         .fallback(inconnu)
         .layer(DefaultBodyLimit::max(CORPS_MAX))

@@ -197,6 +197,61 @@ class ApiTest(unittest.TestCase):
             self.assertEqual(self.api('/api/partie', body, jeton=a)[0], 400, body)
         self.assertEqual(self.api('/api/partie', {'salle': 3, 'ennemis': 1})[0], 401)
 
+    def test_classement_place_et_meilleure_partie(self):
+        a, b, c = self.inscrire('Achille'), self.inscrire('Hector'), self.inscrire('Paris')
+        self.api('/api/partie', {'salle': 12, 'ennemis': 30, 'heros': 'soldier', 'arme': 'spear'}, jeton=a)
+        self.api('/api/partie', {'salle': 4, 'ennemis': 5, 'heros': 'soldier', 'arme': 'sword'}, jeton=a)
+        self.api('/api/partie', {'salle': 15, 'ennemis': 1, 'heros': 'soldier', 'arme': 'axe'}, jeton=b)
+        st, r = self.api('/api/classement', jeton=a)
+        self.assertEqual(st, 200)
+        self.assertEqual([(x['rang'], x['pseudo'], x['arme']) for x in r['classement']], [(1, 'Hector', 'axe'), (2, 'Achille', 'spear')])
+        self.assertEqual((r['moi']['rang'], r['moi']['pseudo'], r['moi']['heros']), (2, 'Achille', 'soldier'))
+        self.assertIsNone(self.api('/api/classement', jeton=c)[1]['moi'], 'aucune partie : pas classé')
+        self.assertIsNone(self.api('/api/classement')[1]['moi'])
+        self.assertEqual(self.api('/api/classement/amis')[0], 401)
+        st, r = self.api('/api/classement/amis', jeton=a)
+        self.assertEqual([x['pseudo'] for x in r['classement']], ['Achille'])
+
+    def test_amis(self):
+        a, b, c = self.inscrire('Achille'), self.inscrire('Hector'), self.inscrire('Patrocle')
+        self.assertEqual(self.api('/api/amis')[0], 401)
+        self.assertEqual(self.api('/api/amis', jeton=a), (200, {'amis': [], 'recues': [], 'envoyees': []}))
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'Personne'}, jeton=a)[0], 404)
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'x<script>'}, jeton=a)[0], 404)
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'achille'}, jeton=a)[0], 400, 'soi-même')
+        st, r = self.api('/api/amis/ajouter', {'pseudo': 'hector'}, jeton=a)      # casse ignorée
+        self.assertEqual((st, r['envoyees'], r['msg']), (200, ['Hector'], 'Demande envoyée à Hector.'))
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'Hector'}, jeton=a)[1]['msg'], 'Demande déjà envoyée à Hector.')
+        self.assertEqual(self.api('/api/amis', jeton=b)[1]['recues'], ['Achille'])
+        st, r = self.api('/api/amis/ajouter', {'pseudo': 'Achille'}, jeton=b)    # accepter
+        self.assertEqual((r['amis'][0]['pseudo'], r['recues'], r['msg']), ('Achille', [], 'Achille est maintenant ton ami.'))
+        self.assertEqual([x['pseudo'] for x in self.api('/api/amis', jeton=a)[1]['amis']], ['Hector'])
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'Achille'}, jeton=b)[1]['msg'], 'Achille est déjà ton ami.')
+        # classement entre amis : Patrocle n'y est pas (pas ami), rang mondial gardé
+        for j, salle in [(a, 9), (b, 14), (c, 30)]:
+            self.api('/api/partie', {'salle': salle, 'ennemis': 3}, jeton=j)
+        st, r = self.api('/api/classement/amis', jeton=a)
+        self.assertEqual([(x['pseudo'], x['rang']) for x in r['classement']], [('Hector', 2), ('Achille', 3)])
+        # refuser / retirer
+        self.api('/api/amis/ajouter', {'pseudo': 'Patrocle'}, jeton=a)
+        self.assertEqual(self.api('/api/amis/retirer', {'pseudo': 'Achille'}, jeton=c)[1]['recues'], [], 'refusée')
+        self.assertEqual(self.api('/api/amis', jeton=a)[1]['envoyees'], [])
+        self.assertEqual(self.api('/api/amis/retirer', {'pseudo': 'Hector'}, jeton=a)[1]['amis'], [])
+        self.assertEqual(self.api('/api/amis', jeton=b)[1]['amis'], [])
+        self.assertEqual(self.api('/api/amis/retirer', {'pseudo': 'Inconnu'}, jeton=a)[0], 200)
+        # demandes croisées : la seconde accepte la première, une seule amitié
+        self.api('/api/amis/ajouter', {'pseudo': 'Patrocle'}, jeton=a)
+        r = self.api('/api/amis/ajouter', {'pseudo': 'Achille'}, jeton=c)[1]
+        self.assertEqual(([x['pseudo'] for x in r['amis']], r['recues'], r['envoyees']), (['Achille'], [], []))
+
+    def test_trop_de_demandes_d_amis(self):
+        a = self.inscrire('Spammeur')
+        for i in range(20):
+            self.inscrire(f'Cible{i}')
+            self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': f'Cible{i}'}, jeton=a)[0], 200)
+        self.inscrire('Cible20')
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'Cible20'}, jeton=a)[0], 429)
+
     def test_defis(self):
         st, r = self.api('/api/defis')
         self.assertEqual(st, 200)
@@ -315,6 +370,10 @@ class RelaisTest(unittest.TestCase):
         st, r = self.api('/api/inscription', {'pseudo': 'Thémistocle', 'mdp': 'salamine'})
         self.assertEqual(st, 200, r)
         self.assertEqual(self.api('/api/profil', jeton=r['jeton'])[1]['profil']['pseudo'], 'Thémistocle')
+        j = r['jeton']
+        self.assertEqual(self.api('/api/amis', jeton=j)[0], 200, 'routes des amis relayées')
+        self.assertEqual(self.api('/api/classement/amis', jeton=j)[0], 200)
+        self.assertEqual(self.api('/api/amis/ajouter', {'pseudo': 'Personne'}, jeton=j)[0], 404)
         self.assertEqual(self.api('/api/sante')[0], 404, 'route interne non relayée')
         self.assertEqual(self.api('/api/inscription', raw=b'{"x": "' + b'a' * 5000 + b'"}')[0], 413)
 
